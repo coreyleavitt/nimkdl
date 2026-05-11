@@ -2,7 +2,7 @@
 ## their subsystems as #519+ subissues close.
 
 import std/unittest
-import kdl
+import ../src/kdl
 
 suite "kdl smoke":
   test "library version exported":
