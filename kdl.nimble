@@ -26,3 +26,4 @@ task test, "Run unit tests":
   const cmd = "nim c -r --hints:off -d:nimCallDepthLimit=20000"
   exec cmd & " tests/test_smoke.nim"
   exec cmd & " tests/test_spans.nim"
+  exec cmd & " tests/test_intern.nim"
