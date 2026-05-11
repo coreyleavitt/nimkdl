@@ -14,7 +14,7 @@
 ## Downstream callers (amoxtli rule loader, config loader, tests) import only
 ## this module.
 
-import ./spans, ./intern, ./lexer
-export spans, intern, lexer
+import ./spans, ./intern, ./lexer, ./ast
+export spans, intern, lexer, ast
 
 const KdlLibVersion* = "0.0.1"
