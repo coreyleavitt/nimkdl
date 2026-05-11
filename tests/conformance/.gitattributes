@@ -1,0 +1,3 @@
+# The corpus is byte-exact — CRLF-bearing inputs are part of what we
+# test. Don't let git mangle line endings on these files.
+test_cases/** -text
