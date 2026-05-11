@@ -90,12 +90,19 @@ func parseErr(code: ParseErrorCode, span: Span, hint = ""): ParseError =
 # ---------------------------------------------------------------------------
 
 proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] =
-  ## Consumes `(IDENT)`. Caller has already confirmed the leading `(`.
+  ## Consumes `(name)`. Name is a bare ident OR quoted string (incl. "").
+  ## Caller has already confirmed the leading `(`.
   discard p.advance()  # consume `(`
-  if not p.check(tkIdent):
+  var handle: InternedStr
+  case p.peek.kind
+  of tkIdent:
+    handle = p.advance().ident
+  of tkString:
+    let tok = p.advance()
+    handle = p.doc.interner.intern(tok.strVal)
+  else:
     return err[InternedStr, ParseError](parseErr(peParseExpected,
-      p.peek.span, "expected identifier inside type annotation"))
-  let handle = p.advance().ident
+      p.peek.span, "expected identifier or string inside type annotation"))
   if not p.check(tkRParen):
     return err[InternedStr, ParseError](parseErr(peParseExpected,
       p.peek.span, "expected ')' to close type annotation"))
@@ -152,6 +159,14 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] =
   of tkString:
     discard p.advance()
     var v = newStringValue(tok.strVal, tok.span)
+    v.typeAnnotation = anno
+    return ok[KdlValue, ParseError](v)
+  of tkIdent:
+    # KDL v2 allows bare identifiers as string values. The lexer already
+    # interned the bytes; resolve them back through the doc's interner
+    # so the parser stays a single source of truth on the string contents.
+    discard p.advance()
+    var v = newStringValue(p.doc.interner.lookup(tok.ident), tok.span)
     v.typeAnnotation = anno
     return ok[KdlValue, ParseError](v)
   of tkRawString:
@@ -214,8 +229,21 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] =
   ## property; anything else starting with a value (incl. a type-annotated
   ## value) is an argument.
   let startSpan = p.peek.span
-  # Property: bare ident or quoted string, followed by `=`
-  if (p.peek.kind == tkIdent or p.peek.kind == tkString) and
+  # Reject keyword-shape tokens as property keys per v2 spec.
+  if p.peek.kind == tkKeyword and p.peek(1).kind == tkEquals:
+    return err[KdlEntry, ParseError](parseErr(peParseUnexpected,
+      p.peek.span, "keyword cannot be used as a property key"))
+  # Reject bare idents that look like reserved keywords (true/false/null
+  # /inf/-inf/nan). v2 forbids these in key position even without `#`.
+  if p.peek.kind == tkIdent and p.peek(1).kind == tkEquals:
+    let kw = p.doc.interner.lookup(p.peek.ident)
+    if kw in ["true", "false", "null", "inf", "-inf", "nan"]:
+      return err[KdlEntry, ParseError](parseErr(peParseUnexpected,
+        p.peek.span,
+        "reserved keyword '" & kw & "' cannot be used as a property key"))
+  # Property: bare ident, quoted string, or raw string followed by `=`.
+  if (p.peek.kind == tkIdent or p.peek.kind == tkString or
+      p.peek.kind == tkRawString) and
      p.peek(1).kind == tkEquals:
     var key: InternedStr
     case p.peek.kind
@@ -223,6 +251,9 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] =
     of tkString:
       let tok = p.advance()
       key = p.doc.interner.intern(tok.strVal)
+    of tkRawString:
+      let tok = p.advance()
+      key = p.doc.interner.intern(tok.rawVal)
     else: discard  # unreachable (guarded above)
     discard p.advance()  # consume `=`
     let vRes = p.parseValue()
@@ -241,7 +272,7 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] =
 
 func canStartValue(t: Token): bool {.inline.} =
   case t.kind
-  of tkString, tkRawString, tkNumber, tkKeyword, tkLParen: true
+  of tkString, tkRawString, tkNumber, tkKeyword, tkLParen, tkIdent: true
   else: false
 
 func canStartEntry(p: Parser): bool =
@@ -272,7 +303,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] =
     if r.isErr: return err[KdlNode, ParseError](r.getErr)
     anno = r.get
 
-  # Node names can be bare identifiers OR quoted strings per v2 spec.
+  # Node names can be bare identifiers, quoted strings, or raw strings.
   var nameHandle: InternedStr
   case p.peek.kind
   of tkIdent:
@@ -280,6 +311,9 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] =
   of tkString:
     let tok = p.advance()
     nameHandle = p.doc.interner.intern(tok.strVal)
+  of tkRawString:
+    let tok = p.advance()
+    nameHandle = p.doc.interner.intern(tok.rawVal)
   of tkError:
     return err[KdlNode, ParseError](p.advance().error)
   else:
@@ -312,7 +346,18 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] =
     let eRes = p.parseEntry()
     if eRes.isErr: return err[KdlNode, ParseError](eRes.getErr)
     if not skip:
-      node.entries.add(eRes.get)
+      # KDL v2: when a property key repeats, the later assignment wins.
+      # Replace any earlier entry with the same key before appending.
+      let newEntry = eRes.get
+      if newEntry.kind == keProperty:
+        var i = 0
+        while i < node.entries.len:
+          if node.entries[i].kind == keProperty and
+             node.entries[i].propName == newEntry.propName:
+            node.entries.delete(i)
+          else:
+            inc i
+      node.entries.add(newEntry)
 
   # Optional children block (if we didn't already consume one above)
   if p.check(tkLBrace):
@@ -369,6 +414,8 @@ proc parseDocument(p: var Parser): Result[seq[KdlNode], ParseError] =
     var skipNode = false
     if p.check(tkSlashDash):
       discard p.advance()
+      # Slashdash skips the *next thing*, even across newlines.
+      p.skipNewlines()
       skipNode = true
     if p.atEnd: break
     let nRes = p.parseNode()

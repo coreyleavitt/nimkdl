@@ -123,12 +123,18 @@ func emitInt(i: int64): string =
 # Value emission
 # ---------------------------------------------------------------------------
 
+func emitStringValue(s: string): string {.inline.} =
+  ## Canonical form prefers a bare-ident form for string values when
+  ## possible — matches the kdl-org reference's canonical output and
+  ## round-trips through the parser's bare-ident-as-value handling.
+  if canEmitBare(s): s else: quotedString(s)
+
 func emitValue(v: KdlValue, interner: Interner): string =
   let prefix =
     if v.typeAnnotation == InvalidInterned: ""
     else: "(" & emitIdent(interner.lookup(v.typeAnnotation)) & ")"
   case v.kind
-  of kvString: prefix & quotedString(v.strVal)
+  of kvString: prefix & emitStringValue(v.strVal)
   of kvInt:    prefix & emitInt(v.intVal)
   of kvFloat:  prefix & emitFloat(v.floatVal)
   of kvBool:   prefix & (if v.boolVal: "#true" else: "#false")

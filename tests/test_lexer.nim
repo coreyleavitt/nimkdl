@@ -91,9 +91,11 @@ suite "lexer: regular strings":
     check t[0].strVal == "hello"
 
   test "basic escape sequences":
-    let t = tokenize("\"\\n\\t\\r\\\"\\\\\\/\"")
+    # KDL v2 removed `\/` from the valid escape set; covered by `unknown
+    # escape produces error` test below.
+    let t = tokenize("\"\\n\\t\\r\\\"\\\\\"")
     check t.kinds == @[tkString]
-    check t[0].strVal == "\n\t\r\"\\/"
+    check t[0].strVal == "\n\t\r\"\\"
 
   test "\\u{XXXX} escape decodes":
     let t = tokenize("\"\\u{2603}\"")  # SNOWMAN

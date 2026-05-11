@@ -62,9 +62,15 @@ suite "encode: identifiers":
     check s.startsWith("\"true\"")
 
 suite "encode: values":
-  test "string value":
+  test "string value (canonical bare form when possible)":
     parseGet("rule \"hello\"", doc):
-      check "\"hello\"" in encode(doc)
+      # KDL v2 canonical: "hello" is a valid bare ident and string-value,
+      # so it emits unquoted. Round-trip stability covers the equivalence.
+      check "rule hello" in encode(doc)
+
+  test "string value forces quote when bareword-unsafe":
+    parseGet("rule \"has space\"", doc):
+      check "\"has space\"" in encode(doc)
 
   test "string with escapes":
     parseGet("rule \"a\\nb\"", doc):

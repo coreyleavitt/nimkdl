@@ -88,19 +88,21 @@ type
 # ---------------------------------------------------------------------------
 
 func isIdentStart(ch: char): bool {.inline.} =
-  ## Bare identifiers in KDL v2 are quite permissive — almost anything that
-  ## isn't punctuation or whitespace. This implements the ASCII subset of
-  ## that rule; full Unicode bare-ident coverage is filed as v0.2 work.
+  ## Bare identifiers in KDL v2 are quite permissive — almost anything
+  ## that isn't punctuation, whitespace, or number-looking. The number-
+  ## looking discrimination for `.` and `-` is handled at the call site
+  ## via lookahead (lexOne). This implements the ASCII subset of the v2
+  ## rule; full Unicode bare-ident coverage is filed as v0.2 work.
   case ch
   of '\0' .. ' ', '\x7f': false
-  of '{', '}', '(', ')', '/', '\\', '"', '#', '=', ';', ',': false
-  of '0' .. '9': false  # bare ident may contain digits but not start with one
+  of '{', '}', '(', ')', '[', ']', '/', '\\', '"', '#', '=', ';', ',': false
+  of '0' .. '9': false  # would look like the start of a number
   else: true
 
 func isIdentCont(ch: char): bool {.inline.} =
   case ch
   of '\0' .. ' ', '\x7f': false
-  of '{', '}', '(', ')', '/', '\\', '"', '#', '=', ';', ',': false
+  of '{', '}', '(', ')', '[', ']', '/', '\\', '"', '#', '=', ';', ',': false
   else: true
 
 func isAsciiWhitespace(ch: char): bool {.inline.} =
@@ -197,16 +199,24 @@ proc skipLineComment(lx: var Lexer) =
     lx.advanceOne()
 
 proc skipLineContinuation(lx: var Lexer): bool =
-  ## At a `\` candidate. If followed by optional whitespace + newline,
-  ## consume the lot and return true (no token emitted). Otherwise leave
-  ## position untouched and return false — the caller will handle `\`
-  ## as an unexpected character.
+  ## At a `\` candidate. If followed by optional whitespace, an optional
+  ## comment (line `//...` or block `/* ... */`), and a newline, consume
+  ## the lot and return true. Otherwise rewind and return false — the
+  ## caller will handle `\` as an unexpected character.
   let save = lx.pos
   if lx.peek != '\\': return false
   lx.advanceOne()
-  # Optional whitespace before the newline
   while not lx.atEof and isAsciiWhitespace(lx.peek):
     lx.advanceOne()
+  # Optional comment between `\` and the line break
+  if not lx.atEof and lx.peek == '/' and lx.peek(1) == '/':
+    lx.advanceOne(); lx.advanceOne()
+    while not lx.atEof and not isNewline(lx.peek):
+      lx.advanceOne()
+  elif not lx.atEof and lx.peek == '/' and lx.peek(1) == '*':
+    lx.advanceOne(); lx.advanceOne()
+    if not lx.skipBlockComment():
+      return false
   if not lx.atEof and isNewline(lx.peek):
     lx.advanceNewline()
     return true
@@ -314,13 +324,21 @@ proc decodeRegularString(lx: var Lexer, openSpan: Span,
       of 'r':  result.add '\r'; lx.advanceOne()
       of '"':  result.add '"';  lx.advanceOne()
       of '\\': result.add '\\'; lx.advanceOne()
-      of '/':  result.add '/';  lx.advanceOne()
       of 'b':  result.add '\b'; lx.advanceOne()
       of 'f':  result.add '\f'; lx.advanceOne()
       of 's':  result.add ' ';  lx.advanceOne()
       of 'u':
         lx.advanceOne()
         result.add lx.decodeUnicodeEscape(escSpan)
+      of ' ', '\t', '\n', '\r':
+        # Whitespace-escape: `\` followed by any run of ASCII whitespace
+        # (incl. newlines) is consumed entirely. Used in multi-line
+        # string layouts where you want to break a line in source but
+        # not in the decoded value.
+        while not lx.atEof and
+              (lx.peek == ' ' or lx.peek == '\t' or
+               lx.peek == '\n' or lx.peek == '\r'):
+          if isNewline(lx.peek): lx.advanceNewline() else: lx.advanceOne()
       else:
         lx.emitError(peLexInvalidEscape, escSpan,
                      "unknown escape \\" & esc)
@@ -409,13 +427,27 @@ proc lexRegularOrMultiline(lx: var Lexer) =
         of 'r':  currentLine.add '\r'; lx.advanceOne()
         of '"':  currentLine.add '"';  lx.advanceOne()
         of '\\': currentLine.add '\\'; lx.advanceOne()
-        of '/':  currentLine.add '/';  lx.advanceOne()
         of 'b':  currentLine.add '\b'; lx.advanceOne()
         of 'f':  currentLine.add '\f'; lx.advanceOne()
         of 's':  currentLine.add ' ';  lx.advanceOne()
         of 'u':
           lx.advanceOne()
           currentLine.add lx.decodeUnicodeEscape(escSpan)
+        of ' ', '\t', '\n', '\r':
+          # Whitespace-escape inside a multi-line string: consume the
+          # run. Multi-line strings already split on newlines, so this
+          # effectively joins consecutive lines without inserting a
+          # newline in the decoded value.
+          while not lx.atEof and
+                (lx.peek == ' ' or lx.peek == '\t' or
+                 lx.peek == '\n' or lx.peek == '\r'):
+            if isNewline(lx.peek):
+              # Push the current accumulated line, start a fresh blank.
+              rawLines.add(currentLine)
+              currentLine = ""
+              lx.advanceNewline()
+            else:
+              lx.advanceOne()
         else:
           lx.emitError(peLexInvalidEscape, escSpan,
                        "unknown escape \\" & esc)
@@ -741,6 +773,15 @@ proc lexOne(lx: var Lexer) =
     else:
       lx.lexBareIdent()
   else:
+    # `.` followed by a digit looks like a number-without-int-prefix
+    # (`.0`), which v2 forbids — emit as an error rather than letting
+    # it become a bare ident. `.` followed by anything else is a fine
+    # ident start (e.g. `.` alone is a valid bare ident).
+    if ch == '.' and lx.peek(1) >= '0' and lx.peek(1) <= '9':
+      let s = lx.pos; lx.advanceOne()
+      lx.emitError(peLexInvalidNumber, initSpan(s, lx.pos),
+                   "number literals need an integer part before the '.'")
+      return
     if isIdentStart(ch):
       lx.lexBareIdent()
     else:
@@ -754,6 +795,13 @@ proc lex*(source: string, interner: var Interner): seq[Token] =
   ## diagnostics; the parser handles re-sync.
   var lx = Lexer(source: source, pos: StartPosition,
                  tokens: @[], interner: addr interner)
+  # Skip BOM (U+FEFF, encoded as EF BB BF) at start of input — per
+  # KDL v2 spec it's silently consumed at position 0 but flagged as an
+  # error if it appears later. We handle the start-of-input case here.
+  if lx.source.len >= 3 and
+     lx.source[0] == '\xEF' and lx.source[1] == '\xBB' and
+     lx.source[2] == '\xBF':
+    lx.pos = Position(line: 1, col: 1, offset: 3)
   while not lx.atEof:
     lx.skipWhitespaceAndComments()
     if lx.atEof: break
