@@ -1,21 +1,29 @@
-## kdl — public API surface for the KDL v2 parser + type-driven codegen.
+## kdl — public API surface for lib/kdl (KDL v2 parser + type-driven codegen).
 ##
-## Layered modules (added as sub-issues land — see README.md):
-##   spans.nim       — Position, Span, ParseError, Result
-##   intern.nim      — SBO string interner
-##   lexer.nim       — source → seq[Token]
-##   ast.nim         — KdlDoc, KdlNode, KdlValue
-##   parser.nim      — tokens → KdlDoc (recursive descent, {.noSideEffect.})
-##   encode.nim      — KdlDoc → canonical text
-##   grammar.nim     — kdlGrammar: macro + reference interpreter
-##   codegen.nim     — parse[T] + embed[T] macros (type reflection)
-##   path.nim        — typed schema-path DSL macro + helpers
+## See ``README.md`` in this directory for spec coverage, worked examples,
+## pragma reference, and the explicit decisions not to implement KSL or KQL.
 ##
-## Downstream callers (amoxtli rule loader, config loader, tests) import only
-## this module.
+## ## Layered modules
+##
+## - ``spans``   — Position / Span / ParseError / Result[T, E]
+## - ``intern``  — SBO string interner
+## - ``lexer``   — KDL v2 tokenizer
+## - ``ast``     — KdlDoc / KdlNode / KdlValue object variants
+## - ``parser``  — hand-written recursive descent (``parse``)
+## - ``encode``  — canonical encoder (``encode``)
+## - ``grammar`` — grammar-as-value + reference interpreter
+##                 (``referenceInterpret``)
+## - ``codegen`` — pragmas + ``deriveDecode`` macro + ``decode[T]`` +
+##                 ``embed[T]``
+## - ``path``    — typed schema-path DSL (``path`` macro + ``where`` /
+##                 ``first`` / ``only`` templates)
+##
+## All public symbols from those modules are re-exported below.
+## Downstream callers (amoxtli rule loader, config loader, tests) need
+## only ``import kdl``.
 
 import ./spans, ./intern, ./lexer, ./ast, ./parser, ./encode, ./grammar,
        ./codegen, ./path
 export spans, intern, lexer, ast, parser, encode, grammar, codegen, path
 
-const KdlLibVersion* = "0.0.1"
+const KdlLibVersion* = "0.1.0"

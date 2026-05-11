@@ -9,7 +9,7 @@
 # See lib/kdl/README.md for spec coverage + design philosophy + the explicit
 # decisions not to implement KSL or KQL.
 
-version       = "0.0.1"
+version       = "0.1.0"
 author        = "Corey Leavitt"
 description   = "KDL v2 parser, type-driven codegen, and typed-path DSL. See README.md."
 license       = "MIT"
@@ -36,3 +36,4 @@ task test, "Run unit tests":
   exec cmd & " tests/test_codegen.nim"
   exec cmd & " tests/test_embed.nim"
   exec cmd & " tests/test_path.nim"
+  exec cmd & " tests/test_readme_examples.nim"

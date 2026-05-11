@@ -6,4 +6,4 @@ import ../src/kdl
 
 suite "kdl smoke":
   test "library version exported":
-    check KdlLibVersion == "0.0.1"
+    check KdlLibVersion == "0.1.0"
