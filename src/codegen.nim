@@ -384,6 +384,11 @@ macro deriveDecode*(typ: typedesc): untyped =
     let fieldAccess = newDotExpr(tgtIdent, nimField)
     let kdlNameStr = newLit(f.kdlName)
 
+    # A field is "required" if it has no `{.kdlSkip.}`, no Nim 2.x default
+    # value (`field: T = expr`), and no pragma-supplied default. When such a
+    # field is absent from the KDL document we emit peTypeMissingRequired.
+    let isRequired = f.defaultExpr.kind == nnkEmpty
+
     case f.kind
     of fkSkip:
       discard
@@ -397,14 +402,23 @@ macro deriveDecode*(typ: typedesc): untyped =
                        `docIdent`)
       let mismatchMsg = newLit(
         "type mismatch on positional arg " & $f.argIndex)
+      let missingMsg = newLit(
+        "missing required positional arg " & $f.argIndex &
+        " ('" & f.kdlName & "')")
       let span = quote do: `nodeIdent`.span
+      let absentBranch =
+        if isRequired:
+          quote do:
+            `resIdent`.add(decodeErrAt(`missingMsg`, `span`))
+        else:
+          quote do:
+            discard  # absent + has default → keep default value
       stmts.add quote do:
         if `hasArgCheck`:
           if not (`decodeCall`):
             `resIdent`.add(decodeErrAt(`mismatchMsg`, `span`))
         else:
-          # missing required arg — fall back to default if any
-          discard
+          `absentBranch`
     of fkAttr:
       let keyIdent = genSym(nskLet, "kdlKey")
       let decodeCall = quote do:
@@ -412,16 +426,24 @@ macro deriveDecode*(typ: typedesc): untyped =
                        `nodeIdent`.findProp(`keyIdent`),
                        `docIdent`)
       let mismatchMsg = newLit("type mismatch on property '" & f.kdlName & "'")
+      let missingMsg = newLit(
+        "missing required property '" & f.kdlName & "'")
       let span = quote do: `nodeIdent`.span
       stmts.add quote do:
-        let `keyIdent` = `docIdent`.interner.lookup(`kdlNameStr`)
-      # We can't `intern` against a `KdlDoc` we got by `let`. Adapt:
-      stmts[^1] = quote do:
         let `keyIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
+      let absentBranch =
+        if isRequired:
+          quote do:
+            `resIdent`.add(decodeErrAt(`missingMsg`, `span`))
+        else:
+          quote do:
+            discard
       stmts.add quote do:
         if `nodeIdent`.hasProp(`keyIdent`):
           if not (`decodeCall`):
             `resIdent`.add(decodeErrAt(`mismatchMsg`, `span`))
+        else:
+          `absentBranch`
     of fkChild:
       if typeNodeIsSeq(f.typeNode):
         let elemType = f.typeNode[1]

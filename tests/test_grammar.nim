@@ -6,6 +6,7 @@ import std/[strutils, tables, unittest]
 
 import ../src/ast
 import ../src/grammar
+import ../src/lexer
 import ../src/parser
 import ../src/spans
 
@@ -168,6 +169,53 @@ suite "Reference interpreter: error parity":
 
   test "lexer error surfaces in both":
     bothErr("\"unterminated")
+
+suite "Reference interpreter: number literal parity (C1, C2)":
+  template same(src: string) =
+    let viaFast = parse(src)
+    let viaRef  = referenceInterpret(src)
+    check viaFast.isOk
+    check viaRef.isOk
+    if viaFast.isOk and viaRef.isOk:
+      check docEqual(viaFast.get, viaRef.get)
+
+  template bothReject(src: string) =
+    let viaFast = parse(src)
+    let viaRef  = referenceInterpret(src)
+    check viaFast.isErr
+    check viaRef.isErr
+
+  test "int64.low matches across parsers (was: silent saturation in ref)":
+    same("v -9223372036854775808")
+
+  test "int64.high matches":
+    same("v 9223372036854775807")
+
+  test "int overflow: both reject (was: ref saturated to int64.high)":
+    bothReject("v 9223372036854775808")
+
+  test "huge hex overflow: both reject":
+    bothReject("v 0xFFFFFFFFFFFFFFFF")
+
+  test "malformed float: both reject (was: ref raised ValueError)":
+    bothReject("v 1.5e")
+
+suite "Reference interpreter: defensive paths":
+  test "undefined rule reference returns Err, never panics":
+    # Construct a grammar with a refTo pointing at a missing rule and run
+    # the interpreter against any input. Prior to C4 this raised KeyError;
+    # now it must return a structured ParseError.
+    var bad = Grammar(rules: initTable[string, Rule](), startRule: "root")
+    bad.rules["root"] = seqOf(refTo("missing"), eof())
+    # Bypass `kdlGrammar` macro validation to feed the broken grammar
+    # straight to the interpreter — the situation we're guarding against.
+    var doc = newDoc("<test>")
+    let tokens = lex("anything", doc.interner)
+    var s = InterpState(tokens: tokens, pos: 0, grammar: bad, haveError: false)
+    let res = interpRule(s, "root", 0)
+    check res.isErr
+    if res.isErr:
+      check "undefined rule" in res.getErr.hint
 
 suite "kdlGrammar macro":
   test "wraps a valid grammar without complaint":

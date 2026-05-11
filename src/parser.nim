@@ -36,11 +36,10 @@
 ## This is what makes `parse[T]` (#528) and `embed[T]` (#529) macros
 ## possible without escape hatches.
 
-import std/strutils
-
 import ./ast
 import ./intern
 import ./lexer
+import ./numlit
 import ./spans
 
 const
@@ -109,44 +108,6 @@ proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] =
   discard p.advance()  # consume `)`
   ok[InternedStr, ParseError](handle)
 
-proc decodeIntLiteral(text: string, base: NumberBase, negative: bool,
-                     span: Span): Result[int64, ParseError] =
-  ## Parses an integer literal text (the lexer kept the raw source) into
-  ## int64. Returns peLexInvalidNumber on overflow.
-  var s = text
-  # Strip leading +/- and base prefix
-  if s.len > 0 and (s[0] == '+' or s[0] == '-'):
-    s = s[1 .. ^1]
-  if base != nbDecimal and s.len >= 2:
-    s = s[2 .. ^1]
-  # Strip underscores
-  var clean = ""
-  for c in s:
-    if c != '_': clean.add(c)
-  var acc: int64 = 0
-  let radix = (case base
-               of nbDecimal: 10
-               of nbHex: 16
-               of nbOctal: 8
-               of nbBinary: 2)
-  for c in clean:
-    let digit =
-      case c
-      of '0'..'9': int(ord(c) - ord('0'))
-      of 'a'..'f': int(ord(c) - ord('a') + 10)
-      of 'A'..'F': int(ord(c) - ord('A') + 10)
-      else: -1
-    if digit < 0 or digit >= radix:
-      return err[int64, ParseError](parseErr(peLexInvalidNumber, span,
-        "invalid digit for base"))
-    # Overflow-safe accumulate
-    if acc > (int64.high - int64(digit)) div int64(radix):
-      return err[int64, ParseError](parseErr(peLexInvalidNumber, span,
-        "integer literal does not fit in int64"))
-    acc = acc * int64(radix) + int64(digit)
-  if negative: acc = -acc
-  ok[int64, ParseError](acc)
-
 proc parseValue(p: var Parser): Result[KdlValue, ParseError] =
   ## Reads an optional type annotation prefix + a literal value.
   var anno = InvalidInterned
@@ -176,26 +137,13 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] =
     return ok[KdlValue, ParseError](v)
   of tkNumber:
     discard p.advance()
-    # Decide int vs float from the source text: presence of '.' or 'e'/'E'
-    # (and the literal isn't hex/oct/bin) marks it as float.
-    let isFloat = tok.numBase == nbDecimal and
-                  ('.' in tok.numText or 'e' in tok.numText or 'E' in tok.numText)
-    if isFloat:
-      var s = tok.numText
-      # Nim's parseFloat handles signs but doesn't strip underscores
-      var clean = ""
-      for c in s:
-        if c != '_': clean.add(c)
-      try:
-        let f = parseFloat(clean)
-        var v = newFloatValue(f, tok.span)
-        v.typeAnnotation = anno
-        return ok[KdlValue, ParseError](v)
-      except ValueError:
-        return err[KdlValue, ParseError](parseErr(peLexInvalidNumber,
-          tok.span, "malformed float literal"))
-    let intRes = decodeIntLiteral(tok.numText, tok.numBase,
-                                   tok.numNegative, tok.span)
+    if looksLikeFloat(tok):
+      let floatRes = decodeFloatFromToken(tok)
+      if floatRes.isErr: return err[KdlValue, ParseError](floatRes.getErr)
+      var v = newFloatValue(floatRes.get, tok.span)
+      v.typeAnnotation = anno
+      return ok[KdlValue, ParseError](v)
+    let intRes = decodeIntFromToken(tok)
     if intRes.isErr: return err[KdlValue, ParseError](intRes.getErr)
     var v = newIntValue(intRes.get, tok.span)
     v.typeAnnotation = anno

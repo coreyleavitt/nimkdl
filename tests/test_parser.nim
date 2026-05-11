@@ -229,6 +229,35 @@ suite "parser: error reporting":
       src.add("}\n")
     parseErrCheck(src, peParseDepthExceeded)
 
+suite "parser: number literal edges (C1, C2)":
+  test "int64.high decodes":
+    parseOk("v 9223372036854775807"):
+      check doc.nodes[0].entries[0].argValue.intVal == 9223372036854775807'i64
+
+  test "int64.low decodes (regression: prior overflow guard rejected it)":
+    parseOk("v -9223372036854775808"):
+      # This is the headline C2 fix: previously rejected as
+      # peLexInvalidNumber because the magnitude overflows when
+      # accumulated in int64. Now correct via uint64 accumulator.
+      check doc.nodes[0].entries[0].argValue.intVal == int64.low
+
+  test "one past int64.high is rejected":
+    parseErrCheck("v 9223372036854775808", peLexInvalidNumber)
+
+  test "one below int64.low is rejected":
+    parseErrCheck("v -9223372036854775809", peLexInvalidNumber)
+
+  test "huge hex literal is rejected":
+    parseErrCheck("v 0xFFFFFFFFFFFFFFFF", peLexInvalidNumber)
+
+  test "malformed float (exponent without digits) is rejected":
+    parseErrCheck("v 1.5e", peLexInvalidNumber)
+
+  test "regular finite float decodes":
+    parseOk("v 1.5e10"):
+      check doc.nodes[0].entries[0].argValue.kind == kvFloat
+      check doc.nodes[0].entries[0].argValue.floatVal == 1.5e10
+
 suite "parser: round trip preserves structure":
   test "structural identity check via repr":
     # We don't have the encoder yet (#524); for now just verify that

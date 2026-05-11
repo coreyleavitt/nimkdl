@@ -9,7 +9,7 @@ import ../src/spans
 type
   Rule {.kdlNode: "rule".} = object
     id {.kdlArg.}: string
-    enabled {.kdlAttr.}: bool
+    enabled {.kdlAttr.}: bool = false   # optional → defaults when absent
 
 deriveDecode(Rule)
 

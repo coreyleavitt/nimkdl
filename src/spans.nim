@@ -68,9 +68,15 @@ type
     ## Sum-typed `Ok(T)` / `Err(E)` result. Hand-rolled rather than pulling
     ## a results library — one file of stdlib-shaped surface vs a transitive
     ## dep we don't need elsewhere.
+    ##
+    ## `Result[void, E]` is a valid specialization: the `rkOk` branch has
+    ## no payload, only the discriminator. Use `okUnit[E]()` to construct.
     case kind*: ResultKind
-    of rkOk:  value*: T
-    of rkErr: error*: E
+    of rkOk:
+      when T isnot void:
+        value*: T
+    of rkErr:
+      error*: E
 
 # ---------------------------------------------------------------------------
 # Position / Span constructors and arithmetic
@@ -207,6 +213,11 @@ func formatError*(err: ParseError, source: string, filename = ""): string =
 
 func ok*[T, E](value: T): Result[T, E] {.inline.} =
   Result[T, E](kind: rkOk, value: value)
+
+func ok*[E](_: typedesc[void]; _: typedesc[E]): Result[void, E] {.inline.} =
+  ## Construct `Result[void, E].Ok` — for procs that signal "success
+  ## without a payload, or this error". Use as `ok(void, MyErr)`.
+  Result[void, E](kind: rkOk)
 
 func err*[T, E](error: E): Result[T, E] {.inline.} =
   Result[T, E](kind: rkErr, error: error)

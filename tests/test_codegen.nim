@@ -2,7 +2,7 @@
 ## fields, nested objects, seqs, defaults, renames, skips, and at the
 ## seq[T] top-level shape.
 
-import std/unittest
+import std/[strutils, unittest]
 
 import ../src/ast
 import ../src/codegen
@@ -20,7 +20,7 @@ type
 
   WithArg {.kdlNode: "rule".} = object
     id {.kdlArg.}: string
-    enabled {.kdlAttr.}: bool
+    enabled {.kdlAttr.}: bool = false   # default → optional
 
   WithDefault {.kdlNode: "config".} = object
     threshold {.kdlAttr.}: int = 50
@@ -67,11 +67,11 @@ suite "codegen: primitives as attributes":
       check value.count == 42
       check value.enabled
 
-  test "missing optional attr stays at type default":
-    parseOk[SimpleAttrs]("simple name=\"abc\""):
-      check value.name == "abc"
-      check value.count == 0          # int default
-      check not value.enabled         # bool default
+  test "missing required attr surfaces as Err":
+    let r = decode[SimpleAttrs]("simple name=\"abc\"")
+    check r.isErr
+    if r.isErr:
+      check "missing required property" in r.getErr.hint
 
 suite "codegen: positional args":
   test "node \"id\" enabled=true → id is the arg, enabled is the attr":

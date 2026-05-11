@@ -55,11 +55,12 @@
 ## in the kdl-org test corpus, plus a curated set of locally-interesting
 ## fragments.
 
-import std/[macros, options, strutils, tables]
+import std/[macros, strutils, tables]
 
 import ./ast
 import ./intern
 import ./lexer
+import ./numlit
 import ./spans
 
 # ---------------------------------------------------------------------------
@@ -259,6 +260,19 @@ proc validate*(g: Grammar): seq[string] =
   for name, rule in g.rules:
     validateRule(rule, names, result)
 
+# Tie the canonical grammar to its validity check at module init.
+# `KdlV2Grammar` is built above via plain `let` (the `kdlGrammar` macro
+# below would be cleaner but macros need to be defined before their
+# call site, and macroing the canonical grammar would force a larger
+# reorder of this file). Failing here is a programmer-error crash, not
+# user-input handling — it can only fire if buildKdlGrammar() above has
+# a typo in a `refTo` target. Asserting at startup catches that the
+# moment the module loads.
+block:
+  let errs = validate(KdlV2Grammar)
+  doAssert errs.len == 0,
+    "KdlV2Grammar is inconsistent: " & errs.join("; ")
+
 
 # ---------------------------------------------------------------------------
 # Pretty-print the grammar as docs
@@ -311,28 +325,32 @@ proc `$`*(g: Grammar): string =
 # disjoint from the AST construction logic (hand-coded per rule name).
 
 type
-  ParseNode = ref object
+  ParseNode* = ref object
     ## A node in the raw parse tree. Each Rule that matches produces one
     ## of these. `tokens` is the linear sequence of tokens this match
     ## consumed; `children` is the matches from sub-rules in source order.
-    ruleName: string         ## name of the rule that matched, "" for inline
-    consumed: Slice[int]     ## [start, finish) indices into the token stream
-    tokens: seq[Token]       ## flat list of consumed tokens (for terminals)
-    children: seq[ParseNode] ## child rule matches
+    ##
+    ## Exported so callers (and tests) can drive the interpreter against
+    ## a custom Grammar via `interpRule` without going through
+    ## `referenceInterpret` and the canonical `KdlV2Grammar`.
+    ruleName*: string         ## name of the rule that matched, "" for inline
+    consumed*: Slice[int]     ## [start, finish) indices into the token stream
+    tokens*: seq[Token]       ## flat list of consumed tokens (for terminals)
+    children*: seq[ParseNode] ## child rule matches
 
-  InterpState = object
-    tokens: seq[Token]
-    pos: int
-    grammar: Grammar
-    deepestError: ParseError
-    haveError: bool
+  InterpState* = object
+    tokens*: seq[Token]
+    pos*: int
+    grammar*: Grammar
+    deepestError*: ParseError
+    haveError*: bool
 
 const InterpRecursionCap = 1024
 
-proc interpRule(s: var InterpState, ruleName: string, depth: int):
+proc interpRule*(s: var InterpState, ruleName: string, depth: int):
     Result[ParseNode, ParseError]
 
-proc interp(s: var InterpState, r: Rule, depth: int):
+proc interp*(s: var InterpState, r: Rule, depth: int):
     Result[ParseNode, ParseError] =
   ## Walk a rule. Returns the matched parse node on success; updates
   ## `s.pos` to past the match. On failure, leaves `s.pos` at the entry
@@ -459,8 +477,19 @@ proc interp(s: var InterpState, r: Rule, depth: int):
     return ok[ParseNode, ParseError](ParseNode(
       consumed: entryPos ..< s.pos))
 
-proc interpRule(s: var InterpState, ruleName: string, depth: int):
+proc interpRule*(s: var InterpState, ruleName: string, depth: int):
     Result[ParseNode, ParseError] =
+  if ruleName notin s.grammar.rules:
+    # Grammar references a rule that doesn't exist. `validate()` should
+    # catch this at construction time; reaching here means someone bypassed
+    # the macro. Return Err rather than panic via KeyError so the
+    # diagnostic flows through the same channel as every other parse
+    # failure.
+    let span =
+      if s.pos < s.tokens.len: s.tokens[s.pos].span
+      else: pointSpan(StartPosition)
+    return err[ParseNode, ParseError](initError(peParseUnexpected, span,
+      "grammar references undefined rule '" & ruleName & "'"))
   let r = s.grammar.rules[ruleName]
   let res = interp(s, r, depth + 1)
   if res.isOk:
@@ -528,10 +557,15 @@ proc findImmediate(n: ParseNode, ruleName: string): ParseNode =
       if deeper != nil: return deeper
   return nil
 
-proc buildValue(valueMatch: ParseNode, doc: var KdlDoc): KdlValue =
+proc buildValue(valueMatch: ParseNode, doc: var KdlDoc,
+                errs: var seq[ParseError]): KdlValue =
   ## Build a KdlValue from a `value` rule match.
   ## Grammar: value := opt(typeAnno) rawValue
   ## So valueMatch.children = [opt(typeAnno) match, rawValue match]
+  ##
+  ## `errs` is the build-time error accumulator — decode failures
+  ## (overflow, malformed float) push into it. `referenceInterpret`
+  ## surfaces the first error after the whole build pass completes.
   var anno = InvalidInterned
   let typeAnno = findImmediate(valueMatch, "typeAnno")
   if typeAnno != nil:
@@ -555,47 +589,20 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc): KdlValue =
     # Bare-ident value: resolves through the doc's interner.
     result = newStringValue(doc.interner.lookup(v.ident), v.span)
   of tkNumber:
-    let isFloat = v.numBase == nbDecimal and
-                  ('.' in v.numText or 'e' in v.numText or 'E' in v.numText)
-    if isFloat:
-      var clean = ""
-      for c in v.numText:
-        if c != '_': clean.add(c)
-      result = newFloatValue(parseFloat(clean), v.span)
+    if looksLikeFloat(v):
+      let floatRes = decodeFloatFromToken(v)
+      if floatRes.isErr:
+        errs.add(floatRes.getErr)
+        result = newNullValue(v.span)
+      else:
+        result = newFloatValue(floatRes.get, v.span)
     else:
-      var s = v.numText
-      if s.len > 0 and (s[0] == '+' or s[0] == '-'): s = s[1 .. ^1]
-      if v.numBase != nbDecimal and s.len >= 2: s = s[2 .. ^1]
-      var clean = ""
-      for c in s:
-        if c != '_': clean.add(c)
-      # Overflow-safe int64 decode. Mirrors parser.nim's behavior — on
-      # overflow we silently saturate to int64 bounds. Real out-of-range
-      # cases will surface as a docEqual mismatch in the conformance
-      # harness, which is the right place to flag them.
-      var acc: int64 = 0
-      var overflow = false
-      let radix = (case v.numBase
-                   of nbDecimal: 10
-                   of nbHex: 16
-                   of nbOctal: 8
-                   of nbBinary: 2)
-      for c in clean:
-        let d =
-          case c
-          of '0'..'9': int(ord(c) - ord('0'))
-          of 'a'..'f': int(ord(c) - ord('a') + 10)
-          of 'A'..'F': int(ord(c) - ord('A') + 10)
-          else: -1
-        if d < 0 or d >= radix:
-          overflow = true; break
-        if acc > (int64.high - int64(d)) div int64(radix):
-          overflow = true; break
-        acc = acc * int64(radix) + int64(d)
-      if overflow:
-        acc = int64.high   # saturate; conformance will flag if it matters
-      if v.numNegative: acc = -acc
-      result = newIntValue(acc, v.span)
+      let intRes = decodeIntFromToken(v)
+      if intRes.isErr:
+        errs.add(intRes.getErr)
+        result = newNullValue(v.span)
+      else:
+        result = newIntValue(intRes.get, v.span)
   of tkKeyword:
     case v.keyword
     of kwTrue:   result = newBoolValue(true, v.span)
@@ -608,7 +615,8 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc): KdlValue =
     result = newNullValue()
   result.typeAnnotation = anno
 
-proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc): KdlEntry =
+proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc,
+                errs: var seq[ParseError]): KdlEntry =
   ## Build an entry. Grammar:
   ##   entry := opt(slashdash) (property | value)
   ## So look for a property first; absence means it's an argument-value.
@@ -620,17 +628,19 @@ proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc): KdlEntry =
       else: InvalidInterned
     let valueMatch = findImmediate(prop, "value")
     let v =
-      if valueMatch != nil: buildValue(valueMatch, doc)
+      if valueMatch != nil: buildValue(valueMatch, doc, errs)
       else: newNullValue()
     return KdlEntry(kind: keProperty, propName: key, propValue: v)
   let valueMatch = findImmediate(entryMatch, "value")
   if valueMatch != nil:
-    return newArgument(buildValue(valueMatch, doc))
+    return newArgument(buildValue(valueMatch, doc, errs))
   return newArgument(newNullValue())
 
-proc buildNode(node: ParseNode, doc: var KdlDoc): KdlNode
+proc buildNode(node: ParseNode, doc: var KdlDoc,
+               errs: var seq[ParseError]): KdlNode
 
-proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc): seq[KdlNode] =
+proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc,
+                        errs: var seq[ParseError]): seq[KdlNode] =
   ## Walk the `children` rule match. Grammar:
   ##   children := '{' star(newline) star(seq(node, star(newline))) '}'
   ## So children.children = ['{', newlines, inner_star, '}']
@@ -640,7 +650,7 @@ proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc): seq[KdlNode]
   for iter in innerStar.children:
     if iter.children.len < 1: continue
     let nodeMatch = iter.children[0]
-    result.add(buildNode(nodeMatch, doc))
+    result.add(buildNode(nodeMatch, doc, errs))
 
 proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode] =
   ## Like `findAll` but only walks structural (unstamped) descendants.
@@ -650,7 +660,8 @@ proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode] =
     elif c.ruleName == "":
       result.add(findImmediateAll(c, ruleName))
 
-proc buildNode(node: ParseNode, doc: var KdlDoc): KdlNode =
+proc buildNode(node: ParseNode, doc: var KdlDoc,
+               errs: var seq[ParseError]): KdlNode =
   ## Build a KdlNode from a `node` rule match. Grammar:
   ##   node := opt(typeAnno) name star(entry) opt(children) terminator
   var anno = InvalidInterned
@@ -673,7 +684,7 @@ proc buildNode(node: ParseNode, doc: var KdlDoc): KdlNode =
     let etoks = collectTokens(entryMatch)
     if etoks.len > 0 and etoks[0].kind == tkSlashDash:
       continue  # slashdashed entry
-    let newEntry = buildEntry(entryMatch, doc)
+    let newEntry = buildEntry(entryMatch, doc, errs)
     if newEntry.kind == keProperty:
       # KDL v2: repeated property keys → last-write-wins. Drop any
       # earlier entry with the same key before appending.
@@ -691,9 +702,10 @@ proc buildNode(node: ParseNode, doc: var KdlDoc): KdlNode =
   # is dropped here as a no-op).
   let childrenMatch = findImmediate(node, "children")
   if childrenMatch != nil:
-    result.children = buildChildrenBlock(childrenMatch, doc)
+    result.children = buildChildrenBlock(childrenMatch, doc, errs)
 
-proc buildDoc(root: ParseNode, doc: var KdlDoc) =
+proc buildDoc(root: ParseNode, doc: var KdlDoc,
+              errs: var seq[ParseError]) =
   ## Walk the `document` rule match. Grammar:
   ##   document := star(newline) star(seq(opt(slashdash), node, star(newline)))
   ## root.children = [leading_newlines, body_star]
@@ -706,7 +718,36 @@ proc buildDoc(root: ParseNode, doc: var KdlDoc) =
     let isSkipped = slashdashOpt.children.len > 0  # opt matched ⇒ skipped
     if isSkipped: continue
     let nodeMatch = iter.children[1]
-    doc.nodes.add(buildNode(nodeMatch, doc))
+    doc.nodes.add(buildNode(nodeMatch, doc, errs))
+
+# ---------------------------------------------------------------------------
+# Semantic validation pass on the built KdlDoc
+# ---------------------------------------------------------------------------
+#
+# Some v2 spec rules are easier to enforce on the AST than in the grammar
+# (the grammar would need expressive negative-lookahead with name capture
+# to reject specific bareword strings, which we don't model). Each rule
+# below is a pure walk over the doc and returns `Result[void, ParseError]`
+# consistent with the rest of the parse boundary.
+
+proc checkNoReservedPropertyKeys*(nodes: seq[KdlNode], doc: KdlDoc):
+    Result[void, ParseError] =
+  ## KDL v2 forbids the keyword-shaped barewords (true / false / null /
+  ## inf / -inf / nan) in property-key position even without the `#`
+  ## prefix. The hand parser checks this inline; the reference
+  ## interpreter checks here after the build.
+  for n in nodes:
+    for e in n.entries:
+      if e.kind == keProperty:
+        let k = doc.interner.lookup(e.propName)
+        if k in ["true", "false", "null", "inf", "-inf", "nan"]:
+          return err[void, ParseError](initError(peParseUnexpected,
+            e.span,
+            "reserved keyword '" & k & "' cannot be used as a property key"))
+    let childRes = checkNoReservedPropertyKeys(n.children, doc)
+    if childRes.isErr:
+      return childRes
+  ok(void, ParseError)
 
 proc referenceInterpret*(source: string, sourcePath = "<input>"):
     Result[KdlDoc, ParseError] =
@@ -728,29 +769,13 @@ proc referenceInterpret*(source: string, sourcePath = "<input>"):
     let span = s.tokens[s.pos].span
     return err[KdlDoc, ParseError](
       initError(peParseUnexpected, span, "trailing tokens after document"))
-  buildDoc(res.get, doc)
-  # Post-walk semantic validation: reserved barewords (true/false/null/
-  # inf/-inf/nan) are forbidden as property keys per v2 spec, but the
-  # grammar can't express this cleanly so we check it on the built AST.
-  proc rejectReservedKeys(n: KdlNode, doc: KdlDoc): Option[ParseError] =
-    discard
-  proc walkReserved(nodes: seq[KdlNode], doc: KdlDoc): Option[ParseError]
-  proc walkReservedNode(n: KdlNode, doc: KdlDoc): Option[ParseError] =
-    for e in n.entries:
-      if e.kind == keProperty:
-        let k = doc.interner.lookup(e.propName)
-        if k in ["true", "false", "null", "inf", "-inf", "nan"]:
-          return some(initError(peParseUnexpected, e.span,
-            "reserved keyword '" & k & "' cannot be used as a property key"))
-    walkReserved(n.children, doc)
-  proc walkReserved(nodes: seq[KdlNode], doc: KdlDoc): Option[ParseError] =
-    for n in nodes:
-      let r = walkReservedNode(n, doc)
-      if r.isSome: return r
-    return none(ParseError)
-  let problem = walkReserved(doc.nodes, doc)
-  if problem.isSome:
-    return err[KdlDoc, ParseError](problem.get)
+  var buildErrs: seq[ParseError] = @[]
+  buildDoc(res.get, doc, buildErrs)
+  if buildErrs.len > 0:
+    return err[KdlDoc, ParseError](buildErrs[0])
+  let semCheck = checkNoReservedPropertyKeys(doc.nodes, doc)
+  if semCheck.isErr:
+    return err[KdlDoc, ParseError](semCheck.getErr)
   ok[KdlDoc, ParseError](doc)
 
 # ---------------------------------------------------------------------------
