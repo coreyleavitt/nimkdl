@@ -54,7 +54,7 @@ deriveDecode(WithChild)
 deriveDecode(WithSeqChild)
 
 template parseOk[T](src: string, body: untyped) =
-  let r = parse[T](src)
+  let r = decode[T](src)
   check r.isOk
   if r.isOk:
     let value {.inject.} = r.get
@@ -159,9 +159,9 @@ rule "c"
 suite "codegen: error reporting":
   test "type mismatch surfaces as Err":
     # `count` should be int; passing a string should fail
-    let r = parse[SimpleAttrs]("simple name=\"x\" count=\"not-a-number\"")
+    let r = decode[SimpleAttrs]("simple name=\"x\" count=\"not-a-number\"")
     check r.isErr
 
   test "missing top-level node":
-    let r = parse[WithArg]("notarule \"x\"")
+    let r = decode[WithArg]("notarule \"x\"")
     check r.isErr

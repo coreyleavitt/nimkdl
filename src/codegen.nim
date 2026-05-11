@@ -490,6 +490,55 @@ proc lookupOrIntern*(interner: var Interner, s: string): InternedStr {.inline.} 
 # parse[T]
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# embed[T] — compile-time staticRead + module-init parse
+# ---------------------------------------------------------------------------
+#
+# Builtin default files (`src/builtins/rules/*.kdl` etc.) embed into the
+# binary via `staticRead`. The macro validates that the file exists at
+# compile time (via staticRead) and emits a runtime parse against T so
+# malformed files surface immediately on the first access — and during
+# tests, before any real consumer runs.
+#
+# Multi-file aggregation: users compose at the call site. e.g.
+#
+#   const builtinRules* = @[
+#     embed[Rule]("src/builtins/rules/compaction.kdl").get,
+#     embed[Rule]("src/builtins/rules/dates.kdl").get,
+#   ]
+#
+# Compile-time *evaluation* of the parser chain is filed as v0.2 polish;
+# the VM-friendliness audit (every proc in the call graph noSideEffect +
+# {.compileTime.}-callable) is the gating work.
+
+import std/os
+
+macro embedAux*(T: typed; path, callerFile: static[string]): untyped =
+  ## Implementation backing the `embed[T]` template. `staticRead` runs
+  ## here at compile time; the resulting bytes are embedded as a literal.
+  ## `callerFile` is the absolute path of the .nim file at the call site;
+  ## the template fills it via `instantiationInfo`.
+  let resolved =
+    if isAbsolute(path): path
+    else: callerFile.parentDir / path
+  let body = staticRead(resolved)
+  let bodyLit = newLit(body)
+  let pathLit = newLit(resolved)
+  result = quote do:
+    decode[`T`](`bodyLit`, `pathLit`)
+
+template embed*[T](path: static[string]): Result[T, ParseError] =
+  ## Embed a KDL file's contents into the binary at compile time and
+  ## parse them as type `T` at module initialization.
+  ##
+  ## Relative paths resolve against the .nim file that *invokes* the
+  ## template (via `instantiationInfo`), matching the developer's
+  ## expectation when colocating fixtures next to a test or rule loader.
+  ## Absolute paths are used as-is.
+  ##
+  ## A missing or unreadable file fails the build at compile time.
+  embedAux(T, path, instantiationInfo(fullPaths = true).filename)
+
 proc kdlNodeNameImpl*(typ: typedesc): string =
   ## Placeholder — `deriveDecode(T)` emits a typedesc[T] overload that
   ## returns the actual node name (per `{.kdlNode.}` pragma or
@@ -499,9 +548,11 @@ proc kdlNodeNameImpl*(typ: typedesc): string =
   ## but the static phase compiles cleanly.
   ""
 
-proc parse*[T](source: string,
-               sourcePath: string = "<input>"): Result[T, ParseError] =
+proc decode*[T](source: string,
+                sourcePath: string = "<input>"): Result[T, ParseError] =
   ## Parse `source` as a KDL document and decode into `T`.
+  ## (Named `decode` rather than `parse` to disambiguate from
+  ## `parser.parse`, which returns the untyped KdlDoc.)
   ##
   ## - If `T = seq[U]`, decodes every top-level node named per U's
   ##   `kdlNode` pragma.
