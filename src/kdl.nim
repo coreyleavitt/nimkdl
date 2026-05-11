@@ -15,7 +15,7 @@
 ## this module.
 
 import ./spans, ./intern, ./lexer, ./ast, ./parser, ./encode, ./grammar,
-       ./codegen
-export spans, intern, lexer, ast, parser, encode, grammar, codegen
+       ./codegen, ./path
+export spans, intern, lexer, ast, parser, encode, grammar, codegen, path
 
 const KdlLibVersion* = "0.0.1"

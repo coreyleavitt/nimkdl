@@ -35,3 +35,4 @@ task test, "Run unit tests":
   exec cmd & " tests/test_conformance.nim"
   exec cmd & " tests/test_codegen.nim"
   exec cmd & " tests/test_embed.nim"
+  exec cmd & " tests/test_path.nim"
