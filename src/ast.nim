@@ -27,7 +27,7 @@
 ## for malformed-but-typechecked AST (e.g. a manually-built node that
 ## somehow recurses via a custom proc).
 
-import std/strutils
+import std/[math, strutils]
 
 import ./intern
 import ./spans
@@ -140,6 +140,13 @@ proc newProperty*(doc: var KdlDoc, name: string, v: KdlValue,
 # instead the resolved string is compared. This lets ASTs from two different
 # documents be compared structurally.
 
+func floatStructEq(a, b: float): bool {.inline.} =
+  ## Structural equality on floats. IEEE NaN != NaN, but for AST equality
+  ## (especially round-trip testing of #nan) we want NaN-to-NaN to compare
+  ## equal. Same for distinguishing +0 / -0 if it ever matters.
+  if a.classify == fcNan and b.classify == fcNan: return true
+  a == b
+
 func `==`*(a, b: KdlValue): bool
 
 func valueEqual*(aDoc, bDoc: KdlDoc, a, b: KdlValue): bool =
@@ -154,7 +161,7 @@ func valueEqual*(aDoc, bDoc: KdlDoc, a, b: KdlValue): bool =
   case a.kind
   of kvString: a.strVal == b.strVal
   of kvInt:    a.intVal == b.intVal
-  of kvFloat:  a.floatVal == b.floatVal
+  of kvFloat:  floatStructEq(a.floatVal, b.floatVal)
   of kvBool:   a.boolVal == b.boolVal
   of kvNull:   true
 
@@ -166,7 +173,7 @@ func `==`*(a, b: KdlValue): bool =
   case a.kind
   of kvString: a.strVal == b.strVal
   of kvInt:    a.intVal == b.intVal
-  of kvFloat:  a.floatVal == b.floatVal
+  of kvFloat:  floatStructEq(a.floatVal, b.floatVal)
   of kvBool:   a.boolVal == b.boolVal
   of kvNull:   true
 

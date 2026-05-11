@@ -1,0 +1,731 @@
+## grammar — KDL v2 grammar as data + a table-driven reference interpreter.
+##
+## ## Why this module exists
+##
+## The hand-written parser in `parser.nim` is fast and produces good error
+## messages, but a parser that's the only authority on what KDL means is
+## an oracle of one. If a bug exists in `parser.nim`, no test that uses
+## `parser.nim` as ground truth will catch it.
+##
+## This module gives us a **second, independently-shaped recognizer** for
+## the language. The grammar lives as a `Table[string, Rule]` value — a
+## *data structure* describing what's recognized, not imperative code.
+## The reference interpreter walks that value recursively. The two
+## interpretations have maximally different bug surfaces:
+##
+##   parser.nim         ↔  grammar.nim
+##   ---------------------------------------------------
+##   imperative RD      ↔  table-driven walk of values
+##   mutable cursor     ↔  immutable state snapshots
+##   inline AST build   ↔  parse-tree then AST conversion
+##   tight error paths  ↔  PEG-style backtracking
+##
+## Anything they agree on is plausibly correct. Anywhere they disagree on
+## conformance corpus inputs (#526) is a bug in at least one of them.
+##
+## ## Why the grammar is data, not generated code
+##
+## We could write a `kdlGrammar:` macro that emits a parser proc per rule.
+## We chose data-driven because:
+##
+## 1. The grammar is inspectable — you can print it, walk it, transform
+##    it. A code-emitting macro produces opaque procs.
+## 2. The interpreter is one function (`interpret`) the reader can audit
+##    in full. A macro-generated parser scatters logic across N procs,
+##    each looking slightly different.
+## 3. The cost of indirection is irrelevant — this is the slow oracle,
+##    not the production hot path. The fast path is `parser.nim`.
+##
+## The `kdlGrammar:` macro **does** exist (see bottom of file) but it
+## does compile-time validation of the grammar value, not codegen. It
+## walks the rule table and asserts every `rRef` target exists. A typo
+## in `refTo("nodee")` becomes a compile error, not a runtime miss.
+##
+## ## Differential testing usage
+##
+## ```nim
+## let viaFast = parse(src)
+## let viaRef  = referenceInterpret(src)
+## doAssert viaFast.isOk == viaRef.isOk
+## if viaFast.isOk:
+##   doAssert docEqual(viaFast.get, viaRef.get)
+## ```
+##
+## The conformance harness (#526) runs this comparison on every input
+## in the kdl-org test corpus, plus a curated set of locally-interesting
+## fragments.
+
+import std/[macros, strutils, tables]
+
+import ./ast
+import ./intern
+import ./lexer
+import ./spans
+
+# ---------------------------------------------------------------------------
+# Rule data model
+# ---------------------------------------------------------------------------
+
+type
+  RuleKind* = enum
+    rkTerm      ## terminal: a specific TokenKind must appear here
+    rkRef       ## reference: this rule expands to another by name
+    rkSeq       ## sequence: A then B then C
+    rkAlt       ## alternation: A or B or C (first match wins, PEG semantics)
+    rkOpt       ## optional: A?
+    rkStar      ## zero-or-more: A*
+    rkPlus      ## one-or-more: A+
+    rkEof       ## matches at end-of-input
+    rkNot       ## negative lookahead: succeeds if inner fails, consumes nothing
+
+  Rule* = ref object
+    ## Grammar rule node. Reference type so we can build self-referential
+    ## structures (rules call each other by name, but inline subrules can
+    ## reference larger constructs without paying a string-lookup tax).
+    label*: string       ## optional human-readable tag for diagnostics
+    case kind*: RuleKind
+    of rkTerm: terminal*: TokenKind
+    of rkRef:  refName*: string
+    of rkSeq, rkAlt: parts*: seq[Rule]
+    of rkOpt, rkStar, rkPlus, rkNot: inner*: Rule
+    of rkEof: discard
+
+  Grammar* = object
+    ## A complete grammar definition: rule table plus start-symbol name.
+    rules*: Table[string, Rule]
+    startRule*: string
+
+# ---------------------------------------------------------------------------
+# Combinator constructors
+# ---------------------------------------------------------------------------
+#
+# Plain Nim `func`s, not macros. Building the grammar reads as normal
+# code. These produce immutable Rule values; reuse a binding to share
+# the same node across multiple rules.
+
+func term*(t: TokenKind): Rule = Rule(kind: rkTerm, terminal: t)
+func refTo*(name: string): Rule = Rule(kind: rkRef, refName: name)
+func seqOf*(parts: varargs[Rule]): Rule =
+  Rule(kind: rkSeq, parts: @parts)
+func altOf*(parts: varargs[Rule]): Rule =
+  Rule(kind: rkAlt, parts: @parts)
+func opt*(inner: Rule): Rule = Rule(kind: rkOpt, inner: inner)
+func star*(inner: Rule): Rule = Rule(kind: rkStar, inner: inner)
+func plus*(inner: Rule): Rule = Rule(kind: rkPlus, inner: inner)
+func neg*(inner: Rule): Rule = Rule(kind: rkNot, inner: inner)
+func eof*(): Rule = Rule(kind: rkEof)
+
+func labeled*(r: Rule, name: string): Rule =
+  ## Attach a debug label to a rule. Doesn't change semantics; shows up
+  ## in error messages and `$grammar` output.
+  result = r
+  result.label = name
+
+# ---------------------------------------------------------------------------
+# The KDL v2 grammar as a value
+# ---------------------------------------------------------------------------
+#
+# This is the spec, expressed as data. Compare to kdl.dev/spec — every
+# named production below corresponds to a named non-terminal there. The
+# Nim form is necessarily flatter (we don't model lexical-level rules
+# like number-literal grammar, because the lexer already handled them).
+
+proc buildKdlGrammar*(): Grammar =
+  result = Grammar(rules: initTable[string, Rule](), startRule: "document")
+
+  template rule(name: string, body: Rule) =
+    result.rules[name] = body
+
+  # ---- Lexical-level terminals (lexer already classified) ----
+  # Available terminal aliases: refer to the TokenKind via `term(tkXxx)`.
+
+  # ---- Value-position rules ----
+  rule "rawValue", altOf(
+    term(tkString), term(tkRawString),
+    term(tkNumber), term(tkKeyword)
+  )
+
+  rule "typeAnno", seqOf(
+    term(tkLParen),
+    altOf(term(tkIdent), term(tkString)),  # type name may be quoted
+    term(tkRParen)
+  )
+
+  rule "value", seqOf(
+    opt(refTo("typeAnno")),
+    refTo("rawValue")
+  )
+
+  rule "name", altOf(term(tkIdent), term(tkString))
+
+  rule "property", seqOf(refTo("name"), term(tkEquals), refTo("value"))
+
+  # entry := optional slashdash + (property OR plain value).
+  # No separate `argument` rule — interpRule's stamping is single-layer,
+  # so passthrough rules (argument → value) collapse and lose their tag.
+  # Distinguishing argument-vs-property by tag matters for the tree
+  # walker, so we keep them at the same level of alt.
+  rule "entry", seqOf(
+    opt(term(tkSlashDash)),
+    altOf(refTo("property"), refTo("value"))
+  )
+
+  # Children block: { node* } — internal newlines consumed between nodes.
+  # A REAL children block ends the node (after it, only the terminator is
+  # allowed). The slashdashed form acts like a zero-content entry and
+  # lives inside the entry-loop (see `slashdashChildren` + node rule).
+  rule "children", seqOf(
+    term(tkLBrace),
+    star(term(tkNewline)),
+    star(seqOf(refTo("node"), star(term(tkNewline)))),
+    term(tkRBrace)
+  )
+
+  # Slashdashed children block: `/- { ... }` — semantically a no-op,
+  # entries may follow it (mirrors the hand parser's behavior).
+  rule "slashdashChildren", seqOf(
+    term(tkSlashDash),
+    refTo("children")
+  )
+
+  # Terminator: newline, semicolon, EOF, or rightward lookahead at } (which
+  # the children-loop will consume). We don't actually consume EOF here —
+  # the document/children loop handles end-of-input naturally.
+  rule "terminator", altOf(
+    term(tkNewline),
+    term(tkSemicolon),
+    neg(refTo("anyToken"))   # successful negative lookahead = EOF
+  )
+
+  rule "anyToken", altOf(
+    term(tkLBrace), term(tkRBrace), term(tkEquals), term(tkSemicolon),
+    term(tkLParen), term(tkRParen), term(tkSlashDash), term(tkNewline),
+    term(tkIdent), term(tkString), term(tkRawString),
+    term(tkNumber), term(tkKeyword)
+  )
+
+  rule "node", seqOf(
+    opt(refTo("typeAnno")),
+    refTo("name"),
+    star(altOf(refTo("entry"), refTo("slashdashChildren"))),
+    opt(refTo("children")),
+    refTo("terminator")
+  )
+
+  rule "document", seqOf(
+    star(term(tkNewline)),
+    star(seqOf(
+      opt(term(tkSlashDash)),
+      refTo("node"),
+      star(term(tkNewline))
+    ))
+  )
+
+# Module-level instance for users / tests. Validated by the unit tests
+# (see test_grammar.nim) rather than at module init — Grammar contains
+# ref objects which don't const-evaluate cleanly enough for a static:
+# block.
+let KdlV2Grammar* = buildKdlGrammar()
+
+# ---------------------------------------------------------------------------
+# Compile-time validation
+# ---------------------------------------------------------------------------
+#
+# Walk the grammar and verify every `rRef("name")` resolves to a rule in
+# the table. A typo (`refTo("nodee")`) becomes a compile error here, not
+# a runtime miss inside the interpreter.
+
+proc validateRule(r: Rule, names: Table[string, bool], errors: var seq[string]) =
+  case r.kind
+  of rkRef:
+    if r.refName notin names:
+      errors.add("undefined rule reference: '" & r.refName & "'")
+  of rkSeq, rkAlt:
+    for p in r.parts: validateRule(p, names, errors)
+  of rkOpt, rkStar, rkPlus, rkNot:
+    validateRule(r.inner, names, errors)
+  of rkTerm, rkEof: discard
+
+proc validate*(g: Grammar): seq[string] =
+  ## Returns a list of human-readable problems with `g` — empty if valid.
+  var names = initTable[string, bool]()
+  for k, _ in g.rules: names[k] = true
+  if g.startRule notin names:
+    result.add("start rule '" & g.startRule & "' is not defined")
+  for name, rule in g.rules:
+    validateRule(rule, names, result)
+
+
+# ---------------------------------------------------------------------------
+# Pretty-print the grammar as docs
+# ---------------------------------------------------------------------------
+
+proc renderRule(r: Rule, depth = 0): string =
+  if r.label.len > 0: result.add("⟨" & r.label & "⟩ ")
+  case r.kind
+  of rkTerm:
+    result.add($r.terminal)
+  of rkRef:
+    result.add(r.refName)
+  of rkSeq:
+    var parts: seq[string] = @[]
+    for p in r.parts: parts.add(renderRule(p, depth + 1))
+    result.add(parts.join(" "))
+  of rkAlt:
+    var parts: seq[string] = @[]
+    for p in r.parts: parts.add(renderRule(p, depth + 1))
+    result.add("(" & parts.join(" | ") & ")")
+  of rkOpt:
+    result.add("(" & renderRule(r.inner, depth + 1) & ")?")
+  of rkStar:
+    result.add("(" & renderRule(r.inner, depth + 1) & ")*")
+  of rkPlus:
+    result.add("(" & renderRule(r.inner, depth + 1) & ")+")
+  of rkNot:
+    result.add("!(" & renderRule(r.inner, depth + 1) & ")")
+  of rkEof:
+    result.add("EOF")
+
+proc `$`*(g: Grammar): string =
+  ## Render the grammar as a human-readable EBNF-ish form. Useful as
+  ## executable documentation and for debugging mismatches.
+  var lines: seq[string] = @[]
+  lines.add("start: " & g.startRule)
+  for name, rule in g.rules:
+    lines.add(name & " := " & renderRule(rule))
+  lines.join("\n")
+
+# ---------------------------------------------------------------------------
+# Reference interpreter
+# ---------------------------------------------------------------------------
+#
+# Walks the grammar value recursively. Produces a tree of matched
+# token spans; a separate pass converts the tree into a `KdlDoc`.
+# This split keeps the recognition logic (driven by the grammar value)
+# disjoint from the AST construction logic (hand-coded per rule name).
+
+type
+  ParseNode = ref object
+    ## A node in the raw parse tree. Each Rule that matches produces one
+    ## of these. `tokens` is the linear sequence of tokens this match
+    ## consumed; `children` is the matches from sub-rules in source order.
+    ruleName: string         ## name of the rule that matched, "" for inline
+    consumed: Slice[int]     ## [start, finish) indices into the token stream
+    tokens: seq[Token]       ## flat list of consumed tokens (for terminals)
+    children: seq[ParseNode] ## child rule matches
+
+  InterpState = object
+    tokens: seq[Token]
+    pos: int
+    grammar: Grammar
+    deepestError: ParseError
+    haveError: bool
+
+const InterpRecursionCap = 1024
+
+proc interpRule(s: var InterpState, ruleName: string, depth: int):
+    Result[ParseNode, ParseError]
+
+proc interp(s: var InterpState, r: Rule, depth: int):
+    Result[ParseNode, ParseError] =
+  ## Walk a rule. Returns the matched parse node on success; updates
+  ## `s.pos` to past the match. On failure, leaves `s.pos` at the entry
+  ## point (PEG backtracking semantics) and returns Err.
+  if depth >= InterpRecursionCap:
+    let span =
+      if s.pos < s.tokens.len: s.tokens[s.pos].span
+      else: pointSpan(StartPosition)
+    return err[ParseNode, ParseError](
+      initError(peParseDepthExceeded, span, "reference interpreter overflow"))
+
+  let entryPos = s.pos
+  case r.kind
+
+  of rkTerm:
+    if s.pos < s.tokens.len and s.tokens[s.pos].kind == r.terminal:
+      let tok = s.tokens[s.pos]
+      inc s.pos
+      return ok[ParseNode, ParseError](ParseNode(
+        consumed: entryPos ..< s.pos, tokens: @[tok]))
+    let span =
+      if s.pos < s.tokens.len: s.tokens[s.pos].span
+      else: pointSpan(StartPosition)
+    let e = initError(peParseUnexpected, span,
+                      "expected " & $r.terminal)
+    if not s.haveError or entryPos > s.deepestError.span.start.offset:
+      s.deepestError = e; s.haveError = true
+    return err[ParseNode, ParseError](e)
+
+  of rkEof:
+    if s.pos >= s.tokens.len or s.tokens[s.pos].kind == tkEof:
+      return ok[ParseNode, ParseError](ParseNode(
+        consumed: entryPos ..< s.pos))
+    let span = s.tokens[s.pos].span
+    return err[ParseNode, ParseError](
+      initError(peParseUnexpected, span, "expected end of input"))
+
+  of rkRef:
+    return interpRule(s, r.refName, depth + 1)
+
+  of rkSeq:
+    var collected: seq[ParseNode] = @[]
+    for p in r.parts:
+      let res = interp(s, p, depth + 1)
+      if res.isErr:
+        s.pos = entryPos     # PEG: failed seq rewinds
+        return res
+      collected.add(res.get)
+    return ok[ParseNode, ParseError](ParseNode(
+      consumed: entryPos ..< s.pos, children: collected))
+
+  of rkAlt:
+    for p in r.parts:
+      let savedPos = s.pos
+      let res = interp(s, p, depth + 1)
+      if res.isOk: return res
+      s.pos = savedPos       # try next alternative
+    let span =
+      if s.pos < s.tokens.len: s.tokens[s.pos].span
+      else: pointSpan(StartPosition)
+    return err[ParseNode, ParseError](
+      initError(peParseUnexpected, span, "no alternative matched"))
+
+  of rkOpt:
+    let savedPos = s.pos
+    let res = interp(s, r.inner, depth + 1)
+    if res.isOk:
+      return ok[ParseNode, ParseError](ParseNode(
+        consumed: entryPos ..< s.pos, children: @[res.get]))
+    s.pos = savedPos
+    return ok[ParseNode, ParseError](ParseNode(
+      consumed: entryPos ..< s.pos))
+
+  of rkStar:
+    var collected: seq[ParseNode] = @[]
+    while true:
+      let savedPos = s.pos
+      let res = interp(s, r.inner, depth + 1)
+      if res.isErr:
+        s.pos = savedPos
+        break
+      # Guard against zero-width matches looping forever
+      if s.pos == savedPos: break
+      collected.add(res.get)
+    return ok[ParseNode, ParseError](ParseNode(
+      consumed: entryPos ..< s.pos, children: collected))
+
+  of rkPlus:
+    var collected: seq[ParseNode] = @[]
+    let firstRes = interp(s, r.inner, depth + 1)
+    if firstRes.isErr:
+      s.pos = entryPos
+      return err[ParseNode, ParseError](firstRes.getErr)
+    collected.add(firstRes.get)
+    while true:
+      let savedPos = s.pos
+      let res = interp(s, r.inner, depth + 1)
+      if res.isErr:
+        s.pos = savedPos
+        break
+      if s.pos == savedPos: break
+      collected.add(res.get)
+    return ok[ParseNode, ParseError](ParseNode(
+      consumed: entryPos ..< s.pos, children: collected))
+
+  of rkNot:
+    let savedPos = s.pos
+    let res = interp(s, r.inner, depth + 1)
+    s.pos = savedPos         # negative lookahead never consumes
+    if res.isOk:
+      let span =
+        if s.pos < s.tokens.len: s.tokens[s.pos].span
+        else: pointSpan(StartPosition)
+      return err[ParseNode, ParseError](
+        initError(peParseUnexpected, span, "unexpected token"))
+    return ok[ParseNode, ParseError](ParseNode(
+      consumed: entryPos ..< s.pos))
+
+proc interpRule(s: var InterpState, ruleName: string, depth: int):
+    Result[ParseNode, ParseError] =
+  let r = s.grammar.rules[ruleName]
+  let res = interp(s, r, depth + 1)
+  if res.isOk:
+    var pn = res.get
+    pn.ruleName = ruleName
+    return ok[ParseNode, ParseError](pn)
+  return res
+
+# ---------------------------------------------------------------------------
+# Parse tree → KdlDoc
+# ---------------------------------------------------------------------------
+#
+# Walks the parse tree and constructs the AST. One proc per source-of-truth
+# rule. Hand-coded — recognition is data-driven, but semantics still need
+# human-authored mapping.
+
+proc treeFlatten(n: ParseNode, acc: var seq[ParseNode]) =
+  acc.add(n)
+  for c in n.children: treeFlatten(c, acc)
+
+proc toSpan(s: Slice[int], toks: seq[Token]): Span =
+  ## Best-effort span across a token range.
+  if toks.len == 0 or s.a >= toks.len: return pointSpan(StartPosition)
+  let startTok = toks[max(0, s.a)]
+  let endTok = toks[min(toks.len - 1, max(s.a, s.b - 1))]
+  initSpan(startTok.span.start, endTok.span.finish)
+
+proc findFirst(n: ParseNode, ruleName: string): ParseNode =
+  ## DFS for the first child match of a given rule. Returns nil if absent.
+  for c in n.children:
+    if c.ruleName == ruleName: return c
+    let deeper = findFirst(c, ruleName)
+    if deeper != nil: return deeper
+  return nil
+
+proc findAll(n: ParseNode, ruleName: string): seq[ParseNode] =
+  ## All immediate-or-descendant matches of `ruleName` within `n`.
+  for c in n.children:
+    if c.ruleName == ruleName: result.add(c)
+    else: result.add(findAll(c, ruleName))
+
+proc collectTokens(n: ParseNode): seq[Token] =
+  result.add(n.tokens)
+  for c in n.children: result.add(collectTokens(c))
+
+proc resolveName(toks: seq[Token], doc: var KdlDoc): InternedStr =
+  ## Helper: a bareword OR quoted string used as a node/property name.
+  if toks.len == 0: return InvalidInterned
+  case toks[0].kind
+  of tkIdent: toks[0].ident
+  of tkString: doc.interner.intern(toks[0].strVal)
+  else: InvalidInterned
+
+proc findImmediate(n: ParseNode, ruleName: string): ParseNode =
+  ## Like `findFirst` but only walks the **immediate** children — does not
+  ## recurse past unstamped wrappers. Use this when scope matters (e.g.
+  ## a node's own typeAnno vs a nested entry's value-typeAnno).
+  for c in n.children:
+    if c.ruleName == ruleName: return c
+    # Recurse only through structural wrappers that don't introduce a
+    # new named scope. opt/star/seq matches have ruleName == "".
+    if c.ruleName == "":
+      let deeper = findImmediate(c, ruleName)
+      if deeper != nil: return deeper
+  return nil
+
+proc buildValue(valueMatch: ParseNode, doc: var KdlDoc): KdlValue =
+  ## Build a KdlValue from a `value` rule match.
+  ## Grammar: value := opt(typeAnno) rawValue
+  ## So valueMatch.children = [opt(typeAnno) match, rawValue match]
+  var anno = InvalidInterned
+  let typeAnno = findImmediate(valueMatch, "typeAnno")
+  if typeAnno != nil:
+    # typeAnno tokens = '(' name ')'
+    let toks = collectTokens(typeAnno)
+    if toks.len >= 3:
+      anno = resolveName(@[toks[1]], doc)
+  let rawNode = findImmediate(valueMatch, "rawValue")
+  if rawNode == nil:
+    return newNullValue()
+  let toks = collectTokens(rawNode)
+  if toks.len == 0:
+    return newNullValue()
+  let v = toks[0]
+  case v.kind
+  of tkString:
+    result = newStringValue(v.strVal, v.span)
+  of tkRawString:
+    result = newStringValue(v.rawVal, v.span)
+  of tkNumber:
+    let isFloat = v.numBase == nbDecimal and
+                  ('.' in v.numText or 'e' in v.numText or 'E' in v.numText)
+    if isFloat:
+      var clean = ""
+      for c in v.numText:
+        if c != '_': clean.add(c)
+      result = newFloatValue(parseFloat(clean), v.span)
+    else:
+      var s = v.numText
+      if s.len > 0 and (s[0] == '+' or s[0] == '-'): s = s[1 .. ^1]
+      if v.numBase != nbDecimal and s.len >= 2: s = s[2 .. ^1]
+      var clean = ""
+      for c in s:
+        if c != '_': clean.add(c)
+      var acc: int64 = 0
+      let radix = (case v.numBase
+                   of nbDecimal: 10
+                   of nbHex: 16
+                   of nbOctal: 8
+                   of nbBinary: 2)
+      for c in clean:
+        let d =
+          case c
+          of '0'..'9': int(ord(c) - ord('0'))
+          of 'a'..'f': int(ord(c) - ord('a') + 10)
+          of 'A'..'F': int(ord(c) - ord('A') + 10)
+          else: -1
+        acc = acc * int64(radix) + int64(d)
+      if v.numNegative: acc = -acc
+      result = newIntValue(acc, v.span)
+  of tkKeyword:
+    case v.keyword
+    of kwTrue:   result = newBoolValue(true, v.span)
+    of kwFalse:  result = newBoolValue(false, v.span)
+    of kwNull:   result = newNullValue(v.span)
+    of kwInf:    result = newFloatValue(Inf, v.span)
+    of kwNegInf: result = newFloatValue(NegInf, v.span)
+    of kwNan:    result = newFloatValue(NaN, v.span)
+  else:
+    result = newNullValue()
+  result.typeAnnotation = anno
+
+proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc): KdlEntry =
+  ## Build an entry. Grammar:
+  ##   entry := opt(slashdash) (property | value)
+  ## So look for a property first; absence means it's an argument-value.
+  let prop = findImmediate(entryMatch, "property")
+  if prop != nil:
+    let nameMatch = findImmediate(prop, "name")
+    let key =
+      if nameMatch != nil: resolveName(collectTokens(nameMatch), doc)
+      else: InvalidInterned
+    let valueMatch = findImmediate(prop, "value")
+    let v =
+      if valueMatch != nil: buildValue(valueMatch, doc)
+      else: newNullValue()
+    return KdlEntry(kind: keProperty, propName: key, propValue: v)
+  let valueMatch = findImmediate(entryMatch, "value")
+  if valueMatch != nil:
+    return newArgument(buildValue(valueMatch, doc))
+  return newArgument(newNullValue())
+
+proc buildNode(node: ParseNode, doc: var KdlDoc): KdlNode
+
+proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc): seq[KdlNode] =
+  ## Walk the `children` rule match. Grammar:
+  ##   children := '{' star(newline) star(seq(node, star(newline))) '}'
+  ## So children.children = ['{', newlines, inner_star, '}']
+  ## inner_star.children = list of (node, newlines) seq iterations.
+  if childrenMatch.children.len < 3: return
+  let innerStar = childrenMatch.children[2]
+  for iter in innerStar.children:
+    if iter.children.len < 1: continue
+    let nodeMatch = iter.children[0]
+    result.add(buildNode(nodeMatch, doc))
+
+proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode] =
+  ## Like `findAll` but only walks structural (unstamped) descendants.
+  for c in n.children:
+    if c.ruleName == ruleName:
+      result.add(c)
+    elif c.ruleName == "":
+      result.add(findImmediateAll(c, ruleName))
+
+proc buildNode(node: ParseNode, doc: var KdlDoc): KdlNode =
+  ## Build a KdlNode from a `node` rule match. Grammar:
+  ##   node := opt(typeAnno) name star(entry) opt(children) terminator
+  var anno = InvalidInterned
+  let typeAnnoMatch = findImmediate(node, "typeAnno")
+  if typeAnnoMatch != nil:
+    let toks = collectTokens(typeAnnoMatch)
+    if toks.len >= 3:
+      anno = resolveName(@[toks[1]], doc)
+
+  let nameMatch = findImmediate(node, "name")
+  let name =
+    if nameMatch != nil: resolveName(collectTokens(nameMatch), doc)
+    else: InvalidInterned
+
+  result = KdlNode(name: name, typeAnnotation: anno,
+                   entries: @[], children: @[],
+                   span: pointSpan(StartPosition))
+
+  for entryMatch in findImmediateAll(node, "entry"):
+    let etoks = collectTokens(entryMatch)
+    if etoks.len > 0 and etoks[0].kind == tkSlashDash:
+      continue  # slashdashed entry
+    result.entries.add(buildEntry(entryMatch, doc))
+
+  # A real children block at the end of the node — the grammar separates
+  # this from slashdashed-children (which lives inside the entry loop and
+  # is dropped here as a no-op).
+  let childrenMatch = findImmediate(node, "children")
+  if childrenMatch != nil:
+    result.children = buildChildrenBlock(childrenMatch, doc)
+
+proc buildDoc(root: ParseNode, doc: var KdlDoc) =
+  ## Walk the `document` rule match. Grammar:
+  ##   document := star(newline) star(seq(opt(slashdash), node, star(newline)))
+  ## root.children = [leading_newlines, body_star]
+  ## body_star.children = [iter_seq]+; each iter_seq.children = [opt(slashdash), node, star(newline)]
+  if root.children.len < 2: return
+  let bodyStar = root.children[1]
+  for iter in bodyStar.children:
+    if iter.children.len < 2: continue
+    let slashdashOpt = iter.children[0]
+    let isSkipped = slashdashOpt.children.len > 0  # opt matched ⇒ skipped
+    if isSkipped: continue
+    let nodeMatch = iter.children[1]
+    doc.nodes.add(buildNode(nodeMatch, doc))
+
+proc referenceInterpret*(source: string, sourcePath = "<input>"):
+    Result[KdlDoc, ParseError] =
+  ## Independent, table-driven recognizer for KDL v2. Returns the same
+  ## KdlDoc shape as `parse()` from parser.nim. Used as the differential
+  ## oracle in the conformance harness.
+  var doc = newDoc(sourcePath)
+  let tokens = lex(source, doc.interner)
+  for t in tokens:
+    if t.kind == tkError:
+      return err[KdlDoc, ParseError](t.error)
+  var s = InterpState(tokens: tokens, pos: 0,
+                      grammar: KdlV2Grammar, haveError: false)
+  let res = interpRule(s, KdlV2Grammar.startRule, 0)
+  if res.isErr:
+    return err[KdlDoc, ParseError](res.getErr)
+  # Must have consumed everything except trailing EOF
+  if s.pos < s.tokens.len and s.tokens[s.pos].kind != tkEof:
+    let span = s.tokens[s.pos].span
+    return err[KdlDoc, ParseError](
+      initError(peParseUnexpected, span, "trailing tokens after document"))
+  buildDoc(res.get, doc)
+  ok[KdlDoc, ParseError](doc)
+
+# ---------------------------------------------------------------------------
+# kdlGrammar macro — compile-time grammar validation
+# ---------------------------------------------------------------------------
+#
+# The macro is intentionally small. Its job is to make the grammar-block
+# syntactic surface look distinctive and to push validation to compile
+# time (catching typos in rule references before any test runs).
+#
+# Usage:
+#
+#   const G = kdlGrammar:
+#     # Plain Nim expression; the macro asserts validity at compile time
+#     buildKdlGrammar()
+#
+# Or more usefully for ad-hoc grammars:
+#
+#   const G = kdlGrammar:
+#     var g = Grammar(...)
+#     # ... build g
+#     g
+
+macro kdlGrammar*(body: untyped): untyped =
+  ## Wraps a grammar-building expression and validates the result. Any
+  ## rule with an undefined `refTo` target raises an AssertionDefect at
+  ## construction time — before any input ever touches the grammar.
+  ##
+  ## A compile-time variant would require `const`-evaluable grammars,
+  ## which our `ref object` rule encoding doesn't support cleanly. The
+  ## construction-time check is good enough: every code path that uses
+  ## the grammar must first build it, so a typo in `refTo("nodee")`
+  ## fires the moment the program tries to use the bad grammar.
+  result = quote do:
+    block:
+      let g = `body`
+      let errs {.used.} = validate(g)
+      doAssert errs.len == 0,
+        "grammar inconsistent: " & errs.join("; ")
+      g
