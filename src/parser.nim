@@ -214,8 +214,16 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] =
   ## property; anything else starting with a value (incl. a type-annotated
   ## value) is an argument.
   let startSpan = p.peek.span
-  if p.peek.kind == tkIdent and p.peek(1).kind == tkEquals:
-    let key = p.advance().ident
+  # Property: bare ident or quoted string, followed by `=`
+  if (p.peek.kind == tkIdent or p.peek.kind == tkString) and
+     p.peek(1).kind == tkEquals:
+    var key: InternedStr
+    case p.peek.kind
+    of tkIdent: key = p.advance().ident
+    of tkString:
+      let tok = p.advance()
+      key = p.doc.interner.intern(tok.strVal)
+    else: discard  # unreachable (guarded above)
     discard p.advance()  # consume `=`
     let vRes = p.parseValue()
     if vRes.isErr: return err[KdlEntry, ParseError](vRes.getErr)
@@ -245,7 +253,8 @@ func canStartEntry(p: Parser): bool =
   let t = p.peek
   if t.kind == tkSlashDash: return true
   if canStartValue(t): return true
-  if t.kind == tkIdent and p.peek(1).kind == tkEquals: return true
+  if (t.kind == tkIdent or t.kind == tkString) and
+     p.peek(1).kind == tkEquals: return true
   false
 
 proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError]
@@ -263,12 +272,19 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] =
     if r.isErr: return err[KdlNode, ParseError](r.getErr)
     anno = r.get
 
-  if not p.check(tkIdent):
-    if p.peek.kind == tkError:
-      return err[KdlNode, ParseError](p.advance().error)
+  # Node names can be bare identifiers OR quoted strings per v2 spec.
+  var nameHandle: InternedStr
+  case p.peek.kind
+  of tkIdent:
+    nameHandle = p.advance().ident
+  of tkString:
+    let tok = p.advance()
+    nameHandle = p.doc.interner.intern(tok.strVal)
+  of tkError:
+    return err[KdlNode, ParseError](p.advance().error)
+  else:
     return err[KdlNode, ParseError](parseErr(peParseExpected,
       p.peek.span, "expected node name"))
-  let nameHandle = p.advance().ident
 
   var node = KdlNode(name: nameHandle, typeAnnotation: anno,
                      entries: @[], children: @[], span: startSpan)
@@ -381,5 +397,9 @@ proc parse*(source: string, sourcePath = "<input>"):
   let dRes = p.parseDocument()
   if dRes.isErr:
     return err[KdlDoc, ParseError](dRes.getErr)
-  doc.nodes = dRes.get
-  ok[KdlDoc, ParseError](doc)
+  # The parser may have interned additional strings (quoted node names,
+  # quoted property keys) into its local copy of the doc's interner.
+  # Reach into p.doc rather than the original `doc` so those interns
+  # are preserved.
+  p.doc.nodes = dRes.get
+  ok[KdlDoc, ParseError](p.doc)
