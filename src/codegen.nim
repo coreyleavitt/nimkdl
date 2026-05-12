@@ -57,6 +57,7 @@
 import std/[macros, strutils, tables]
 
 import ./ast
+import ./encode as kdlEncode  # AST-level encoder; aliased to avoid clash
 import ./intern
 import ./parser
 import ./spans
@@ -207,6 +208,36 @@ proc kdlDecodeValue*[E: enum](target: var E, v: KdlValue, doc: var KdlDoc): bool
     decodeEnumFromString(target, v.strVal)
   else:
     false
+
+# ---------------------------------------------------------------------------
+# Primitive encoders
+# ---------------------------------------------------------------------------
+#
+# `kdlEncodeValue` overloads convert a typed Nim value into a `KdlValue`.
+# Symmetric counterpart to `kdlDecodeValue`. Used by `deriveEncode`'s
+# generated `kdlEncodeImpl` procs.
+
+func kdlEncodeValue*(s: string): KdlValue =
+  newStringValue(s)
+
+func kdlEncodeValue*[T: SomeSignedInt](i: T): KdlValue =
+  newIntValue(int64(i))
+
+func kdlEncodeValue*[T: SomeUnsignedInt](i: T): KdlValue =
+  # uint64 magnitudes that exceed int64.high promote to kvBigInt.
+  when T.sizeof == uint64.sizeof:
+    if uint64(i) > uint64(int64.high):
+      return newBigIntValue(0, uint64(i), false)
+  newIntValue(int64(i))
+
+func kdlEncodeValue*[T: SomeFloat](f: T): KdlValue =
+  newFloatValue(float(f))
+
+func kdlEncodeValue*(b: bool): KdlValue =
+  newBoolValue(b)
+
+func kdlEncodeValue*[E: enum](e: E): KdlValue =
+  newStringValue($e)
 
 # ---------------------------------------------------------------------------
 # Helpers used by generated decoders
@@ -814,6 +845,153 @@ macro deriveDecode*(typ: typedesc): untyped =
     echo "=== kdlDecodeImpl + kdlNodeNameImpl for ", repr(typ), " ==="
     echo result.repr
     echo "==="
+
+# ---------------------------------------------------------------------------
+# deriveEncode — symmetric counterpart to deriveDecode
+# ---------------------------------------------------------------------------
+
+proc emitArgEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
+    NimNode =
+  ## Emit code that appends `v.fieldName` as a positional argument on
+  ## the generated node. Applies the `kdlReserved` tag to the value's
+  ## `typeAnnotation` when declared.
+  let valSym = genSym(nskVar, "argVal_" & f.nimName)
+  result = newStmtList()
+  result.add quote do:
+    var `valSym` = kdlEncodeValue(`sourceAccess`)
+  if f.expectedReserved.len > 0:
+    let tagLit = newLit(f.expectedReserved)
+    result.add quote do:
+      `valSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
+  result.add quote do:
+    `nodeIdent`.entries.add(KdlEntry(
+      kind: keArgument,
+      argValue: `valSym`,
+      span: `nodeIdent`.span))
+
+proc emitAttrEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
+    NimNode =
+  ## Emit code that appends `v.fieldName` as a `name=value` property.
+  let valSym = genSym(nskVar, "attrVal_" & f.nimName)
+  let kdlNameLit = newLit(f.kdlName)
+  result = newStmtList()
+  result.add quote do:
+    var `valSym` = kdlEncodeValue(`sourceAccess`)
+  if f.expectedReserved.len > 0:
+    let tagLit = newLit(f.expectedReserved)
+    result.add quote do:
+      `valSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
+  result.add quote do:
+    `nodeIdent`.entries.add(KdlEntry(
+      kind: keProperty,
+      propName: `docIdent`.interner.intern(`kdlNameLit`),
+      propValue: `valSym`,
+      span: `nodeIdent`.span))
+
+proc emitChildEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
+    NimNode =
+  ## Emit code that recursively encodes a child object (or seq of
+  ## objects) and appends as a nested node.
+  if typeNodeIsSeq(f.typeNode):
+    let elemSym = genSym(nskForVar, "childElem_" & f.nimName)
+    quote do:
+      for `elemSym` in `sourceAccess`:
+        `nodeIdent`.children.add(kdlEncodeImpl(`elemSym`, `docIdent`))
+  else:
+    quote do:
+      `nodeIdent`.children.add(kdlEncodeImpl(`sourceAccess`, `docIdent`))
+
+proc emitFieldEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
+    NimNode =
+  case f.kind
+  of fkSkip:  newStmtList()
+  of fkArg:   emitArgEncode(f, sourceAccess, docIdent, nodeIdent)
+  of fkAttr:  emitAttrEncode(f, sourceAccess, docIdent, nodeIdent)
+  of fkChild: emitChildEncode(f, sourceAccess, docIdent, nodeIdent)
+
+macro deriveEncode*(typ: typedesc): untyped =
+  ## Emit a `kdlEncodeImpl` overload for `typ` (the symmetric
+  ## counterpart to `deriveDecode`). Generated procedure walks a typed
+  ## value and produces the equivalent `KdlNode`, with the configured
+  ## `kdlReserved` tags carried over to value-level type annotations.
+  ##
+  ## Combined with the top-level `encode[T](v: T): string`, this closes
+  ## round-trip for typed configs: `decode[T](encode(v))` produces a
+  ## value equal to `v` for every type that round-trips losslessly
+  ## through the underlying KDL grammar.
+  ##
+  ## Generated code is dumpable via `-d:dumpKdlGen`.
+  let typSym =
+    if typ.kind == nnkBracketExpr: typ[1]
+    else: typ
+  let typeImpl = typSym.getImpl
+  if typeImpl.kind != nnkTypeDef:
+    error("deriveEncode: argument is not a type definition", typ)
+  let body = typeImpl[2]
+  if body.kind != nnkObjectTy:
+    error("deriveEncode: only object types are supported (v0); got " &
+          $body.kind, typ)
+  let recList = body[2]
+  let shape = collectShape(recList)
+
+  let vIdent = ident("v")
+  let docIdent = ident("doc")
+  let nodeNameLit = newLit(extractNodeName(typSym))
+
+  var procBody = newStmtList()
+  procBody.add quote do:
+    result = KdlNode(
+      name: `docIdent`.interner.intern(`nodeNameLit`),
+      typeAnnotation: InvalidInterned,
+      entries: @[],
+      children: @[],
+      span: pointSpan(StartPosition))
+
+  let nodeIdent = ident("result")
+  if not shape.hasVariant:
+    for f in shape.shared:
+      let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
+      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent))
+  else:
+    # Variant types: shared fields always encode; branch fields only
+    # encode for the active discriminator.
+    for f in shape.shared:
+      let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
+      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent))
+    let disc = shape.variant.disc
+    let discAccess = newDotExpr(vIdent, ident(disc.nimName))
+    procBody.add(emitFieldEncode(disc, discAccess, docIdent, nodeIdent))
+    let caseStmt = nnkCaseStmt.newTree(discAccess)
+    for branch in shape.variant.branches:
+      var bb = newStmtList()
+      for f in branch.fields:
+        let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
+        bb.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent))
+      if bb.len == 0:
+        bb.add(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
+      caseStmt.add(nnkOfBranch.newTree(branch.discValue, bb))
+    procBody.add(caseStmt)
+
+  let encodeProc = quote do:
+    proc kdlEncodeImpl*(`vIdent`: `typ`,
+                       `docIdent`: var KdlDoc): KdlNode {.noSideEffect.} =
+      `procBody`
+
+  result = encodeProc
+  when defined(dumpKdlGen):
+    echo "=== kdlEncodeImpl for ", repr(typ), " ==="
+    echo result.repr
+    echo "==="
+
+proc encode*[T: object](v: T): string =
+  ## Render a typed value `v` as canonical KDL text. Wraps
+  ## `kdlEncodeImpl(v, doc)` in a fresh document and delegates to the
+  ## AST encoder. Requires `deriveEncode(T)` to have been called.
+  mixin kdlEncodeImpl
+  var doc = newDoc()
+  let n = kdlEncodeImpl(v, doc)
+  doc.nodes.add(n)
+  kdlEncode.encode(doc)
 
 # ---------------------------------------------------------------------------
 # parse[T]
