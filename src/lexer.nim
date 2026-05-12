@@ -119,22 +119,86 @@ type
 # ---------------------------------------------------------------------------
 
 func isIdentStart(ch: char): bool {.inline.} =
-  ## Bare identifiers in KDL v2 are quite permissive — almost anything
-  ## that isn't punctuation, whitespace, or number-looking. The number-
-  ## looking discrimination for `.` and `-` is handled at the call site
-  ## via lookahead (lexOne). This implements the ASCII subset of the v2
-  ## rule; full Unicode bare-ident coverage is filed as v0.2 work.
+  ## ASCII identifier-start predicate. KDL v2 defines bare idents by a
+  ## denylist; this proc covers the ASCII subset. Bytes >= 0x80 are
+  ## handled via `decodeUtf8At` + `isIdentCodepoint` at the call site so
+  ## multi-byte Unicode codepoints participate correctly.
   case ch
   of '\0' .. ' ', '\x7f': false
-  of '{', '}', '(', ')', '[', ']', '/', '\\', '"', '#', '=', ';', ',': false
+  of '{', '}', '(', ')', '[', ']', '/', '\\', '"', '#', '=', ';': false
   of '0' .. '9': false  # would look like the start of a number
   else: true
 
 func isIdentCont(ch: char): bool {.inline.} =
   case ch
   of '\0' .. ' ', '\x7f': false
-  of '{', '}', '(', ')', '[', ']', '/', '\\', '"', '#', '=', ';', ',': false
+  of '{', '}', '(', ')', '[', ']', '/', '\\', '"', '#', '=', ';': false
   else: true
+
+func decodeUtf8At*(s: string, pos: int): tuple[cp: int, width: int] =
+  ## Decode one UTF-8 codepoint at `s[pos]`. Returns (-1, 0) on EOF or
+  ## malformed input. Surrogate halves (U+D800-DFFF) and codepoints >
+  ## U+10FFFF report as malformed; over-long encodings too.
+  if pos >= s.len: return (-1, 0)
+  let b0 = uint8(s[pos])
+  if b0 < 0x80'u8: return (int(b0), 1)
+  var width: int
+  var cp: int
+  if (b0 and 0xE0'u8) == 0xC0'u8:
+    width = 2; cp = int(b0 and 0x1F'u8)
+    if b0 < 0xC2'u8: return (-1, 0)
+  elif (b0 and 0xF0'u8) == 0xE0'u8:
+    width = 3; cp = int(b0 and 0x0F'u8)
+  elif (b0 and 0xF8'u8) == 0xF0'u8:
+    width = 4; cp = int(b0 and 0x07'u8)
+    if b0 > 0xF4'u8: return (-1, 0)
+  else:
+    return (-1, 0)
+  if pos + width > s.len: return (-1, 0)
+  for j in 1 ..< width:
+    let bj = uint8(s[pos + j])
+    if (bj and 0xC0'u8) != 0x80'u8: return (-1, 0)
+    cp = (cp shl 6) or int(bj and 0x3F'u8)
+  case width
+  of 2:
+    if cp < 0x80: return (-1, 0)
+  of 3:
+    if cp < 0x800 or (cp >= 0xD800 and cp <= 0xDFFF): return (-1, 0)
+  of 4:
+    if cp < 0x10000 or cp > 0x10FFFF: return (-1, 0)
+  else: discard
+  (cp, width)
+
+func isUnicodeWhitespace*(cp: int): bool =
+  ## KDL v2 Whitespace table.
+  case cp
+  of 0x0009, 0x0020, 0x00A0, 0x1680, 0x202F, 0x205F, 0x3000: true
+  of 0x2000..0x200A: true
+  else: false
+
+func isUnicodeNewline*(cp: int): bool =
+  ## KDL v2 Newline table. Includes VT (0x0B) and FF (0x0C) — both
+  ## terminate a node like LF, not just whitespace.
+  case cp
+  of 0x000A, 0x000B, 0x000C, 0x000D, 0x0085, 0x2028, 0x2029: true
+  else: false
+
+func isIdentCodepoint*(cp: int): bool =
+  ## True iff `cp` may appear inside a bare identifier. Whitespace,
+  ## newline, the 12-char structural set, disallowed-literal-codepoints,
+  ## bidi controls, and BOM are all rejected; everything else is fine.
+  if cp < 0: return false
+  if cp < 0x80:
+    let ch = char(cp)
+    return isIdentCont(ch)
+  if isUnicodeWhitespace(cp): return false
+  if isUnicodeNewline(cp): return false
+  if (cp >= 0x200E and cp <= 0x200F) or
+     (cp >= 0x202A and cp <= 0x202E) or
+     (cp >= 0x2066 and cp <= 0x2069): return false
+  if cp == 0xFEFF: return false
+  if cp >= 0xD800 and cp <= 0xDFFF: return false
+  true
 
 func isAsciiWhitespace(ch: char): bool {.inline.} =
   ch == ' ' or ch == '\t'
@@ -258,21 +322,39 @@ func peek(lx: Lexer, ahead = 0): char {.inline.} =
 proc advanceOne(lx: var Lexer) =
   lx.pos = lx.pos.advance(lx.source[lx.pos.offset])
 
+proc multilineNewlineWidth(lx: Lexer): int =
+  ## Width (in bytes) of a Unicode newline at the current cursor, or 0
+  ## if not at a newline. Single-byte ASCII newlines (LF, CR, VT, FF)
+  ## return 1; CRLF returns 2; the multi-byte NEL/LS/PS return 2 or 3.
+  if lx.atEof: return 0
+  let b0 = uint8(lx.peek)
+  if b0 < 0x80'u8:
+    case lx.peek
+    of '\r':
+      return (if lx.peek(1) == '\n': 2 else: 1)
+    of '\n', '\v', '\f':
+      return 1
+    else:
+      return 0
+  let (cp, w) = decodeUtf8At(lx.source, lx.pos.offset)
+  if cp < 0: return 0
+  if isUnicodeNewline(cp): w else: 0
+
 proc advanceNewline(lx: var Lexer) =
   ## Consume one logical newline. CRLF is treated as a single newline
   ## (one position bump, not two) so line numbers are stable across
-  ## Windows-style files.
-  let ch = lx.peek
-  if ch == '\r' and lx.peek(1) == '\n':
-    # CRLF: bump line via the LF, advance offset twice
-    lx.pos = Position(line: lx.pos.line + 1, col: 1, offset: lx.pos.offset + 2)
-  elif ch == '\r' or ch == '\n':
-    lx.pos = Position(line: lx.pos.line + 1, col: 1, offset: lx.pos.offset + 1)
-  else:
-    discard
+  ## Windows-style files. Also handles VT, FF, NEL, LS, PS.
+  let w = lx.multilineNewlineWidth
+  if w == 0: return
+  lx.pos = Position(line: lx.pos.line + 1, col: 1,
+                    offset: lx.pos.offset + w)
 
 func isNewline(ch: char): bool {.inline.} =
-  ch == '\n' or ch == '\r'
+  ## ASCII-only newline predicate (for hot byte-level paths). Multi-byte
+  ## newlines and the broader Unicode set are checked via
+  ## `multilineNewlineWidth` / `isUnicodeNewline` at call sites that
+  ## must respect the full v2 Newline table.
+  ch == '\n' or ch == '\r' or ch == '\v' or ch == '\f'
 
 # ---------------------------------------------------------------------------
 # Token emission
@@ -378,21 +460,30 @@ proc skipWhitespaceAndComments(lx: var Lexer) =
   let entryPos = lx.pos.offset
   while not lx.atEof:
     let ch = lx.peek
-    if isAsciiWhitespace(ch):
-      lx.advanceOne()
-    elif ch == '/' and lx.peek(1) == '/':
-      lx.advanceOne(); lx.advanceOne()
-      lx.skipLineComment()
-    elif ch == '/' and lx.peek(1) == '*':
-      lx.advanceOne(); lx.advanceOne()
-      if not lx.skipBlockComment(): return
-    elif ch == '\\':
-      if not lx.skipLineContinuation():
+    let b = uint8(ch)
+    if b < 0x80'u8:
+      if isAsciiWhitespace(ch):
+        lx.advanceOne()
+      elif ch == '/' and lx.peek(1) == '/':
+        lx.advanceOne(); lx.advanceOne()
+        lx.skipLineComment()
+      elif ch == '/' and lx.peek(1) == '*':
+        lx.advanceOne(); lx.advanceOne()
+        if not lx.skipBlockComment(): return
+      elif ch == '\\':
+        if not lx.skipLineContinuation():
+          if lx.pos.offset > entryPos: lx.wsPending = true
+          return  # bare `\` — let caller handle as error
+      else:
         if lx.pos.offset > entryPos: lx.wsPending = true
-        return  # bare `\` — let caller handle as error
+        return
     else:
-      if lx.pos.offset > entryPos: lx.wsPending = true
-      return
+      let (cp, w) = decodeUtf8At(lx.source, lx.pos.offset)
+      if cp >= 0 and isUnicodeWhitespace(cp):
+        for _ in 0 ..< w: lx.advanceOne()
+      else:
+        if lx.pos.offset > entryPos: lx.wsPending = true
+        return
   if lx.pos.offset > entryPos: lx.wsPending = true
 
 # ---------------------------------------------------------------------------
@@ -579,12 +670,29 @@ proc lexRegularOrMultiline(lx: var Lexer) =
                        "malformed multi-line string")
           return
         let closingPrefix = lines[^1]
-        for c in closingPrefix:
-          if not (c == ' ' or c == '\t'):
-            lx.emitError(peLexUnterminatedString, initSpan(start, lx.pos),
-                         "closing \"\"\" must be on its own line " &
-                         "(non-whitespace before closing delimiter)")
-            return
+        # Closing-prefix bytes must form a sequence of whitespace
+        # codepoints per the spec Whitespace table — ASCII subset is
+        # tab/space; non-ASCII handled via decodeUtf8At + Unicode WS
+        # classifier so fixtures like multiline_string_whitespace_only
+        # (U+2001 etc.) validate correctly.
+        var ci = 0
+        var prefixOk = true
+        while ci < closingPrefix.len:
+          let b = uint8(closingPrefix[ci])
+          if b < 0x80'u8:
+            if closingPrefix[ci] != ' ' and closingPrefix[ci] != '\t':
+              prefixOk = false; break
+            inc ci
+          else:
+            let (cp, w) = decodeUtf8At(closingPrefix, ci)
+            if cp < 0 or not isUnicodeWhitespace(cp):
+              prefixOk = false; break
+            inc ci, w
+        if not prefixOk:
+          lx.emitError(peLexUnterminatedString, initSpan(start, lx.pos),
+                       "closing \"\"\" must be on its own line " &
+                       "(non-whitespace before closing delimiter)")
+          return
         var dedented = ""
         # Intermediate content = lines[0 .. ^2]; lines[^1] is the closing
         # prefix consumed above. The opening-`"""` newline was eaten by
@@ -1020,8 +1128,15 @@ proc lexNumber(lx: var Lexer) =
 
 proc lexBareIdent(lx: var Lexer, interner: var Interner) =
   let start = lx.pos
-  while not lx.atEof and isIdentCont(lx.peek):
-    lx.advanceOne()
+  while not lx.atEof:
+    let b = uint8(lx.peek)
+    if b < 0x80'u8:
+      if not isIdentCont(lx.peek): break
+      lx.advanceOne()
+    else:
+      let (cp, w) = decodeUtf8At(lx.source, lx.pos.offset)
+      if cp < 0 or not isIdentCodepoint(cp): break
+      for _ in 0 ..< w: lx.advanceOne()
   let text = lx.source[start.offset ..< lx.pos.offset]
   let span = initSpan(start, lx.pos)
   # KDL v2 forbids Unicode bidirectional control codepoints inside
@@ -1120,7 +1235,7 @@ proc lexOne(lx: var Lexer, interner: var Interner) =
       let s = lx.pos; lx.advanceOne()
       lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
                    "expected '/-' (slashdash)")
-  of '\n', '\r':
+  of '\n', '\r', '\v', '\f':
     let s = lx.pos
     lx.advanceNewline()
     lx.emit(Token(kind: tkNewline, span: initSpan(s, lx.pos)))
@@ -1150,12 +1265,24 @@ proc lexOne(lx: var Lexer, interner: var Interner) =
       lx.emitError(peLexInvalidNumber, initSpan(s, lx.pos),
                    "number literals need an integer part before the '.'")
       return
-    if isIdentStart(ch):
+    # Multi-byte newlines (NEL, LS, PS) — bytes >= 0x80 fall here.
+    let b = uint8(ch)
+    if b >= 0x80'u8:
+      let (cp, _) = decodeUtf8At(lx.source, lx.pos.offset)
+      if cp >= 0 and isUnicodeNewline(cp):
+        let s = lx.pos
+        lx.advanceNewline()
+        lx.emit(Token(kind: tkNewline, span: initSpan(s, lx.pos)))
+        return
+      if cp >= 0 and isIdentCodepoint(cp):
+        lx.lexBareIdent(interner)
+        return
+    elif isIdentStart(ch):
       lx.lexBareIdent(interner)
-    else:
-      let s = lx.pos; lx.advanceOne()
-      lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
-                   "unexpected character '" & $ch & "'")
+      return
+    let s = lx.pos; lx.advanceOne()
+    lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
+                 "unexpected character '" & $ch & "'")
 
 proc lex*(source: string, interner: var Interner): seq[Token]
     {.noSideEffect.} =

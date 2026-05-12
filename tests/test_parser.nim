@@ -209,6 +209,35 @@ suite "parser: slashdash":
       check doc.nodes[0].entries.len == 1
       check doc.nodes[0].children.len == 0  # real {} was empty
 
+suite "parser: Unicode bare-ident charset (slice-7, Category A)":
+  test "comma is valid in bare ident":
+    parseOk("foo,bar weeeee"):
+      check nameOf(doc, doc.nodes[0]) == "foo,bar"
+      check doc.nodes[0].entries.len == 1
+
+  test "unusual ASCII punctuation is valid in bare ident":
+    parseOk("foo123~!@$%^&*.:'|?+<>,`-_ weeeee"):
+      check nameOf(doc, doc.nodes[0]) == "foo123~!@$%^&*.:'|?+<>,`-_"
+      check doc.nodes[0].entries.len == 1
+
+  test "non-ASCII Unicode codepoints are valid bare-ident chars":
+    # ノード is U+30CE U+30FC U+30C9 (3 katakana).
+    parseOk("\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89 arg"):
+      check nameOf(doc, doc.nodes[0]) == "\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89"
+
+  test "U+3000 IDEOGRAPHIC SPACE separates idents like whitespace":
+    # `ノード　arg` → node `ノード` with arg `arg`.
+    parseOk("\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89\xE3\x80\x80 arg"):
+      check nameOf(doc, doc.nodes[0]) == "\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89"
+      check doc.nodes[0].entries.len == 1
+
+  test "VT (U+000B) separates nodes as a newline":
+    # Spec corpus vertical_tab_whitespace.kdl.
+    parseOk("node arg\vnode2 arg2"):
+      check doc.nodes.len == 2
+      check nameOf(doc, doc.nodes[0]) == "node"
+      check nameOf(doc, doc.nodes[1]) == "node2"
+
 suite "parser: token adjacency (G-token-adjacency)":
   test "node name directly abutted by string entry is rejected":
     # Spec corpus zero_space_before_first_arg_fail.kdl

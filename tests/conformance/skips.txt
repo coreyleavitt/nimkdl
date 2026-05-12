@@ -18,11 +18,6 @@
 # implement. Idents may contain certain Unicode chars (commas in some
 # positions, ⟨⟩, etc.). Full Unicode classification is filed as v0.2
 # work; the bidi-control denylist for H11 covers the safety case.
-comma_in_bare_id.kdl              | A-unicode-bare-ident — v0.2
-unusual_chars_in_bare_id.kdl      | A-unicode-bare-ident — v0.2
-unusual_bare_id_chars_in_quoted_id.kdl | A-unicode-bare-ident — v0.2
-unicode_silly.kdl                 | A-unicode-bare-ident — v0.2
-vertical_tab_whitespace.kdl       | A-unicode-whitespace — v2 spec includes VT (U+000B) as whitespace; v0.2
 
 # ===========================================================================
 # Category B: Unicode bidi-control rejection — CLOSED by H11
@@ -52,7 +47,14 @@ vertical_tab_whitespace.kdl       | A-unicode-whitespace — v2 spec includes VT
 # Whitespace-escape interactions with multi-line layout around the
 # closing line and indentation. Our common-case implementation passes;
 # these are edges.
-multiline_string_whitespace_only.kdl | F-multiline-edge — needs Unicode whitespace classification (slice 7); v0.2
+#
+# Remaining: whitespace-only-line semantics. Spec §multi-line-string:
+# intermediate lines containing only whitespace are exempt from the
+# byte-for-byte prefix match (they need not start with the closing
+# prefix). Implementing this needs a "whitespace-only line" predicate
+# applied per-line during dedent, and a decision on what those lines
+# contribute to the output (likely empty after prefix strip).
+multiline_string_whitespace_only.kdl | F-multiline-edge — needs whitespace-only-line semantics in dedent pass; v0.2
 
 # ===========================================================================
 # Category G: Specific spec corners
