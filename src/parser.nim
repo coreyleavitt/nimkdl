@@ -167,7 +167,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
       if floatRes.isErr: return err[KdlValue, ParseError](floatRes.getErr)
       var v = newFloatValue(floatRes.get, tok.span)
       v.typeAnnotation = anno
-      return ok[KdlValue, ParseError](v)
+      returnValidated(p, v, anno)
     let intRes = decodeIntPromoting(tok)
     if intRes.isErr: return err[KdlValue, ParseError](intRes.getErr)
     let d = intRes.get
