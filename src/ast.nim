@@ -398,3 +398,110 @@ func findNodes*(doc: KdlDoc, name: string): seq[KdlNode] =
     if doc.interner.lookup(n.name) == name:
       result.add(n)
 
+# ---------------------------------------------------------------------------
+# Builder / mutation API
+# ---------------------------------------------------------------------------
+#
+# Imperative wrappers over the underlying seq fields. Value semantics
+# (KdlNode is a plain object) mean these mutate the `var` argument
+# in place; the caller's own seq still owns the storage.
+#
+# All procs that intern a string take `var KdlDoc` because intern is
+# itself a mutation of the interner. Read-only operations take
+# `KdlDoc`.
+
+proc add*(doc: var KdlDoc, n: sink KdlNode) {.inline.} =
+  ## Append a top-level node.
+  doc.nodes.add(n)
+
+proc addArg*(n: var KdlNode, v: KdlValue) {.inline.} =
+  ## Append a positional argument entry.
+  n.entries.add(KdlEntry(kind: keArgument, argValue: v, span: n.span))
+
+proc addChild*(n: var KdlNode, c: sink KdlNode) {.inline.} =
+  ## Append a child node.
+  n.children.add(c)
+
+proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
+  ## Set property `name = v`. If a property with that name already
+  ## exists, its value is replaced in place (preserving source order).
+  ## Otherwise the property is appended.
+  let key = doc.interner.intern(name)
+  for i in 0 ..< n.entries.len:
+    if n.entries[i].kind == keProperty and n.entries[i].propName == key:
+      n.entries[i] = KdlEntry(kind: keProperty, propName: key,
+                              propValue: v, span: n.entries[i].span)
+      return
+  n.entries.add(KdlEntry(kind: keProperty, propName: key, propValue: v,
+                         span: n.span))
+
+proc removeProp*(n: var KdlNode, doc: KdlDoc, name: string): bool =
+  ## Remove the first property with the given name. Returns true iff
+  ## a property was removed.
+  var i = 0
+  while i < n.entries.len:
+    if n.entries[i].kind == keProperty and
+       doc.interner.lookup(n.entries[i].propName) == name:
+      n.entries.delete(i)
+      return true
+    inc i
+  false
+
+proc removeChild*(n: var KdlNode, doc: KdlDoc, name: string): int =
+  ## Remove every child whose name matches. Returns the number removed.
+  var i = 0
+  while i < n.children.len:
+    if doc.interner.lookup(n.children[i].name) == name:
+      n.children.delete(i)
+      inc result
+    else:
+      inc i
+
+proc replaceChild*(n: var KdlNode, doc: KdlDoc, name: string,
+                   replacement: sink KdlNode): bool =
+  ## Replace the first child with the given name. Returns true iff a
+  ## match was found and replaced.
+  for i in 0 ..< n.children.len:
+    if doc.interner.lookup(n.children[i].name) == name:
+      n.children[i] = replacement
+      return true
+  false
+
+proc setName*(n: var KdlNode, doc: var KdlDoc, name: string) {.inline.} =
+  ## Change the node's name. Interns the new name via the doc.
+  n.name = doc.interner.intern(name)
+
+proc setTypeAnnotation*(n: var KdlNode, doc: var KdlDoc, tag: string) {.inline.} =
+  ## Tag the node with a type annotation.
+  n.typeAnnotation = doc.interner.intern(tag)
+
+proc clearTypeAnnotation*(n: var KdlNode) {.inline.} =
+  n.typeAnnotation = InvalidInterned
+
+proc setTypeAnnotation*(v: var KdlValue, doc: var KdlDoc, tag: string) {.inline.} =
+  ## Tag a value with a type annotation (e.g. `(ipv4)"1.2.3.4"`).
+  v.typeAnnotation = doc.interner.intern(tag)
+
+proc clearTypeAnnotation*(v: var KdlValue) {.inline.} =
+  v.typeAnnotation = InvalidInterned
+
+proc remove*(doc: var KdlDoc, name: string): int =
+  ## Remove every top-level node with the given name. Returns count.
+  var i = 0
+  while i < doc.nodes.len:
+    if doc.interner.lookup(doc.nodes[i].name) == name:
+      doc.nodes.delete(i)
+      inc result
+    else:
+      inc i
+
+proc replace*(doc: var KdlDoc, name: string,
+              replacement: sink KdlNode): bool =
+  ## Replace the first top-level node with the given name. Returns true
+  ## iff a match was found and replaced.
+  for i in 0 ..< doc.nodes.len:
+    if doc.interner.lookup(doc.nodes[i].name) == name:
+      doc.nodes[i] = replacement
+      return true
+  false
+
