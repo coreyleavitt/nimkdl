@@ -171,6 +171,16 @@ func isWellFormedUtf8*(s: string): bool =
     inc i, width
   true
 
+func isDisallowedControl*(b: char): bool {.inline.} =
+  ## True if `b` is a byte the KDL v2 spec forbids appearing literally
+  ## anywhere in the document — including inside quoted/raw string bodies.
+  ## The forbidden set is U+0000-U+0008, U+000E-U+001F, U+007F. (U+0009
+  ## TAB and U+000A LF / U+000D CR are allowed; the latter are handled by
+  ## newline taxonomy elsewhere; VT/FF are newline characters per the v2
+  ## spec, not body bytes.)
+  let u = uint8(b)
+  (u <= 0x08'u8) or (u >= 0x0E'u8 and u <= 0x1F'u8) or (u == 0x7F'u8)
+
 func containsBidiControl*(s: string): bool =
   ## True if `s` contains any of the 10 Unicode bidirectional control
   ## codepoints that the KDL v2 spec rejects in identifiers and most
@@ -466,6 +476,12 @@ proc decodeRegularString(lx: var Lexer, openSpan: Span,
                lx.peek == '\n' or lx.peek == '\r'):
           if isNewline(lx.peek): lx.advanceNewline() else: lx.advanceOne()
     else:
+      if isDisallowedControl(ch):
+        let s = lx.pos
+        lx.advanceOne()
+        lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
+                     "disallowed literal control codepoint in string body")
+        return result
       result.add ch
       lx.advanceOne()
 
@@ -558,6 +574,12 @@ proc lexRegularOrMultiline(lx: var Lexer) =
             else:
               lx.advanceOne()
       else:
+        if isDisallowedControl(lx.peek):
+          let sPos = lx.pos
+          lx.advanceOne()
+          lx.emitError(peLexUnexpectedChar, initSpan(sPos, lx.pos),
+                       "disallowed literal control codepoint in string body")
+          return
         currentLine.add lx.peek
         lx.advanceOne()
     # EOF before close
@@ -663,6 +685,12 @@ proc lexRawString(lx: var Lexer) =
         currentLine = ""
         lx.advanceNewline()
       else:
+        if isDisallowedControl(lx.peek):
+          let sPos = lx.pos
+          lx.advanceOne()
+          lx.emitError(peLexUnexpectedChar, initSpan(sPos, lx.pos),
+                       "disallowed literal control codepoint in raw string body")
+          return
         currentLine.add lx.peek
         lx.advanceOne()
     let span = initSpan(start, lx.pos)
@@ -689,6 +717,12 @@ proc lexRawString(lx: var Lexer) =
       let span = initSpan(start, lx.pos)
       lx.emitError(peLexUnterminatedString, span,
                    "literal newline inside single-line raw string")
+      return
+    if isDisallowedControl(lx.peek):
+      let sPos = lx.pos
+      lx.advanceOne()
+      lx.emitError(peLexUnexpectedChar, initSpan(sPos, lx.pos),
+                   "disallowed literal control codepoint in raw string body")
       return
     body.add lx.peek
     lx.advanceOne()

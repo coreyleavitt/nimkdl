@@ -143,6 +143,13 @@ proc kdlDecodeValue*[T: SomeUnsignedInt](target: var T, v: KdlValue,
                                          doc: var KdlDoc): bool =
   ## Covers uint, uint8, uint16, uint32, uint64. Range-checks against
   ## the target's high bound; negative KDL ints fail decoding.
+  ##
+  ## **`uint64` quirk**: `KdlValue.intVal` is `int64`, so values in
+  ## `int64.high + 1 .. uint64.high` cannot reach this proc — the lexer
+  ## rejects them with `peLexInvalidNumber`. The `T.sizeof < uint64.sizeof`
+  ## branch is therefore guarded only for sub-`int64` widths; full 64-bit
+  ## unsigned support waits for the `kvBigInt` variant (ast.nim docs the
+  ## same limitation).
   case v.kind
   of kvInt:
     if v.intVal < 0: return false
@@ -599,12 +606,12 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
           return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
       else:
         newEmptyNode()
+    let childSym = genSym(nskLet, "kdlChild")
     quote do:
       let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      if `nodeIdent`.hasChild(`nameIdent`):
-        let `recurseRes` = kdlDecodeImpl(`targetAccess`,
-                                         `nodeIdent`.findChild(`nameIdent`),
-                                         `docIdent`)
+      let `childSym` = `nodeIdent`.findChild(`nameIdent`)
+      if not (`childSym`.name == InvalidInterned):
+        let `recurseRes` = kdlDecodeImpl(`targetAccess`, `childSym`, `docIdent`)
         if `recurseRes`.isErr:
           return err[void, ParseError](`recurseRes`.getErr)
       else:
@@ -702,8 +709,10 @@ macro deriveDecode*(typ: typedesc): untyped =
       var `discLocal`: `discType`
     stmts.add(emitFieldDecode(disc, discLocal, nodeIdent, docIdent))
 
-    # case discLocal: of each branch.
-    let typAst = typ
+    # case discLocal: of each branch. Construct via `typSym` (the
+    # unwrapped type symbol) rather than the raw `typ` typedesc node, so
+    # `deriveDecode(typeof(expr))` and parametric aliases yield a
+    # well-formed ObjConstr.
     let caseStmt = nnkCaseStmt.newTree(discLocal)
     for branch in shape.variant.branches:
       var branchBody = newStmtList()
@@ -724,7 +733,7 @@ macro deriveDecode*(typ: typedesc): untyped =
                                        nodeIdent, docIdent))
       # Atomic construction: target = T(kind: branchValue,
       #   sharedField: sharedLocal, ..., branchField: branchLocal, ...)
-      let construction = nnkObjConstr.newTree(typAst)
+      let construction = nnkObjConstr.newTree(typSym)
       construction.add(nnkExprColonExpr.newTree(
         ident(disc.nimName), branch.discValue))
       for i, f in shape.shared:

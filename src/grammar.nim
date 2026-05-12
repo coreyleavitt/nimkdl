@@ -151,7 +151,8 @@ proc buildKdlGrammar*(): Grammar =
 
   rule "typeAnno", seqOf(
     term(tkLParen),
-    altOf(term(tkIdent), term(tkString)),  # type name may be quoted
+    # type name may be a bare ident, quoted string, or raw string per spec
+    altOf(term(tkIdent), term(tkString), term(tkRawString)),
     term(tkRParen)
   )
 
@@ -187,14 +188,19 @@ proc buildKdlGrammar*(): Grammar =
   # A REAL children block ends the node (after it, only the terminator is
   # allowed). The slashdashed form acts like a zero-content entry and
   # lives inside the entry-loop (see `slashdashChildren` + node rule).
+  # Each child-position is its own named sub-rule so that buildChildrenBlock
+  # can locate items via findImmediateAll("childItem") rather than positional
+  # indexing into the children rule's structural ParseNode.
+  rule "childItem", seqOf(
+    opt(refTo("slashdashPrefix")),
+    refTo("node"),
+    star(term(tkNewline))
+  )
+
   rule "children", seqOf(
     term(tkLBrace),
     star(term(tkNewline)),
-    star(seqOf(
-      opt(refTo("slashdashPrefix")),
-      refTo("node"),
-      star(term(tkNewline))
-    )),
+    star(refTo("childItem")),
     term(tkRBrace)
   )
 
@@ -653,23 +659,22 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
                tokens: seq[Token],
                errs: var seq[ParseError]): KdlNode
 
+proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode]
+
 proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc,
                         tokens: seq[Token],
                         errs: var seq[ParseError]): seq[KdlNode] =
-  ## Walk the `children` rule match. Grammar:
-  ##   children := '{' star(newline) star(seq(opt(slashdashPrefix),
-  ##                                            node, star(newline))) '}'
-  ## So children.children = ['{', newlines, inner_star, '}']
-  ## inner_star.children = list of (opt(slashdashPrefix), node, newlines)
-  ## seq iterations.
-  if childrenMatch.children.len < 3: return
-  let innerStar = childrenMatch.children[2]
-  for iter in innerStar.children:
-    if iter.children.len < 2: continue
-    let slashdashOpt = iter.children[0]
+  ## Walk the `children` rule match. Grammar (named-rule form):
+  ##   children   := '{' star(newline) star(childItem) '}'
+  ##   childItem  := opt(slashdashPrefix) node star(newline)
+  ## Locate items via `findImmediateAll("childItem")` so a future
+  ## reordering of `children`'s siblings doesn't silently mis-index.
+  for item in findImmediateAll(childrenMatch, "childItem"):
+    if item.children.len < 2: continue
+    let slashdashOpt = item.children[0]
     if slashdashOpt.children.len > 0:
       continue  # /-prefixed node — semantically absent
-    let nodeMatch = iter.children[1]
+    let nodeMatch = item.children[1]
     result.add(buildNode(nodeMatch, doc, tokens, errs))
 
 proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode] =

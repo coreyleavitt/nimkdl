@@ -95,6 +95,12 @@ proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] {.noSideEffec
       return err[InternedStr, ParseError](initError(peLexInvalidIdentifier,
         tok.span, "bidi control codepoint in type annotation name"))
     handle = p.doc.interner.intern(tok.strVal)
+  of tkRawString:
+    let tok = p.advance()
+    if containsBidiControl(tok.rawVal):
+      return err[InternedStr, ParseError](initError(peLexInvalidIdentifier,
+        tok.span, "bidi control codepoint in type annotation name"))
+    handle = p.doc.interner.intern(tok.rawVal)
   else:
     return err[InternedStr, ParseError](initError(peParseExpected,
       p.peek.span, "expected identifier or string inside type annotation"))
@@ -115,6 +121,9 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
   case tok.kind
   of tkString:
     discard p.advance()
+    if containsBidiControl(tok.strVal):
+      return err[KdlValue, ParseError](initError(peLexInvalidIdentifier,
+        tok.span, "bidi control codepoint in string value"))
     var v = newStringValue(tok.strVal, tok.span)
     v.typeAnnotation = anno
     return ok[KdlValue, ParseError](v)
@@ -128,6 +137,9 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     return ok[KdlValue, ParseError](v)
   of tkRawString:
     discard p.advance()
+    if containsBidiControl(tok.rawVal):
+      return err[KdlValue, ParseError](initError(peLexInvalidIdentifier,
+        tok.span, "bidi control codepoint in string value"))
     var v = newStringValue(tok.rawVal, tok.span)
     v.typeAnnotation = anno
     return ok[KdlValue, ParseError](v)
@@ -302,6 +314,13 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
     # canStartEntry must be evaluated AFTER the slashdash skip so the
     # newly-positioned token is what we test against.
     if not skip and not p.canStartEntry: break
+    if skip and not p.canStartEntry and not p.check(tkLBrace):
+      # Slashdash consumed but the next token cannot begin an entry or
+      # children-block — give a targeted diagnostic instead of letting
+      # parseEntry fall through to a generic "expected a value" error.
+      return err[KdlNode, ParseError](initError(peParseExpected,
+        p.peek.span,
+        "'/-' must be followed by an entry or '{' children block"))
     # Could be a children block instead of an entry — check
     if p.check(tkLBrace):
       inc p.depth
