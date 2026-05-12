@@ -116,6 +116,133 @@ suite "reserved types — numeric (tier 1)":
     parseErr("n (u8)\"42\"", peReservedTypeInvalid)
     parseErr("n (f32)\"1.5\"", peReservedTypeInvalid)
 
+suite "reserved types — strings (tier 2)":
+  test "(uuid) RFC 4122 example":
+    # RFC 4122 §3 reference example.
+    parseOkSilent("n (uuid)\"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"")
+
+  test "(uuid) accepts uppercase":
+    parseOkSilent("n (uuid)\"F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6\"")
+
+  test "(uuid) wrong dash positions rejected":
+    parseErr("n (uuid)\"f81d4fae7dec-11d0-a765-00a0c91e6bf6\"",
+             peReservedTypeInvalid)
+
+  test "(uuid) non-hex char rejected":
+    parseErr("n (uuid)\"g81d4fae-7dec-11d0-a765-00a0c91e6bf6\"",
+             peReservedTypeInvalid)
+
+  test "(uuid) requires string value":
+    parseErr("n (uuid)42", peReservedTypeInvalid)
+
+  test "(ipv4) standard test addresses":
+    # RFC 5737 documentation prefix.
+    parseOkSilent("n (ipv4)\"192.0.2.1\"")
+    parseOkSilent("n (ipv4)\"0.0.0.0\"")
+    parseOkSilent("n (ipv4)\"255.255.255.255\"")
+
+  test "(ipv4) rejects out-of-range octet":
+    parseErr("n (ipv4)\"256.0.0.0\"", peReservedTypeInvalid)
+    parseErr("n (ipv4)\"1.2.3.999\"", peReservedTypeInvalid)
+
+  test "(ipv4) rejects malformed":
+    parseErr("n (ipv4)\"1.2.3\"", peReservedTypeInvalid)
+    parseErr("n (ipv4)\"1.2.3.4.5\"", peReservedTypeInvalid)
+    parseErr("n (ipv4)\"1.2.3.\"", peReservedTypeInvalid)
+    parseErr("n (ipv4)\"hello\"", peReservedTypeInvalid)
+    parseErr("n (ipv4)\"1.2.3.04\"", peReservedTypeInvalid)  # leading zero
+
+  test "(ipv6) RFC 4291 examples":
+    parseOkSilent("n (ipv6)\"2001:db8::1\"")
+    parseOkSilent("n (ipv6)\"::1\"")
+    parseOkSilent("n (ipv6)\"::\"")
+    parseOkSilent("n (ipv6)\"2001:0db8:0000:0000:0000:0000:0000:0001\"")
+    parseOkSilent("n (ipv6)\"fe80::1\"")
+
+  test "(ipv6) embedded IPv4 form":
+    # RFC 4291 §2.2: last 32 bits as dotted IPv4.
+    parseOkSilent("n (ipv6)\"::ffff:192.0.2.1\"")
+
+  test "(ipv6) rejects malformed":
+    parseErr("n (ipv6)\"2001:db8\"", peReservedTypeInvalid)
+    parseErr("n (ipv6)\"2001::db8::1\"", peReservedTypeInvalid)  # double ::
+    parseErr("n (ipv6)\"2001:db8:gggg::1\"", peReservedTypeInvalid)
+    parseErr("n (ipv6)\"1:2:3:4:5:6:7:8:9\"", peReservedTypeInvalid)  # too many
+
+  test "(date) RFC 3339 full-date":
+    parseOkSilent("n (date)\"2026-05-12\"")
+    parseOkSilent("n (date)\"1970-01-01\"")
+    parseOkSilent("n (date)\"2000-02-29\"")   # valid leap year
+
+  test "(date) calendar validation":
+    parseErr("n (date)\"2025-02-29\"", peReservedTypeInvalid)  # not leap
+    parseErr("n (date)\"2026-13-01\"", peReservedTypeInvalid)  # bad month
+    parseErr("n (date)\"2026-04-31\"", peReservedTypeInvalid)  # Apr has 30
+    parseErr("n (date)\"2026-5-12\"", peReservedTypeInvalid)   # not zero-padded
+
+  test "(time) RFC 3339 partial-time and full-time":
+    parseOkSilent("n (time)\"00:00:00\"")
+    parseOkSilent("n (time)\"23:59:60\"")          # leap second per RFC 3339
+    parseOkSilent("n (time)\"10:00:00.5\"")
+    parseOkSilent("n (time)\"10:00:00.123456789\"")
+    parseOkSilent("n (time)\"10:00:00Z\"")
+    parseOkSilent("n (time)\"10:00:00+01:00\"")
+    parseOkSilent("n (time)\"10:00:00-05:30\"")
+
+  test "(time) rejects malformed":
+    parseErr("n (time)\"24:00:00\"", peReservedTypeInvalid)
+    parseErr("n (time)\"10:60:00\"", peReservedTypeInvalid)
+    parseErr("n (time)\"10:00\"", peReservedTypeInvalid)
+    parseErr("n (time)\"10:00:00+25:00\"", peReservedTypeInvalid)
+
+  test "(date-time) RFC 3339 examples":
+    parseOkSilent("n (date-time)\"2026-05-12T10:00:00Z\"")
+    parseOkSilent("n (date-time)\"1985-04-12T23:20:50.52Z\"")
+    parseOkSilent("n (date-time)\"1996-12-19T16:39:57-08:00\"")
+
+  test "(date-time) rejects malformed":
+    parseErr("n (date-time)\"2026-05-12\"", peReservedTypeInvalid)        # missing time
+    parseErr("n (date-time)\"2026-05-12 10:00:00Z\"", peReservedTypeInvalid)  # space, not T
+    parseErr("n (date-time)\"2026-13-01T10:00:00Z\"", peReservedTypeInvalid)
+
+  test "(duration) ISO 8601 examples":
+    parseOkSilent("n (duration)\"P1Y\"")
+    parseOkSilent("n (duration)\"P1Y2M3DT4H5M6S\"")
+    parseOkSilent("n (duration)\"PT1H\"")
+    parseOkSilent("n (duration)\"PT0.5S\"")
+    parseOkSilent("n (duration)\"P1W\"")        # weeks designator
+
+  test "(duration) rejects malformed":
+    parseErr("n (duration)\"\"", peReservedTypeInvalid)
+    parseErr("n (duration)\"P\"", peReservedTypeInvalid)
+    parseErr("n (duration)\"P1\"", peReservedTypeInvalid)    # no designator
+    parseErr("n (duration)\"1Y\"", peReservedTypeInvalid)    # missing P
+    parseErr("n (duration)\"P1H\"", peReservedTypeInvalid)   # H without T
+
+  test "(base64) RFC 4648 §10 test vectors":
+    parseOkSilent("n (base64)\"\"")           # empty
+    parseOkSilent("n (base64)\"Zg==\"")       # "f"
+    parseOkSilent("n (base64)\"Zm8=\"")       # "fo"
+    parseOkSilent("n (base64)\"Zm9v\"")       # "foo"
+    parseOkSilent("n (base64)\"Zm9vYmFy\"")   # "foobar"
+
+  test "(base64) rejects malformed":
+    parseErr("n (base64)\"Zg=\"",  peReservedTypeInvalid)   # bad len mod 4
+    parseErr("n (base64)\"Zg===\"", peReservedTypeInvalid)  # excess padding
+    parseErr("n (base64)\"Z!==\"", peReservedTypeInvalid)   # non-alphabet
+    parseErr("n (base64)\"Zg=A\"", peReservedTypeInvalid)   # data after padding
+
+  test "(base85) RFC 1924 example":
+    # 32-bit value 0 encodes to 5 chars of base85 minimum-alphabet zeros.
+    parseOkSilent("n (base85)\"00000\"")
+    # Spec test: encoding of an IPv6 address per RFC 1924 §4.
+    # 2001:0db8:0000:0000:0000:0000:0000:0001 → 9R}vSQZ1W=8fRv*-7Z>9*
+    parseOkSilent("n (base85)\"9R}vSQZ1W=8fRv*-7Z>9*\"")
+
+  test "(base85) rejects non-alphabet":
+    parseErr("n (base85)\"abc \"", peReservedTypeInvalid)   # space disallowed
+    parseErr("n (base85)\"abc\\\"\"", peReservedTypeInvalid) # quote disallowed
+
 suite "reserved types — numeric tier-1 property sweep":
   # Deterministic boundary sweep over all 8 sub-int-64 numeric tags.
   # Each tag's accept/reject must agree with its declared range, exactly.

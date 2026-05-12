@@ -186,6 +186,381 @@ func validateF64(v: KdlValue): Result[void, ParseError] =
     err[void, ParseError](initError(peReservedTypeInvalid, v.span,
       "(f64) requires a numeric value"))
 
+func isHexDigit(c: char): bool {.inline.} =
+  case c
+  of '0'..'9', 'a'..'f', 'A'..'F': true
+  else: false
+
+func validateUuid(v: KdlValue): Result[void, ParseError] =
+  ## `(uuid)` — RFC 4122 §3 UUID textual representation:
+  ##   `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`
+  ## where each X is a hex digit. We accept either case (RFC allows
+  ## upper or lower) but require the exact 8-4-4-4-12 layout.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(uuid) requires a string value"))
+  let s = v.strVal
+  if s.len != 36:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(uuid) must be exactly 36 characters (got " & $s.len & ")"))
+  const dashAt = [8, 13, 18, 23]
+  for i, c in s:
+    if i in dashAt:
+      if c != '-':
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(uuid) expected '-' at position " & $i))
+    else:
+      if not isHexDigit(c):
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(uuid) non-hex digit at position " & $i))
+  ok(void, ParseError)
+
+func parseIpv4Bytes(s: string): bool =
+  ## Parse `a.b.c.d` per RFC 791 strict form: exactly 4 dot-separated
+  ## decimal octets, each in [0, 255], no leading zeros (per RFC 6943).
+  var octets = 0
+  var i = 0
+  while i < s.len:
+    var n = 0
+    var digits = 0
+    let octStart = i
+    while i < s.len and s[i] >= '0' and s[i] <= '9':
+      n = n * 10 + int(s[i]) - int('0')
+      inc digits
+      inc i
+      if n > 255 or digits > 3: return false
+    if digits == 0: return false
+    # Leading zero rule: "07" / "001" / "00" all rejected (RFC 6943).
+    if digits > 1 and s[octStart] == '0': return false
+    inc octets
+    if i < s.len:
+      if s[i] != '.': return false
+      inc i
+      # Trailing dot or empty after dot is invalid.
+      if i >= s.len: return false
+  octets == 4
+
+func validateIpv4(v: KdlValue): Result[void, ParseError] =
+  ## `(ipv4)` — RFC 791 dotted-decimal four-octet address.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(ipv4) requires a string value"))
+  if not parseIpv4Bytes(v.strVal):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(ipv4) malformed address: " & v.strVal))
+  ok(void, ParseError)
+
+func parseIpv6Bytes(s: string): bool =
+  ## Parse `[hexgroup:]*[::[hexgroup:]*]?` per RFC 4291 §2.2.
+  ## Allows the embedded IPv4 form in the final 32 bits.
+  ## We count groups before and after `::` (if present) and verify
+  ## total = 8, with embedded ipv4 counting as 2.
+  if s.len == 0: return false
+  var i = 0
+  var beforeDouble = 0  # 16-bit hex groups before `::`
+  var afterDouble = -1  # -1 means no `::` seen yet
+  # Allow leading `::`
+  if s.len >= 2 and s[0] == ':' and s[1] == ':':
+    afterDouble = 0
+    i = 2
+  elif s.len >= 1 and s[0] == ':':
+    return false  # single leading `:` invalid
+  while i < s.len:
+    # Parse a hex group (1-4 hex digits) OR detect embedded ipv4
+    var hexStart = i
+    var hexDigits = 0
+    while i < s.len and isHexDigit(s[i]):
+      inc hexDigits
+      inc i
+      if hexDigits > 4: return false
+    if hexDigits == 0:
+      # Either we just saw `::` or trailing colon; check.
+      if i < s.len and s[i] == ':':
+        # `::` here
+        if i + 1 < s.len and s[i + 1] == ':':
+          if afterDouble >= 0: return false  # second `::` invalid
+          afterDouble = 0
+          i += 2
+          continue
+        return false
+      return false
+    # If next char is '.', this is an embedded IPv4 in the final 32 bits.
+    if i < s.len and s[i] == '.':
+      let v4 = s[hexStart .. s.high]
+      if not parseIpv4Bytes(v4): return false
+      # Embedded IPv4 occupies 2 of the 8 groups (counts as final 32 bits)
+      if afterDouble >= 0: afterDouble += 2
+      else: beforeDouble += 2
+      i = s.len
+      break
+    if afterDouble >= 0: inc afterDouble
+    else: inc beforeDouble
+    if i >= s.len: break
+    if s[i] != ':': return false
+    inc i
+    # `::` after a hex group
+    if i < s.len and s[i] == ':':
+      if afterDouble >= 0: return false  # second `::` invalid
+      afterDouble = 0
+      inc i
+      # Allow trailing `::` to terminate
+      if i >= s.len: return true
+  if afterDouble >= 0:
+    # `::` compresses one-or-more zero groups; total before+after must
+    # be < 8 (otherwise `::` is redundant — though RFC 5952 forbids
+    # that, RFC 4291 allows it).
+    return beforeDouble + afterDouble <= 8
+  beforeDouble == 8
+
+func validateIpv6(v: KdlValue): Result[void, ParseError] =
+  ## `(ipv6)` — RFC 4291 §2.2 textual address. Accepts the canonical
+  ## colon-separated 16-bit groups, `::` zero-run compression, and the
+  ## embedded-IPv4 form for the final 32 bits.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(ipv6) requires a string value"))
+  if not parseIpv6Bytes(v.strVal):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(ipv6) malformed address: " & v.strVal))
+  ok(void, ParseError)
+
+func isDigit(c: char): bool {.inline.} =
+  c >= '0' and c <= '9'
+
+func parseUInt(s: string, start, count: int, value: var int): bool =
+  ## Parse exactly `count` decimal digits at `s[start..]` into `value`.
+  if start + count > s.len: return false
+  value = 0
+  for i in 0 ..< count:
+    let c = s[start + i]
+    if not isDigit(c): return false
+    value = value * 10 + int(c) - int('0')
+  true
+
+func isLeapYear(y: int): bool =
+  (y mod 4 == 0 and y mod 100 != 0) or y mod 400 == 0
+
+func daysInMonth(y, m: int): int =
+  case m
+  of 1, 3, 5, 7, 8, 10, 12: 31
+  of 4, 6, 9, 11: 30
+  of 2: (if isLeapYear(y): 29 else: 28)
+  else: 0
+
+func validateDateBody(s: string, start: int): bool =
+  ## RFC 3339 full-date: `YYYY-MM-DD`. Returns true iff s[start..start+9]
+  ## is a valid calendar date.
+  if start + 10 > s.len: return false
+  if s[start + 4] != '-' or s[start + 7] != '-': return false
+  var year, month, day: int
+  if not parseUInt(s, start, 4, year): return false
+  if not parseUInt(s, start + 5, 2, month): return false
+  if not parseUInt(s, start + 8, 2, day): return false
+  if month < 1 or month > 12: return false
+  let dim = daysInMonth(year, month)
+  day >= 1 and day <= dim
+
+func validateTimeBody(s: string, start: int): tuple[ok: bool, consumed: int] =
+  ## RFC 3339 partial-time + optional time-offset. Returns the number of
+  ## characters consumed. Format: `hh:mm:ss[.frac][Z|±hh:mm]`.
+  if start + 8 > s.len: return (false, 0)
+  if s[start + 2] != ':' or s[start + 5] != ':': return (false, 0)
+  var hour, minute, second: int
+  if not parseUInt(s, start, 2, hour): return (false, 0)
+  if not parseUInt(s, start + 3, 2, minute): return (false, 0)
+  if not parseUInt(s, start + 6, 2, second): return (false, 0)
+  if hour > 23 or minute > 59 or second > 60: return (false, 0)
+  # RFC 3339 allows second == 60 for leap seconds.
+  var i = start + 8
+  # Optional fractional seconds.
+  if i < s.len and s[i] == '.':
+    inc i
+    let fracStart = i
+    while i < s.len and isDigit(s[i]):
+      inc i
+    if i == fracStart: return (false, 0)
+  # Optional time offset.
+  if i >= s.len:
+    return (true, i - start)
+  if s[i] == 'Z' or s[i] == 'z':
+    inc i
+    return (true, i - start)
+  if s[i] == '+' or s[i] == '-':
+    inc i
+    var offHour, offMin: int
+    if not parseUInt(s, i, 2, offHour): return (false, 0)
+    if i + 2 >= s.len or s[i + 2] != ':': return (false, 0)
+    if not parseUInt(s, i + 3, 2, offMin): return (false, 0)
+    if offHour > 23 or offMin > 59: return (false, 0)
+    i += 5
+    return (true, i - start)
+  (false, 0)
+
+func validateDate(v: KdlValue): Result[void, ParseError] =
+  ## `(date)` — RFC 3339 §5.6 full-date.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(date) requires a string value"))
+  let s = v.strVal
+  if s.len != 10 or not validateDateBody(s, 0):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(date) not a valid RFC 3339 full-date: " & s))
+  ok(void, ParseError)
+
+func validateTime(v: KdlValue): Result[void, ParseError] =
+  ## `(time)` — RFC 3339 §5.6 full-time (partial-time + offset).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(time) requires a string value"))
+  let s = v.strVal
+  let (okt, consumed) = validateTimeBody(s, 0)
+  if not okt or consumed != s.len:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(time) not a valid RFC 3339 time: " & s))
+  ok(void, ParseError)
+
+func validateDateTime(v: KdlValue): Result[void, ParseError] =
+  ## `(date-time)` — RFC 3339 §5.6 date-time: full-date `T` full-time.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(date-time) requires a string value"))
+  let s = v.strVal
+  if s.len < 11:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(date-time) too short"))
+  if not validateDateBody(s, 0):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(date-time) invalid date portion: " & s))
+  if s[10] != 'T' and s[10] != 't':
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(date-time) requires 'T' separator between date and time"))
+  let (okt, consumed) = validateTimeBody(s, 11)
+  if not okt or consumed != s.len - 11:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(date-time) invalid time portion: " & s))
+  ok(void, ParseError)
+
+func validateDuration(v: KdlValue): Result[void, ParseError] =
+  ## `(duration)` — ISO 8601 §3.4 duration. Form:
+  ##   P[nY][nM][nW][nD][T[nH][nM][nS]]
+  ## At least one designator must appear (so `P` alone is invalid, but
+  ## `P1Y` or `PT1S` are fine). `W` cannot mix with other date designators
+  ## per strict ISO 8601 but RFC 3339 (and most real-world parsers)
+  ## accept `P1W` standalone; we accept that.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(duration) requires a string value"))
+  let s = v.strVal
+  if s.len < 2 or s[0] != 'P':
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(duration) must start with 'P': " & s))
+  var i = 1
+  var inTime = false
+  var anyDesignator = false
+  while i < s.len:
+    if s[i] == 'T':
+      if inTime:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(duration) duplicate 'T' separator"))
+      inTime = true
+      inc i
+      continue
+    # Number: 1+ digits, optional `.` + 1+ digits.
+    let numStart = i
+    while i < s.len and isDigit(s[i]):
+      inc i
+    if i == numStart:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(duration) expected digits before designator at offset " & $i))
+    if i < s.len and s[i] == '.':
+      inc i
+      let fracStart = i
+      while i < s.len and isDigit(s[i]):
+        inc i
+      if i == fracStart:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(duration) decimal fraction missing digits"))
+    if i >= s.len:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(duration) number without designator"))
+    let designator = s[i]
+    let validInDate = designator in {'Y', 'M', 'W', 'D'}
+    let validInTime = designator in {'H', 'M', 'S'}
+    if inTime:
+      if not validInTime:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(duration) invalid designator '" & $designator &
+          "' in time portion"))
+    else:
+      if not validInDate:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(duration) invalid designator '" & $designator &
+          "' (use 'T' to introduce time portion)"))
+    anyDesignator = true
+    inc i
+  if not anyDesignator:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(duration) 'P' must be followed by at least one designator"))
+  ok(void, ParseError)
+
+func isBase64Char(c: char): bool {.inline.} =
+  case c
+  of 'A'..'Z', 'a'..'z', '0'..'9', '+', '/': true
+  else: false
+
+func validateBase64(v: KdlValue): Result[void, ParseError] =
+  ## `(base64)` — RFC 4648 §4 standard alphabet, with `=` padding to a
+  ## length multiple of 4. We accept canonical form; URL-safe variant
+  ## (RFC 4648 §5) would be a separate tag.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(base64) requires a string value"))
+  let s = v.strVal
+  if s.len mod 4 != 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(base64) length must be a multiple of 4"))
+  # Count trailing `=` (0, 1, or 2 allowed); padding only at end.
+  var padCount = 0
+  var i = s.len
+  while i > 0 and s[i - 1] == '=':
+    inc padCount
+    dec i
+    if padCount > 2:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(base64) at most 2 padding chars allowed"))
+  for j in 0 ..< i:
+    if not isBase64Char(s[j]):
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(base64) invalid character at position " & $j))
+  ok(void, ParseError)
+
+const Base85Alphabet =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" &
+  "!#$%&()*+-;<=>?@^_`{|}~"
+
+func isBase85Char(c: char): bool {.inline.} =
+  # 85 chars per RFC 1924 §3. Hot loop, use a case.
+  case c
+  of '0'..'9', 'A'..'Z', 'a'..'z': true
+  of '!', '#', '$', '%', '&', '(', ')', '*', '+', '-',
+     ';', '<', '=', '>', '?', '@', '^', '_', '`',
+     '{', '|', '}', '~': true
+  else: false
+
+func validateBase85(v: KdlValue): Result[void, ParseError] =
+  ## `(base85)` — RFC 1924 §3 alphabet. Spec checks alphabet only;
+  ## length isn't constrained to a multiple in RFC 1924 (it's intended
+  ## for IPv6 specifically, which is exactly 20 chars, but a general
+  ## base85 string can be any length).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(base85) requires a string value"))
+  for i, c in v.strVal:
+    if not isBase85Char(c):
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(base85) invalid character at position " & $i))
+  ok(void, ParseError)
+
 func validateReserved*(tag: string, v: KdlValue):
     Result[void, ParseError] {.noSideEffect.} =
   ## Dispatch a reserved tag to its validator. Returns ok for unknown
@@ -205,4 +580,13 @@ func validateReserved*(tag: string, v: KdlValue):
   of "usize": validateU64(v)  ## platform-dependent; we treat as uint64
   of "f32":   validateF32(v)
   of "f64":   validateF64(v)
+  of "uuid":  validateUuid(v)
+  of "ipv4":  validateIpv4(v)
+  of "ipv6":  validateIpv6(v)
+  of "date":      validateDate(v)
+  of "time":      validateTime(v)
+  of "date-time": validateDateTime(v)
+  of "duration":  validateDuration(v)
+  of "base64":    validateBase64(v)
+  of "base85":    validateBase85(v)
   else:       return ok(void, ParseError)  # user-defined or not-yet-implemented
