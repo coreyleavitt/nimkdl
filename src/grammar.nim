@@ -61,6 +61,7 @@ import ./ast
 import ./intern
 import ./lexer
 import ./numlit
+import ./reserved
 import ./spans
 
 # ---------------------------------------------------------------------------
@@ -638,6 +639,10 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc,
   else:
     result = newNullValue()
   result.typeAnnotation = anno
+  if anno != InvalidInterned:
+    let tagStr = doc.interner.lookup(anno)
+    let rcheck = validateReserved(tagStr, result)
+    if rcheck.isErr: errs.add(rcheck.getErr)
 
 proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc,
                 tokens: seq[Token],

@@ -41,6 +41,9 @@ type
     peLexReservedKeyword      ## bare ident matches a v2 reserved keyword
                               ## (true/false/null/inf/-inf/nan) — must be
                               ## quoted or `#`-prefixed per spec
+    peReservedTypeInvalid     ## value content fails the standard
+                              ## interpretation of its reserved type
+                              ## annotation (RFC/ISO/IEEE per tag)
 
     # Parser (#523)
     peParseUnexpected         ## token where none was expected
@@ -146,6 +149,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peLexInvalidNumber:     "malformed number literal"
   of peLexInvalidIdentifier: "invalid identifier"
   of peLexReservedKeyword:   "reserved keyword used as bare identifier"
+  of peReservedTypeInvalid:  "value does not match its reserved type annotation"
   of peParseUnexpected:      "unexpected token"
   of peParseExpected:        "expected token not found"
   of peParseDepthExceeded:   "nesting depth exceeded"

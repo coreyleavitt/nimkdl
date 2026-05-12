@@ -40,6 +40,7 @@ import ./ast
 import ./intern
 import ./lexer
 import ./numlit
+import ./reserved
 import ./spans
 
 const
@@ -110,6 +111,16 @@ proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] {.noSideEffec
   discard p.advance()  # consume `)`
   ok[InternedStr, ParseError](handle)
 
+template returnValidated(p: var Parser, v: KdlValue, anno: InternedStr): untyped =
+  ## Common tail of each parseValue branch: if a reserved-type tag is
+  ## present, validate the value's content per the spec interpretation
+  ## (see reserved.nim). Tags absent / unknown / valid → return ok.
+  if anno != InvalidInterned:
+    let tagStr = p.doc.interner.lookup(anno)
+    let rcheck = validateReserved(tagStr, v)
+    if rcheck.isErr: return err[KdlValue, ParseError](rcheck.getErr)
+  return ok[KdlValue, ParseError](v)
+
 proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
   ## Reads an optional type annotation prefix + a literal value.
   var anno = InvalidInterned
@@ -126,7 +137,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
         tok.span, "bidi control codepoint in string value"))
     var v = newStringValue(tok.strVal, tok.span)
     v.typeAnnotation = anno
-    return ok[KdlValue, ParseError](v)
+    returnValidated(p, v, anno)
   of tkIdent:
     # KDL v2 allows bare identifiers as string values, except for the
     # six reserved keywords (true/false/null/inf/-inf/nan) which must be
@@ -140,7 +151,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
         "value; quote it or use '#" & identStr & "'"))
     var v = newStringValue(identStr, tok.span)
     v.typeAnnotation = anno
-    return ok[KdlValue, ParseError](v)
+    returnValidated(p, v, anno)
   of tkRawString:
     discard p.advance()
     if containsBidiControl(tok.rawVal):
@@ -148,7 +159,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
         tok.span, "bidi control codepoint in string value"))
     var v = newStringValue(tok.rawVal, tok.span)
     v.typeAnnotation = anno
-    return ok[KdlValue, ParseError](v)
+    returnValidated(p, v, anno)
   of tkNumber:
     discard p.advance()
     if looksLikeFloat(tok):
@@ -163,7 +174,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     var v = if d.fits64: newIntValue(d.intVal, tok.span)
             else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
     v.typeAnnotation = anno
-    return ok[KdlValue, ParseError](v)
+    returnValidated(p, v, anno)
   of tkKeyword:
     discard p.advance()
     var v: KdlValue
@@ -175,7 +186,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     of kwNegInf: v = newFloatValue(NegInf, tok.span)
     of kwNan:    v = newFloatValue(NaN, tok.span)
     v.typeAnnotation = anno
-    return ok[KdlValue, ParseError](v)
+    returnValidated(p, v, anno)
   of tkError:
     discard p.advance()
     return err[KdlValue, ParseError](tok.error)
