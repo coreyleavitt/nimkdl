@@ -330,6 +330,89 @@ suite "reserved types — strings (tier 2)":
     parseErr("n (url-template)\"http://example.com/{path\"",
              peReservedTypeInvalid)
 
+  test "(country-2) ISO 3166-1 alpha-2 codes":
+    parseOkSilent("n (country-2)\"US\"")
+    parseOkSilent("n (country-2)\"GB\"")
+    parseOkSilent("n (country-2)\"JP\"")
+    parseOkSilent("n (country-2)\"DE\"")
+
+  test "(country-2) rejects unassigned / malformed":
+    parseErr("n (country-2)\"XX\"", peReservedTypeInvalid)   # not assigned
+    parseErr("n (country-2)\"us\"", peReservedTypeInvalid)   # lowercase
+    parseErr("n (country-2)\"USA\"", peReservedTypeInvalid)  # alpha-3 length
+
+  test "(country-3) ISO 3166-1 alpha-3 codes":
+    parseOkSilent("n (country-3)\"USA\"")
+    parseOkSilent("n (country-3)\"GBR\"")
+    parseOkSilent("n (country-3)\"JPN\"")
+    parseOkSilent("n (country-3)\"DEU\"")
+
+  test "(country-3) rejects unassigned":
+    parseErr("n (country-3)\"XXX\"", peReservedTypeInvalid)
+    parseErr("n (country-3)\"US\"", peReservedTypeInvalid)   # alpha-2 length
+
+  test "(country-subdivision) format check":
+    # ISO 3166-2: <alpha-2>-<1-3 alphanumerics>. We validate the shape
+    # and require the prefix to be a real alpha-2 code, but accept any
+    # subdivision suffix (5000+ codes would be a hefty static table for
+    # marginal value).
+    parseOkSilent("n (country-subdivision)\"US-CA\"")
+    parseOkSilent("n (country-subdivision)\"GB-ENG\"")
+    parseOkSilent("n (country-subdivision)\"JP-13\"")
+
+  test "(country-subdivision) rejects malformed":
+    parseErr("n (country-subdivision)\"USA-CA\"", peReservedTypeInvalid)
+    parseErr("n (country-subdivision)\"XX-CA\"", peReservedTypeInvalid)
+    parseErr("n (country-subdivision)\"US\"", peReservedTypeInvalid)
+    parseErr("n (country-subdivision)\"US-\"", peReservedTypeInvalid)
+    parseErr("n (country-subdivision)\"US-toolong\"", peReservedTypeInvalid)
+
+  test "(currency) ISO 4217 codes":
+    parseOkSilent("n (currency)\"USD\"")
+    parseOkSilent("n (currency)\"EUR\"")
+    parseOkSilent("n (currency)\"JPY\"")
+    parseOkSilent("n (currency)\"XAU\"")  # gold
+
+  test "(currency) rejects unassigned":
+    parseErr("n (currency)\"FOO\"", peReservedTypeInvalid)
+    parseErr("n (currency)\"usd\"", peReservedTypeInvalid)
+
+  test "(decimal) arbitrary-precision decimal":
+    parseOkSilent("n (decimal)\"0\"")
+    parseOkSilent("n (decimal)\"-0\"")
+    parseOkSilent("n (decimal)\"3.14159265358979323846\"")
+    parseOkSilent("n (decimal)\"1.5e10\"")
+    parseOkSilent("n (decimal)\"-9.99E-3\"")
+    parseOkSilent("n (decimal)\"100\"")
+
+  test "(decimal) rejects malformed":
+    parseErr("n (decimal)\"\"", peReservedTypeInvalid)
+    parseErr("n (decimal)\".5\"", peReservedTypeInvalid)   # no integer part
+    parseErr("n (decimal)\"1.\"", peReservedTypeInvalid)   # no fractional
+    parseErr("n (decimal)\"1e\"", peReservedTypeInvalid)   # no exponent digits
+    parseErr("n (decimal)\"1.2.3\"", peReservedTypeInvalid)
+
+  test "(decimal64) IEEE 754-2008 16-digit precision":
+    parseOkSilent("n (decimal64)\"1.234567890123456\"")     # 16 digits
+    parseOkSilent("n (decimal64)\"1e100\"")
+    parseOkSilent("n (decimal64)\"-3.14\"")
+
+  test "(decimal64) rejects out-of-precision/exponent":
+    parseErr("n (decimal64)\"12345678901234567\"",
+             peReservedTypeInvalid)   # 17 digits
+    parseErr("n (decimal64)\"1e400\"", peReservedTypeInvalid)
+    parseErr("n (decimal64)\"1e-400\"", peReservedTypeInvalid)
+
+  test "(decimal128) IEEE 754-2008 34-digit precision":
+    parseOkSilent("n (decimal128)\"1.234567890123456789012345678901234\"")
+    parseOkSilent("n (decimal128)\"1e6000\"")
+    parseOkSilent("n (decimal128)\"-3.14\"")
+
+  test "(decimal128) rejects out-of-precision/exponent":
+    parseErr("n (decimal128)\"12345678901234567890123456789012345\"",
+             peReservedTypeInvalid)   # 35 digits
+    parseErr("n (decimal128)\"1e7000\"", peReservedTypeInvalid)
+
 suite "reserved types — numeric tier-1 property sweep":
   # Deterministic boundary sweep over all 8 sub-int-64 numeric tags.
   # Each tag's accept/reject must agree with its declared range, exactly.

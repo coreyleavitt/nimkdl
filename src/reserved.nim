@@ -876,6 +876,244 @@ func validateRegex(v: KdlValue): Result[void, ParseError] =
       "(regex) unclosed group '('"))
   ok(void, ParseError)
 
+# ---------------------------------------------------------------------------
+# Tier 4 — ISO registries (country + currency) and IEEE 754-2008 decimal
+# ---------------------------------------------------------------------------
+#
+# Static tables generated from the upstream ISO publications:
+#   - ISO 3166-1 alpha-2 (~249 codes)
+#   - ISO 3166-1 alpha-3 (~249 codes)
+#   - ISO 4217 currency (~180 active codes)
+#
+# Subdivision codes (ISO 3166-2, ~5000 entries) are validated by shape
+# rather than by table — `<alpha-2>-<1-3 alphanumerics>` — since the
+# full table is large and consumers usually only care about catching
+# obvious typos.
+
+const Iso3166Alpha2 = [
+  "AD","AE","AF","AG","AI","AL","AM","AO","AQ","AR","AS","AT","AU","AW","AX",
+  "AZ","BA","BB","BD","BE","BF","BG","BH","BI","BJ","BL","BM","BN","BO","BQ",
+  "BR","BS","BT","BV","BW","BY","BZ","CA","CC","CD","CF","CG","CH","CI","CK",
+  "CL","CM","CN","CO","CR","CU","CV","CW","CX","CY","CZ","DE","DJ","DK","DM",
+  "DO","DZ","EC","EE","EG","EH","ER","ES","ET","FI","FJ","FK","FM","FO","FR",
+  "GA","GB","GD","GE","GF","GG","GH","GI","GL","GM","GN","GP","GQ","GR","GS",
+  "GT","GU","GW","GY","HK","HM","HN","HR","HT","HU","ID","IE","IL","IM","IN",
+  "IO","IQ","IR","IS","IT","JE","JM","JO","JP","KE","KG","KH","KI","KM","KN",
+  "KP","KR","KW","KY","KZ","LA","LB","LC","LI","LK","LR","LS","LT","LU","LV",
+  "LY","MA","MC","MD","ME","MF","MG","MH","MK","ML","MM","MN","MO","MP","MQ",
+  "MR","MS","MT","MU","MV","MW","MX","MY","MZ","NA","NC","NE","NF","NG","NI",
+  "NL","NO","NP","NR","NU","NZ","OM","PA","PE","PF","PG","PH","PK","PL","PM",
+  "PN","PR","PS","PT","PW","PY","QA","RE","RO","RS","RU","RW","SA","SB","SC",
+  "SD","SE","SG","SH","SI","SJ","SK","SL","SM","SN","SO","SR","SS","ST","SV",
+  "SX","SY","SZ","TC","TD","TF","TG","TH","TJ","TK","TL","TM","TN","TO","TR",
+  "TT","TV","TW","TZ","UA","UG","UM","US","UY","UZ","VA","VC","VE","VG","VI",
+  "VN","VU","WF","WS","YE","YT","ZA","ZM","ZW"
+]
+
+const Iso3166Alpha3 = [
+  "ABW","AFG","AGO","AIA","ALA","ALB","AND","ARE","ARG","ARM","ASM","ATA",
+  "ATF","ATG","AUS","AUT","AZE","BDI","BEL","BEN","BES","BFA","BGD","BGR",
+  "BHR","BHS","BIH","BLM","BLR","BLZ","BMU","BOL","BRA","BRB","BRN","BTN",
+  "BVT","BWA","CAF","CAN","CCK","CHE","CHL","CHN","CIV","CMR","COD","COG",
+  "COK","COL","COM","CPV","CRI","CUB","CUW","CXR","CYM","CYP","CZE","DEU",
+  "DJI","DMA","DNK","DOM","DZA","ECU","EGY","ERI","ESH","ESP","EST","ETH",
+  "FIN","FJI","FLK","FRA","FRO","FSM","GAB","GBR","GEO","GGY","GHA","GIB",
+  "GIN","GLP","GMB","GNB","GNQ","GRC","GRD","GRL","GTM","GUF","GUM","GUY",
+  "HKG","HMD","HND","HRV","HTI","HUN","IDN","IMN","IND","IOT","IRL","IRN",
+  "IRQ","ISL","ISR","ITA","JAM","JEY","JOR","JPN","KAZ","KEN","KGZ","KHM",
+  "KIR","KNA","KOR","KWT","LAO","LBN","LBR","LBY","LCA","LIE","LKA","LSO",
+  "LTU","LUX","LVA","MAC","MAF","MAR","MCO","MDA","MDG","MDV","MEX","MHL",
+  "MKD","MLI","MLT","MMR","MNE","MNG","MNP","MOZ","MRT","MSR","MTQ","MUS",
+  "MWI","MYS","MYT","NAM","NCL","NER","NFK","NGA","NIC","NIU","NLD","NOR",
+  "NPL","NRU","NZL","OMN","PAK","PAN","PCN","PER","PHL","PLW","PNG","POL",
+  "PRI","PRK","PRT","PRY","PSE","PYF","QAT","REU","ROU","RUS","RWA","SAU",
+  "SDN","SEN","SGP","SGS","SHN","SJM","SLB","SLE","SLV","SMR","SOM","SPM",
+  "SRB","SSD","STP","SUR","SVK","SVN","SWE","SWZ","SXM","SYC","SYR","TCA",
+  "TCD","TGO","THA","TJK","TKL","TKM","TLS","TON","TTO","TUN","TUR","TUV",
+  "TWN","TZA","UGA","UKR","UMI","URY","USA","UZB","VAT","VCT","VEN","VGB",
+  "VIR","VNM","VUT","WLF","WSM","YEM","ZAF","ZMB","ZWE"
+]
+
+const Iso4217Currency = [
+  "AED","AFN","ALL","AMD","AOA","ARS","AUD","AWG","AZN","BAM","BBD","BDT",
+  "BHD","BIF","BMD","BND","BOB","BOV","BRL","BSD","BTN","BWP","BYN","BZD",
+  "CAD","CDF","CHE","CHF","CHW","CLF","CLP","CNY","COP","COU","CRC","CUP",
+  "CVE","CZK","DJF","DKK","DOP","DZD","EGP","ERN","ETB","EUR","FJD","FKP",
+  "GBP","GEL","GHS","GIP","GMD","GNF","GTQ","GYD","HKD","HNL","HTG","HUF",
+  "IDR","ILS","INR","IQD","IRR","ISK","JMD","JOD","JPY","KES","KGS","KHR",
+  "KMF","KPW","KRW","KWD","KYD","KZT","LAK","LBP","LKR","LRD","LSL","LYD",
+  "MAD","MDL","MGA","MKD","MMK","MNT","MOP","MRU","MUR","MVR","MWK","MXN",
+  "MXV","MYR","MZN","NAD","NGN","NIO","NOK","NPR","NZD","OMR","PAB","PEN",
+  "PGK","PHP","PKR","PLN","PYG","QAR","RON","RSD","RUB","RWF","SAR","SBD",
+  "SCR","SDG","SEK","SGD","SHP","SLE","SOS","SRD","SSP","STN","SVC","SYP",
+  "SZL","THB","TJS","TMT","TND","TOP","TRY","TTD","TWD","TZS","UAH","UGX",
+  "USD","USN","UYI","UYU","UYW","UZS","VED","VES","VND","VUV","WST","XAD",
+  "XAF","XAG","XAU","XCD","XCG","XDR","XOF","XPD","XPF","XPT","XSU","XTS",
+  "XUA","XXX","YER","ZAR","ZMW","ZWG"
+]
+
+func inSortedSet(needle: string, haystack: openArray[string]): bool =
+  ## Binary search over a lex-sorted static table.
+  var lo = 0
+  var hi = haystack.len - 1
+  while lo <= hi:
+    let mid = (lo + hi) shr 1
+    let c = cmp(haystack[mid], needle)
+    if c == 0: return true
+    if c < 0: lo = mid + 1
+    else:     hi = mid - 1
+  false
+
+func validateCountry2(v: KdlValue): Result[void, ParseError] =
+  ## `(country-2)` — ISO 3166-1 alpha-2 (uppercase, 2 letters).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-2) requires a string value"))
+  if v.strVal.len != 2 or not inSortedSet(v.strVal, Iso3166Alpha2):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-2) not a registered ISO 3166-1 alpha-2 code: " & v.strVal))
+  ok(void, ParseError)
+
+func validateCountry3(v: KdlValue): Result[void, ParseError] =
+  ## `(country-3)` — ISO 3166-1 alpha-3 (uppercase, 3 letters).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-3) requires a string value"))
+  if v.strVal.len != 3 or not inSortedSet(v.strVal, Iso3166Alpha3):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-3) not a registered ISO 3166-1 alpha-3 code: " & v.strVal))
+  ok(void, ParseError)
+
+func validateCountrySubdivision(v: KdlValue): Result[void, ParseError] =
+  ## `(country-subdivision)` — ISO 3166-2 format check: `XX-YYY`, where
+  ## XX is a real alpha-2 code and YYY is 1..3 alphanumerics.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-subdivision) requires a string value"))
+  let s = v.strVal
+  if s.len < 4 or s[2] != '-':
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-subdivision) must be 'XX-YYY' shape"))
+  let prefix = s[0 ..< 2]
+  if not inSortedSet(prefix, Iso3166Alpha2):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-subdivision) unknown country prefix: " & prefix))
+  let suffix = s[3 .. ^1]
+  if suffix.len < 1 or suffix.len > 3:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(country-subdivision) suffix must be 1..3 chars"))
+  for c in suffix:
+    if not isAsciiAlphaNum(c):
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(country-subdivision) suffix must be alphanumeric"))
+  ok(void, ParseError)
+
+func validateCurrency(v: KdlValue): Result[void, ParseError] =
+  ## `(currency)` — ISO 4217 active currency code (uppercase, 3 chars).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(currency) requires a string value"))
+  if v.strVal.len != 3 or not inSortedSet(v.strVal, Iso4217Currency):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(currency) not a registered ISO 4217 code: " & v.strVal))
+  ok(void, ParseError)
+
+func validateDecimalFormat(v: KdlValue, tag: string,
+                           maxDigits, expLow, expHigh: int):
+    Result[void, ParseError] =
+  ## Validate a decimal-format string per IEEE 754-2008 §3.3.
+  ## Accepts: optional sign, 1+ integer digits, optional `.` 1+ fraction
+  ## digits, optional `E`/`e` signed exponent. Counts significant digits
+  ## (leading zeros excluded) and checks against `maxDigits`. Checks the
+  ## decimal exponent range against `[expLow, expHigh]`.
+  ## When `maxDigits < 0`, no precision cap is applied (arbitrary-
+  ## precision (decimal) form).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(" & tag & ") requires a string value"))
+  let s = v.strVal
+  if s.len == 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(" & tag & ") empty"))
+  var i = 0
+  if s[0] == '+' or s[0] == '-':
+    inc i
+  let intStart = i
+  while i < s.len and isDigit(s[i]):
+    inc i
+  if i == intStart:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(" & tag & ") integer part required"))
+  let intEnd = i
+  var fracStart = -1
+  var fracEnd = -1
+  if i < s.len and s[i] == '.':
+    inc i
+    fracStart = i
+    while i < s.len and isDigit(s[i]):
+      inc i
+    fracEnd = i
+    if fracEnd == fracStart:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(" & tag & ") fractional digits required after '.'"))
+  var expVal = 0
+  var expHasSign = false
+  if i < s.len and (s[i] == 'e' or s[i] == 'E'):
+    inc i
+    var expNeg = false
+    if i < s.len and (s[i] == '+' or s[i] == '-'):
+      expNeg = s[i] == '-'
+      expHasSign = true
+      inc i
+    let eStart = i
+    while i < s.len and isDigit(s[i]):
+      expVal = expVal * 10 + int(s[i]) - int('0')
+      inc i
+      if expVal > 100000:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(" & tag & ") exponent magnitude too large"))
+    if i == eStart:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(" & tag & ") exponent digits required"))
+    if expNeg: expVal = -expVal
+  if i != s.len:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(" & tag & ") trailing characters: " & s[i .. ^1]))
+  if maxDigits > 0:
+    # Count significant digits: skip leading zeros from int part.
+    var sig = 0
+    var i2 = intStart
+    while i2 < intEnd and s[i2] == '0': inc i2
+    sig += intEnd - i2
+    if fracStart >= 0:
+      sig += fracEnd - fracStart
+    if sig > maxDigits:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(" & tag & ") significand exceeds " & $maxDigits & " digits"))
+    if expVal < expLow or expVal > expHigh:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(" & tag & ") exponent " & $expVal & " out of range [" &
+        $expLow & ", " & $expHigh & "]"))
+  ok(void, ParseError)
+
+func validateDecimal(v: KdlValue): Result[void, ParseError] =
+  ## `(decimal)` — arbitrary-precision decimal. No precision / exponent
+  ## cap; format check only.
+  validateDecimalFormat(v, "decimal", maxDigits = -1,
+                        expLow = 0, expHigh = 0)
+
+func validateDecimal64(v: KdlValue): Result[void, ParseError] =
+  ## `(decimal64)` — IEEE 754-2008 decimal64: 16 significant digits,
+  ## exponent in [-383, 384].
+  validateDecimalFormat(v, "decimal64", maxDigits = 16,
+                        expLow = -383, expHigh = 384)
+
+func validateDecimal128(v: KdlValue): Result[void, ParseError] =
+  ## `(decimal128)` — IEEE 754-2008 decimal128: 34 significant digits,
+  ## exponent in [-6143, 6144].
+  validateDecimalFormat(v, "decimal128", maxDigits = 34,
+                        expLow = -6143, expHigh = 6144)
+
 func validateReserved*(tag: string, v: KdlValue):
     Result[void, ParseError] {.noSideEffect.} =
   ## Dispatch a reserved tag to its validator. Returns ok for unknown
@@ -914,4 +1152,11 @@ func validateReserved*(tag: string, v: KdlValue):
   of "email":         validateEmail(v)
   of "idn-email":     validateIdnEmail(v)
   of "regex":         validateRegex(v)
+  of "country-2":            validateCountry2(v)
+  of "country-3":            validateCountry3(v)
+  of "country-subdivision":  validateCountrySubdivision(v)
+  of "currency":             validateCurrency(v)
+  of "decimal":              validateDecimal(v)
+  of "decimal64":            validateDecimal64(v)
+  of "decimal128":           validateDecimal128(v)
   else:       return ok(void, ParseError)  # user-defined or not-yet-implemented
