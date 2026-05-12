@@ -278,6 +278,12 @@ func isNewline(ch: char): bool {.inline.} =
 # Token emission
 # ---------------------------------------------------------------------------
 
+func isMultilineWsEscapeStart(ch: char): bool {.inline.} =
+  ## In a multi-line string, `\` followed by any of these bytes triggers
+  ## the whitespace-escape rule: the `\` and the entire whitespace run
+  ## (including newlines) are deleted in phase 1.
+  ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r'
+
 proc emit(lx: var Lexer, tok: sink Token) =
   var t = tok
   t.precededByWs = lx.wsPending
@@ -546,80 +552,168 @@ proc lexRegularOrMultiline(lx: var Lexer) =
         lx.advanceOne(); lx.advanceOne(); lx.advanceOne()
       return
     lx.advanceNewline()
-    # Accumulate raw line-text until we see the closing """
-    var rawLines: seq[string] = @[]
-    var currentLine = ""
+    # Per KDL v2 spec (Multi-Line String), processing is three phases:
+    #   1. Resolve whitespace escapes (`\<ws+>` is deleted entirely).
+    #   2. Dedent: the bytes between the last '\n' and the closing `"""`
+    #      are the closing-prefix (must be whitespace-only); strip that
+    #      exact byte sequence from every intermediate line.
+    #   3. Resolve other backslash escapes (\n, \t, \", \u{…}, etc.).
+    # The previous implementation interleaved all three and got the
+    # closing-line whitespace-escape interactions wrong.
+    var rawBuf = ""
     while not lx.atEof:
       if lx.peek == '"' and lx.peek(1) == '"' and lx.peek(2) == '"':
-        rawLines.add(currentLine)
         lx.advanceOne(); lx.advanceOne(); lx.advanceOne()
-        # Multi-line content per spec: strip the leading whitespace
-        # matching the closing line's indentation from every prior line.
-        let closingPrefix = rawLines[^1]
-        # Validate the closing line is whitespace-only — if not, the
-        # """ is mid-line which is malformed
-        var valid = true
+        # Split rawBuf on '\n'. The slice after the final '\n' is the
+        # closing-prefix; everything before it is the content section.
+        var lines: seq[string] = @[]
+        var line = ""
+        for ch in rawBuf:
+          if ch == '\n':
+            lines.add(line); line = ""
+          else:
+            line.add(ch)
+        lines.add(line)
+        if lines.len < 1:
+          lx.emitError(peLexUnterminatedString, initSpan(start, lx.pos),
+                       "malformed multi-line string")
+          return
+        let closingPrefix = lines[^1]
         for c in closingPrefix:
           if not (c == ' ' or c == '\t'):
-            valid = false; break
-        if not valid:
-          let span = initSpan(start, lx.pos)
-          lx.emitError(peLexUnterminatedString, span,
-                       "closing \"\"\" must be on its own line")
-          return
-        # Strip closing-line indentation from each content line
-        var decoded = ""
-        for i in 0 ..< rawLines.len - 1:
-          let line = rawLines[i]
-          if i > 0: decoded.add('\n')
-          if line.startsWith(closingPrefix):
-            decoded.add(line[closingPrefix.len .. ^1])
-          elif line.len == 0:
-            # Empty lines keep being empty even if indent-shorter
-            discard
-          else:
-            let span = initSpan(start, lx.pos)
-            lx.emitError(peLexUnterminatedString, span,
-                         "line content has less indent than closing \"\"\"")
+            lx.emitError(peLexUnterminatedString, initSpan(start, lx.pos),
+                         "closing \"\"\" must be on its own line " &
+                         "(non-whitespace before closing delimiter)")
             return
+        var dedented = ""
+        # Intermediate content = lines[0 .. ^2]; lines[^1] is the closing
+        # prefix consumed above. The opening-`"""` newline was eaten by
+        # advanceNewline() before the read loop, so rawBuf has no
+        # synthetic leading empty line.
+        for i in 0 ..< lines.len - 1:
+          if i > 0: dedented.add('\n')
+          let lineStr = lines[i]
+          if lineStr.len == 0:
+            # Whitespace-only line — keep empty regardless of indent.
+            discard
+          elif lineStr.startsWith(closingPrefix):
+            dedented.add(lineStr[closingPrefix.len .. ^1])
+          else:
+            lx.emitError(peLexUnterminatedString, initSpan(start, lx.pos),
+                         "line content does not start with the closing " &
+                         "indentation prefix")
+            return
+        # Phase 3: resolve other backslash escapes on the dedented buffer.
+        var decoded = ""
+        var j = 0
+        while j < dedented.len:
+          let ch = dedented[j]
+          if ch == '\\' and j + 1 < dedented.len:
+            inc j
+            let esc = dedented[j]
+            case esc
+            of 'n':  decoded.add('\n'); inc j
+            of 't':  decoded.add('\t'); inc j
+            of 'r':  decoded.add('\r'); inc j
+            of '"':  decoded.add('"');  inc j
+            of '\\': decoded.add('\\'); inc j
+            of 'b':  decoded.add('\b'); inc j
+            of 'f':  decoded.add('\f'); inc j
+            of 's':  decoded.add(' ');  inc j
+            of 'u':
+              # Minimal `\u{XXXX}` decoder for the dedented buffer — the
+              # opening `\u` is at position j; advance past it and the
+              # caller dispatchEscape can't easily be reused here because
+              # we're operating on a string, not the lexer cursor. Re-
+              # implement just the `\u{HEX}` shape inline.
+              inc j  # past 'u'
+              if j >= dedented.len or dedented[j] != '{':
+                lx.emitError(peLexInvalidEscape, initSpan(start, lx.pos),
+                             "\\u must be followed by '{'")
+                return
+              inc j  # past '{'
+              var cp: int = 0
+              var hexCount = 0
+              while j < dedented.len and dedented[j] != '}':
+                let c = dedented[j]
+                let v =
+                  case c
+                  of '0'..'9': int(ord(c) - ord('0'))
+                  of 'a'..'f': int(ord(c) - ord('a') + 10)
+                  of 'A'..'F': int(ord(c) - ord('A') + 10)
+                  else: -1
+                if v < 0:
+                  lx.emitError(peLexInvalidEscape, initSpan(start, lx.pos),
+                               "bad hex digit in \\u{…}")
+                  return
+                cp = (cp shl 4) or v
+                inc hexCount
+                inc j
+              if hexCount == 0 or hexCount > 6 or
+                 (cp >= 0xD800 and cp <= 0xDFFF) or cp > 0x10FFFF:
+                lx.emitError(peLexInvalidEscape, initSpan(start, lx.pos),
+                             "invalid codepoint in \\u{…}")
+                return
+              if j >= dedented.len or dedented[j] != '}':
+                lx.emitError(peLexInvalidEscape, initSpan(start, lx.pos),
+                             "unterminated \\u{…}")
+                return
+              inc j  # past '}'
+              # UTF-8 encode the codepoint.
+              if cp < 0x80:
+                decoded.add(char(cp))
+              elif cp < 0x800:
+                decoded.add(char(0xC0 or (cp shr 6)))
+                decoded.add(char(0x80 or (cp and 0x3F)))
+              elif cp < 0x10000:
+                decoded.add(char(0xE0 or (cp shr 12)))
+                decoded.add(char(0x80 or ((cp shr 6) and 0x3F)))
+                decoded.add(char(0x80 or (cp and 0x3F)))
+              else:
+                decoded.add(char(0xF0 or (cp shr 18)))
+                decoded.add(char(0x80 or ((cp shr 12) and 0x3F)))
+                decoded.add(char(0x80 or ((cp shr 6) and 0x3F)))
+                decoded.add(char(0x80 or (cp and 0x3F)))
+            else:
+              lx.emitError(peLexInvalidEscape, initSpan(start, lx.pos),
+                           "unknown escape \\" & esc)
+              return
+          else:
+            decoded.add(ch); inc j
         lx.emit(Token(kind: tkString, strVal: decoded,
                       span: initSpan(start, lx.pos)))
         return
-      if isNewline(lx.peek):
-        rawLines.add(currentLine)
-        currentLine = ""
-        lx.advanceNewline()
-      elif lx.peek == '\\':
-        let escStart = lx.pos
+      # Phase 1: copy bytes into rawBuf, with whitespace-escapes deleted.
+      if lx.peek == '\\':
+        # Look ahead: if followed by 1+ whitespace (incl. newline), it's
+        # a whitespace-escape — drop the `\` and all consecutive ws.
+        let savePos = lx.pos
         lx.advanceOne()
-        if lx.atEof: break
-        let escSpan = initSpan(escStart, Position(
-          line: lx.pos.line, col: lx.pos.col + 1, offset: lx.pos.offset + 1))
-        case lx.dispatchEscape(escSpan, currentLine)
-        of eoDecoded, eoUnknown:
-          discard
-        of eoWhitespaceEscape:
-          # Multi-line semantics: consume the whitespace run, but split
-          # the accumulated line at every newline so the indentation-
-          # strip pass treats them as separate source lines.
-          while not lx.atEof and
-                (lx.peek == ' ' or lx.peek == '\t' or
-                 lx.peek == '\n' or lx.peek == '\r'):
-            if isNewline(lx.peek):
-              rawLines.add(currentLine)
-              currentLine = ""
-              lx.advanceNewline()
-            else:
-              lx.advanceOne()
-      else:
-        if isDisallowedControl(lx.peek):
-          let sPos = lx.pos
+        if not lx.atEof and isMultilineWsEscapeStart(lx.peek):
+          while not lx.atEof and isMultilineWsEscapeStart(lx.peek):
+            if isNewline(lx.peek): lx.advanceNewline() else: lx.advanceOne()
+          continue
+        # Not a ws-escape — keep the `\` and the next byte verbatim for
+        # phase 3 to interpret.
+        lx.pos = savePos
+        rawBuf.add(lx.peek)
+        lx.advanceOne()
+        if not lx.atEof:
+          rawBuf.add(lx.peek)
           lx.advanceOne()
-          lx.emitError(peLexUnexpectedChar, initSpan(sPos, lx.pos),
-                       "disallowed literal control codepoint in string body")
-          return
-        currentLine.add lx.peek
+        continue
+      if isNewline(lx.peek):
+        rawBuf.add('\n')
+        lx.advanceNewline()
+        continue
+      if isDisallowedControl(lx.peek):
+        let sPos = lx.pos
         lx.advanceOne()
+        lx.emitError(peLexUnexpectedChar, initSpan(sPos, lx.pos),
+                     "disallowed literal control codepoint in string body")
+        return
+      rawBuf.add(lx.peek)
+      lx.advanceOne()
     # EOF before close
     let span = initSpan(start, lx.pos)
     lx.emitError(peLexUnterminatedString, span,

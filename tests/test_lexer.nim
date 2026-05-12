@@ -169,6 +169,72 @@ suite "lexer: multi-line strings":
     let t = tokenize("\"\"\"oops\"\"\"")
     check tkError in t.kinds
 
+  # Slice-5 fixtures: WS-escape resolution happens before dedent.
+
+  test "WS-escape on line before closer extends content into closer-indent (F1)":
+    # multiline_string_escape_newline_at_end:
+    #   """
+    #       a
+    #      \
+    #   """
+    # `\<NL>` is a WS-escape: the line `   \` and its newline are gone,
+    # leaving `   """` on the would-be closer line. Closing-prefix is
+    # `   `, intermediate line `    a` becomes ` a`.
+    let src = "\"\"\"\n    a\n   \\\n\"\"\""
+    let t = tokenize(src)
+    check t.kinds == @[tkString]
+    check t[0].strVal == " a"
+
+  test "WS-escape merging lines + closing prefix strip (F2)":
+    # multiline_string_escape_in_closing_line:
+    #   """
+    #     foo \
+    #   bar
+    #     baz
+    #     \   """
+    # `\<NL>` joins `foo ` with `bar`. `\<3spaces>` before `"""` consumes
+    # the `\` and the 3 spaces. Closing-prefix is `  `.
+    let src = "\"\"\"\n  foo \\\nbar\n  baz\n  \\   \"\"\""
+    let t = tokenize(src)
+    check t.kinds == @[tkString]
+    check t[0].strVal == "foo bar\nbaz"
+
+  test "WS-escape consuming all closer indent (F3)":
+    # multiline_string_escape_in_closing_line_shallow:
+    # `\   """` at column 0; the `\<3sp>` consumes everything → closing
+    # prefix is empty.
+    let src = "\"\"\"\n  foo \\\nbar\n  baz\n\\   \"\"\""
+    let t = tokenize(src)
+    check t.kinds == @[tkString]
+    check t[0].strVal == "  foo bar\n  baz"
+
+  test "WS-escape crossing newline merges into next line (F4)":
+    # multiline_string_wrapped_binary
+    let src = "\"\"\"\n    dead\\\n    beef\n    \"\"\""
+    let t = tokenize(src)
+    check t.kinds == @[tkString]
+    check t[0].strVal == "deadbeef"
+
+  test "intermediate line less-indented than closer is error (F5)":
+    # multiline_string_escape_newline_at_end_fail
+    let src = "\"\"\"\na\n   \\\n\"\"\""
+    let t = tokenize(src)
+    check tkError in t.kinds
+
+  test "WS-escape that joins closer with non-ws prev is error (F6)":
+    # multiline_string_final_whitespace_escape_fail
+    let src = "\"\"\"\n  foo\n  bar\\\n  \"\"\""
+    let t = tokenize(src)
+    check tkError in t.kinds
+
+  test "non-literal-whitespace prefix on intermediate line is error (F7)":
+    # multiline_string_non_literal_prefix_fail — `\s` doesn't count as a
+    # literal-whitespace codepoint for the prefix-match check, even
+    # though `\s` decodes to a space.
+    let src = "\"\"\"\n\\s escaped prefix\n  literal prefix\n  \"\"\""
+    let t = tokenize(src)
+    check tkError in t.kinds
+
 suite "lexer: numbers":
   test "plain decimal":
     let t = tokenize("42")

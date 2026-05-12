@@ -54,14 +54,7 @@ hex_int.kdl                       | D-bigint — v0.2 (i128 work)
 # Whitespace-escape interactions with multi-line layout around the
 # closing line and indentation. Our common-case implementation passes;
 # these are edges.
-multiline_string_escape_in_closing_line.kdl | F-multiline-edge — v0.2
-multiline_string_escape_in_closing_line_shallow.kdl | F-multiline-edge — v0.2
-multiline_string_escape_newline_at_end.kdl | F-multiline-edge — v0.2
-multiline_string_escape_newline_at_end_fail.kdl | F-multiline-edge — v0.2
-multiline_string_final_whitespace_escape_fail.kdl | F-multiline-edge — v0.2
-multiline_string_non_literal_prefix_fail.kdl | F-multiline-edge — v0.2
-multiline_string_whitespace_only.kdl | F-multiline-edge — v0.2
-multiline_string_wrapped_binary.kdl | F-multiline-edge — v0.2
+multiline_string_whitespace_only.kdl | F-multiline-edge — needs Unicode whitespace classification (slice 7); v0.2
 
 # ===========================================================================
 # Category G: Specific spec corners
