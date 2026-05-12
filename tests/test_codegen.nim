@@ -156,6 +156,37 @@ rule "c"
       check value.len == 1
       check value[0].id == "y"
 
+# H8 fixture types must live at module scope: `deriveDecode` emits an
+# exported proc, and `proc ... *` is invalid inside a `suite` block.
+type
+  Natural16 = uint16
+  WidePrims {.kdlNode: "wide".} = object
+    a {.kdlAttr.}: uint8
+    b {.kdlAttr.}: int16
+    c {.kdlAttr.}: Natural16   # alias
+
+deriveDecode(WidePrims)
+
+suite "codegen: H8 — non-string-allowlist primitives":
+  # The previous typeNodeIsObject string-name allowlist missed types
+  # like uint8 / Natural / int16 / aliases. After H8 they all classify
+  # as primitives (fkAttr default) via getTypeImpl resolution.
+
+  test "byte-/short-width primitives compile and decode":
+    # Whether the kdlDecodeValue overload set covers each width is a
+    # separate concern (we currently only ship int / int64 / float /
+    # bool / string overloads). The C3-style "missing required"
+    # behavior + the H8 classification just need to NOT route these
+    # through fkChild (which would call kdlDecodeImpl on a primitive).
+    # That misroute compiles only because of the bad classification;
+    # post-H8, a missing value path reaches fkAttr and surfaces the
+    # value-type mismatch cleanly. So a missing-everything input
+    # surfaces missing-required errors (not an object-recursion mess).
+    let r = decode[WidePrims]("wide")
+    check r.isErr
+    if r.isErr:
+      check r.getErr.code == peTypeMissingRequired
+
 suite "codegen: error reporting":
   test "type mismatch surfaces as Err":
     # `count` should be int; passing a string should fail

@@ -36,6 +36,16 @@ import std/[strutils, unicode]
 import ./spans
 import ./intern
 
+const
+  MaxRawStringHashes* = 255
+    ## Maximum number of `#` characters allowed at the start of a raw
+    ## string literal (`#"..."#`, `##"..."##`, …). KDL imposes no spec
+    ## limit, but matching closing-hash scans are O(H * N) over the
+    ## body and an unbounded `H` is an easy DoS vector against the
+    ## lexer when parsing untrusted documents. KDL configs in the
+    ## wild use 0–4 hashes; 255 is comfortably above any plausible
+    ## use while keeping the scan bounded.
+
 type
   TokenKind* = enum
     # Punctuation
@@ -107,6 +117,40 @@ func isIdentCont(ch: char): bool {.inline.} =
 
 func isAsciiWhitespace(ch: char): bool {.inline.} =
   ch == ' ' or ch == '\t'
+
+func containsBidiControl*(s: string): bool =
+  ## True if `s` contains any of the 10 Unicode bidirectional control
+  ## codepoints that the KDL v2 spec rejects in identifiers and most
+  ## other source positions:
+  ##
+  ##   U+200E LEFT-TO-RIGHT MARK            E2 80 8E
+  ##   U+200F RIGHT-TO-LEFT MARK            E2 80 8F
+  ##   U+202A LEFT-TO-RIGHT EMBEDDING       E2 80 AA
+  ##   U+202B RIGHT-TO-LEFT EMBEDDING       E2 80 AB
+  ##   U+202C POP DIRECTIONAL FORMATTING    E2 80 AC
+  ##   U+202D LEFT-TO-RIGHT OVERRIDE        E2 80 AD
+  ##   U+202E RIGHT-TO-LEFT OVERRIDE        E2 80 AE
+  ##   U+2066 LEFT-TO-RIGHT ISOLATE         E2 81 A6
+  ##   U+2067 RIGHT-TO-LEFT ISOLATE         E2 81 A7
+  ##   U+2068 FIRST STRONG ISOLATE          E2 81 A8
+  ##   U+2069 POP DIRECTIONAL ISOLATE       E2 81 A9
+  ##
+  ## Scans the raw UTF-8 bytes — avoids pulling std/unicode for what's a
+  ## small fixed denylist.
+  var i = 0
+  while i + 2 < s.len:
+    if s[i] == '\xE2':
+      if s[i+1] == '\x80':
+        let b2 = uint8(s[i+2])
+        if b2 == 0x8E or b2 == 0x8F or
+           (b2 >= 0xAA and b2 <= 0xAE):
+          return true
+      elif s[i+1] == '\x81':
+        let b2 = uint8(s[i+2])
+        if b2 >= 0xA6 and b2 <= 0xA9:
+          return true
+    inc i
+  false
 
 func isHexDigit(ch: char): bool {.inline.} =
   case ch
@@ -290,6 +334,49 @@ proc decodeUnicodeEscape(lx: var Lexer, startSpan: Span): string =
     return ""
   result = $Rune(value)
 
+type EscapeOutcome* = enum
+  ## What `dispatchEscape` says about the escape sequence it just consumed:
+  ##
+  ## - `eoDecoded` — the escape produced bytes that have been appended to
+  ##   the caller's accumulator (`\n`, `\t`, `\"`, `\u{…}`, etc.).
+  ## - `eoWhitespaceEscape` — the byte after `\` is whitespace or a
+  ##   newline. The caller is responsible for consuming the run; the
+  ##   semantics differ between single-line strings (just drop the run)
+  ##   and multi-line strings (split lines at newlines too).
+  ## - `eoUnknown` — `\x` for some `x` that isn't a valid escape. An
+  ##   error token has already been emitted; the caller advances past
+  ##   the offending character.
+  eoDecoded
+  eoWhitespaceEscape
+  eoUnknown
+
+proc dispatchEscape*(lx: var Lexer, escSpan: Span,
+                    acc: var string): EscapeOutcome =
+  ## Handle one `\<x>` escape sequence shared between single-line and
+  ## multi-line string decoding. The caller has already consumed the
+  ## leading backslash; `escSpan` covers the two-byte `\<x>` span for
+  ## error reporting.
+  let esc = lx.peek
+  case esc
+  of 'n':  acc.add '\n'; lx.advanceOne(); eoDecoded
+  of 't':  acc.add '\t'; lx.advanceOne(); eoDecoded
+  of 'r':  acc.add '\r'; lx.advanceOne(); eoDecoded
+  of '"':  acc.add '"';  lx.advanceOne(); eoDecoded
+  of '\\': acc.add '\\'; lx.advanceOne(); eoDecoded
+  of 'b':  acc.add '\b'; lx.advanceOne(); eoDecoded
+  of 'f':  acc.add '\f'; lx.advanceOne(); eoDecoded
+  of 's':  acc.add ' ';  lx.advanceOne(); eoDecoded
+  of 'u':
+    lx.advanceOne()
+    acc.add lx.decodeUnicodeEscape(escSpan)
+    eoDecoded
+  of ' ', '\t', '\n', '\r':
+    eoWhitespaceEscape
+  else:
+    lx.emitError(peLexInvalidEscape, escSpan, "unknown escape \\" & esc)
+    lx.advanceOne()
+    eoUnknown
+
 proc decodeRegularString(lx: var Lexer, openSpan: Span,
                         terminator: char): string =
   ## Read a regular (non-raw) string body. Caller has already consumed
@@ -312,37 +399,19 @@ proc decodeRegularString(lx: var Lexer, openSpan: Span,
       let escStart = lx.pos
       lx.advanceOne()
       if lx.atEof:
-        lx.emitError(peLexInvalidEscape, openSpan,
-                     "EOF after backslash")
+        lx.emitError(peLexInvalidEscape, openSpan, "EOF after backslash")
         return result
-      let esc = lx.peek
       let escSpan = initSpan(escStart, Position(
         line: lx.pos.line, col: lx.pos.col + 1, offset: lx.pos.offset + 1))
-      case esc
-      of 'n':  result.add '\n'; lx.advanceOne()
-      of 't':  result.add '\t'; lx.advanceOne()
-      of 'r':  result.add '\r'; lx.advanceOne()
-      of '"':  result.add '"';  lx.advanceOne()
-      of '\\': result.add '\\'; lx.advanceOne()
-      of 'b':  result.add '\b'; lx.advanceOne()
-      of 'f':  result.add '\f'; lx.advanceOne()
-      of 's':  result.add ' ';  lx.advanceOne()
-      of 'u':
-        lx.advanceOne()
-        result.add lx.decodeUnicodeEscape(escSpan)
-      of ' ', '\t', '\n', '\r':
-        # Whitespace-escape: `\` followed by any run of ASCII whitespace
-        # (incl. newlines) is consumed entirely. Used in multi-line
-        # string layouts where you want to break a line in source but
-        # not in the decoded value.
+      case lx.dispatchEscape(escSpan, result)
+      of eoDecoded, eoUnknown:
+        discard
+      of eoWhitespaceEscape:
+        # Single-line semantics: drop the whitespace run entirely.
         while not lx.atEof and
               (lx.peek == ' ' or lx.peek == '\t' or
                lx.peek == '\n' or lx.peek == '\r'):
           if isNewline(lx.peek): lx.advanceNewline() else: lx.advanceOne()
-      else:
-        lx.emitError(peLexInvalidEscape, escSpan,
-                     "unknown escape \\" & esc)
-        lx.advanceOne()
     else:
       result.add ch
       lx.advanceOne()
@@ -414,44 +483,27 @@ proc lexRegularOrMultiline(lx: var Lexer) =
         currentLine = ""
         lx.advanceNewline()
       elif lx.peek == '\\':
-        # Process escape into currentLine
         let escStart = lx.pos
         lx.advanceOne()
         if lx.atEof: break
-        let esc = lx.peek
         let escSpan = initSpan(escStart, Position(
           line: lx.pos.line, col: lx.pos.col + 1, offset: lx.pos.offset + 1))
-        case esc
-        of 'n':  currentLine.add '\n'; lx.advanceOne()
-        of 't':  currentLine.add '\t'; lx.advanceOne()
-        of 'r':  currentLine.add '\r'; lx.advanceOne()
-        of '"':  currentLine.add '"';  lx.advanceOne()
-        of '\\': currentLine.add '\\'; lx.advanceOne()
-        of 'b':  currentLine.add '\b'; lx.advanceOne()
-        of 'f':  currentLine.add '\f'; lx.advanceOne()
-        of 's':  currentLine.add ' ';  lx.advanceOne()
-        of 'u':
-          lx.advanceOne()
-          currentLine.add lx.decodeUnicodeEscape(escSpan)
-        of ' ', '\t', '\n', '\r':
-          # Whitespace-escape inside a multi-line string: consume the
-          # run. Multi-line strings already split on newlines, so this
-          # effectively joins consecutive lines without inserting a
-          # newline in the decoded value.
+        case lx.dispatchEscape(escSpan, currentLine)
+        of eoDecoded, eoUnknown:
+          discard
+        of eoWhitespaceEscape:
+          # Multi-line semantics: consume the whitespace run, but split
+          # the accumulated line at every newline so the indentation-
+          # strip pass treats them as separate source lines.
           while not lx.atEof and
                 (lx.peek == ' ' or lx.peek == '\t' or
                  lx.peek == '\n' or lx.peek == '\r'):
             if isNewline(lx.peek):
-              # Push the current accumulated line, start a fresh blank.
               rawLines.add(currentLine)
               currentLine = ""
               lx.advanceNewline()
             else:
               lx.advanceOne()
-        else:
-          lx.emitError(peLexInvalidEscape, escSpan,
-                       "unknown escape \\" & esc)
-          lx.advanceOne()
       else:
         currentLine.add lx.peek
         lx.advanceOne()
@@ -477,6 +529,21 @@ proc lexRawString(lx: var Lexer) =
   while lx.peek == '#':
     inc hashCount
     lx.advanceOne()
+    # DoS guard: a crafted `####…###"<body>"` input with very large H and
+    # body length N runs an O(H*N) inner loop on every `"` in the body
+    # (security review H3). KDL has no realistic need for more than a
+    # handful of `#`s — Rust's reference impl uses 4 max in practice.
+    # Cap at 255; emit a structured error past the limit rather than
+    # silently grinding.
+    if hashCount > MaxRawStringHashes:
+      let span = initSpan(start, lx.pos)
+      lx.emitError(peLexInvalidIdentifier, span,
+                   "raw string opener has more than " &
+                   $MaxRawStringHashes & " '#' characters")
+      # Consume any remaining hashes to avoid downstream tokenization
+      # confusion on the same input.
+      while lx.peek == '#': lx.advanceOne()
+      return
   if lx.atEof or lx.peek != '"':
     # Not a raw string — rewind and let caller try keyword/error
     lx.pos = start
@@ -600,6 +667,13 @@ proc lexNumber(lx: var Lexer) =
     else: discard
     lx.advanceOne(); lx.advanceOne()
     var sawDigit = false
+    # First digit after the base prefix may not be `_` (e.g. `0x_FF`
+    # is invalid per v2).
+    if not lx.atEof and lx.peek == '_':
+      let span = initSpan(start, lx.pos)
+      lx.emitError(peLexInvalidNumber, span,
+                   "underscore not allowed immediately after base prefix")
+      return
     while not lx.atEof:
       let ch = lx.peek
       if ch == '_':
@@ -618,12 +692,20 @@ proc lexNumber(lx: var Lexer) =
       lx.emitError(peLexInvalidNumber, span,
                    "number literal has no digits")
       return
+    # Reject `0xFFg` / `0o7a` / `0b10x` — non-base ident chars after a
+    # base-prefixed literal. Same logic as the decimal path's trailing
+    # ident-cont check.
+    if not lx.atEof and isIdentCont(lx.peek):
+      let span = initSpan(start, lx.pos.advance(lx.peek))
+      lx.emitError(peLexInvalidNumber, span,
+                   "non-base digit in numeric literal")
+      return
     let span = initSpan(start, lx.pos)
     lx.emit(Token(kind: tkNumber, numText: lx.source[start.offset ..< lx.pos.offset],
                   numBase: base, numNegative: negative, span: span))
     return
 
-  # Decimal
+  # Decimal integer part
   var sawDigit = false
   while not lx.atEof:
     let ch = lx.peek
@@ -633,9 +715,25 @@ proc lexNumber(lx: var Lexer) =
       sawDigit = true; lx.advanceOne()
     else:
       break
-  # Optional fractional part
-  if lx.peek == '.' and lx.peek(1) >= '0' and lx.peek(1) <= '9':
+
+  # Optional fractional part. If the `.` is present, a digit MUST follow
+  # (`1.` and `1.e10` are rejected; the v1 leniency of "trailing dot is OK"
+  # is gone in v2).
+  var hasFraction = false
+  if lx.peek == '.':
+    hasFraction = true
     lx.advanceOne()
+    if lx.atEof or lx.peek < '0' or lx.peek > '9':
+      let span = initSpan(start, lx.pos)
+      lx.emitError(peLexInvalidNumber, span,
+                   "fractional part requires a digit after '.'")
+      return
+    # Reject `1._5` (underscore at start of fraction)
+    if lx.peek == '_':
+      let span = initSpan(start, lx.pos)
+      lx.emitError(peLexInvalidNumber, span,
+                   "fraction cannot start with '_'")
+      return
     while not lx.atEof:
       let ch = lx.peek
       if ch == '_':
@@ -644,11 +742,23 @@ proc lexNumber(lx: var Lexer) =
         sawDigit = true; lx.advanceOne()
       else:
         break
-  # Optional exponent
+
+  # Optional exponent. Same rules — at least one digit, no leading underscore.
   if lx.peek == 'e' or lx.peek == 'E':
     lx.advanceOne()
     if lx.peek == '+' or lx.peek == '-':
       lx.advanceOne()
+    if lx.atEof or lx.peek < '0' or lx.peek > '9':
+      let span = initSpan(start, lx.pos)
+      lx.emitError(peLexInvalidNumber, span,
+                   "exponent requires a digit")
+      return
+    # Reject `1e_5` (underscore at start of exponent)
+    if lx.peek == '_':
+      let span = initSpan(start, lx.pos)
+      lx.emitError(peLexInvalidNumber, span,
+                   "exponent cannot start with '_'")
+      return
     var expDigit = false
     while not lx.atEof:
       let ch = lx.peek
@@ -660,13 +770,24 @@ proc lexNumber(lx: var Lexer) =
         break
     if not expDigit:
       let span = initSpan(start, lx.pos)
-      lx.emitError(peLexInvalidNumber, span,
-                   "exponent has no digits")
+      lx.emitError(peLexInvalidNumber, span, "exponent has no digits")
       return
 
   if not sawDigit:
     let span = initSpan(start, lx.pos)
     lx.emitError(peLexInvalidNumber, span, "number literal has no digits")
+    return
+
+  # Reject a number immediately followed by ident-continuation bytes
+  # (`12abc`, `1_a`, `1.5xyz`). These look like bareword-with-digit-prefix
+  # which v2 forbids in either direction — bare idents can't start with
+  # a digit, and number literals can't be followed by ident chars
+  # without a separator.
+  if not lx.atEof and isIdentCont(lx.peek):
+    let span = initSpan(start, lx.pos.advance(lx.peek))
+    lx.emitError(peLexInvalidNumber, span,
+                 "number literal followed by identifier character " &
+                 "without separator")
     return
 
   let span = initSpan(start, lx.pos)
@@ -684,6 +805,25 @@ proc lexBareIdent(lx: var Lexer) =
     lx.advanceOne()
   let text = lx.source[start.offset ..< lx.pos.offset]
   let span = initSpan(start, lx.pos)
+  # KDL v2 forbids Unicode bidirectional control codepoints inside
+  # identifiers (and basically everywhere outside strings) — they
+  # let an attacker render an identifier differently from its bytes.
+  # See containsBidiControl for the 10 forbidden codepoints.
+  if containsBidiControl(text):
+    lx.emitError(peLexInvalidIdentifier, span,
+                 "bidirectional control codepoint in identifier")
+    return
+  # Legacy KDL v1 raw-string syntax: `r"..."` / `r#"..."#`. v2 requires
+  # raw strings to start with `#"`, not `r"`. If the lexed ident is
+  # exactly `r` (or `R`) and the next byte is `"` or `#` with no
+  # whitespace between, reject — silently treating `r` as an ident
+  # would let v1 docs accidentally parse with broken semantics.
+  if (text == "r" or text == "R") and not lx.atEof and
+     (lx.peek == '"' or lx.peek == '#'):
+    lx.emitError(peLexInvalidIdentifier, span,
+                 "KDL v1 raw-string syntax `r\"...\"` is not valid in v2; " &
+                 "use `#\"...\"#` instead")
+    return
   let handle = lx.interner[].intern(text)
   lx.emit(Token(kind: tkIdent, ident: handle, span: span))
 
@@ -723,6 +863,15 @@ proc lexKeyword(lx: var Lexer) =
 proc lexOne(lx: var Lexer) =
   if lx.atEof:
     lx.emit(Token(kind: tkEof, span: pointSpan(lx.pos)))
+    return
+  # BOM mid-file: U+FEFF (EF BB BF) is only allowed as the very first
+  # bytes of the source. By the time we reach lexOne, the offset-0 BOM
+  # has been consumed in `lex()`. Anywhere else is a structural error.
+  if lx.peek == '\xEF' and lx.peek(1) == '\xBB' and lx.peek(2) == '\xBF':
+    let s = lx.pos
+    lx.advanceOne(); lx.advanceOne(); lx.advanceOne()
+    lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
+                 "byte-order mark allowed only at start of file")
     return
   let ch = lx.peek
   case ch

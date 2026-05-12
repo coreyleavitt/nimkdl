@@ -35,7 +35,7 @@ let r = decode[seq[Rule]]("""
 let rules = r.get
 
 # Typo-catches at compile time:
-for id in path(rules, [it.enabel].id):     # ← typo
+for id in path(rules, [it.enabel].id):     # ← typo, iterator form
   process(id)
 # error: undeclared field: 'enabel' for type Rule
 #        did you mean enabled?
@@ -185,12 +185,11 @@ Constants surfaced as `const` values:
 
 ## AGENTS.md macro-depth bend
 
-amoxtli's `AGENTS.md` keeps macros ≤2 levels of expansion by default. lib/kdl explicitly bends this rule for four macros where deeper expansion is intrinsic to the work:
+amoxtli's `AGENTS.md` keeps macros ≤2 levels of expansion by default. lib/kdl explicitly bends this rule for three macros where deeper expansion is intrinsic to the work:
 
 - `deriveDecode` — emits a `kdlDecodeImpl` proc per user type by walking `getImpl(T)`
 - `embedAux` — runs `staticRead` at compile time and emits the embedded literal + decode call
-- `path` — walks a path expression AST and emits a collect-into-seq with `typeof(block: …)` type inference
-- `kdlGrammar` — wraps a grammar value with construction-time validation
+- `path` — walks a path expression AST and emits a typed iterator with `typeof(block: …)` type inference
 
 Each macro's docstring explains the expansion shape. Set `-d:dumpKdlGen` to dump the generated code during compilation when debugging.
 

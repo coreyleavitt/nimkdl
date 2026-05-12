@@ -25,8 +25,8 @@
 ##
 ## ## Why the grammar is data, not generated code
 ##
-## We could write a `kdlGrammar:` macro that emits a parser proc per rule.
-## We chose data-driven because:
+## We could write a macro that emits a parser proc per rule. We chose
+## data-driven because:
 ##
 ## 1. The grammar is inspectable — you can print it, walk it, transform
 ##    it. A code-emitting macro produces opaque procs.
@@ -36,10 +36,10 @@
 ## 3. The cost of indirection is irrelevant — this is the slow oracle,
 ##    not the production hot path. The fast path is `parser.nim`.
 ##
-## The `kdlGrammar:` macro **does** exist (see bottom of file) but it
-## does compile-time validation of the grammar value, not codegen. It
-## walks the rule table and asserts every `rRef` target exists. A typo
-## in `refTo("nodee")` becomes a compile error, not a runtime miss.
+## Validation is a plain `validate(g): seq[string]` proc. The canonical
+## `KdlV2Grammar` is tied to a `doAssert validate(...).len == 0` at
+## module init so typos in `refTo` targets fire on load, not on first
+## bad input.
 ##
 ## ## Differential testing usage
 ##
@@ -55,7 +55,7 @@
 ## in the kdl-org test corpus, plus a curated set of locally-interesting
 ## fragments.
 
-import std/[macros, strutils, tables]
+import std/[strutils, tables]
 
 import ./ast
 import ./intern
@@ -164,13 +164,22 @@ proc buildKdlGrammar*(): Grammar =
 
   rule "property", seqOf(refTo("name"), term(tkEquals), refTo("value"))
 
+  # Slashdash + any following newlines. KDL v2 lets `/-` skip the next
+  # thing across newlines (e.g. `node 1 /-\n2 3` reads as `node 1 3`),
+  # so wherever slashdash appears we model it together with its
+  # trailing whitespace as a single optional-prefix sub-rule.
+  rule "slashdashPrefix", seqOf(
+    term(tkSlashDash),
+    star(term(tkNewline))
+  )
+
   # entry := optional slashdash + (property OR plain value).
   # No separate `argument` rule — interpRule's stamping is single-layer,
   # so passthrough rules (argument → value) collapse and lose their tag.
   # Distinguishing argument-vs-property by tag matters for the tree
   # walker, so we keep them at the same level of alt.
   rule "entry", seqOf(
-    opt(term(tkSlashDash)),
+    opt(refTo("slashdashPrefix")),
     altOf(refTo("property"), refTo("value"))
   )
 
@@ -181,14 +190,19 @@ proc buildKdlGrammar*(): Grammar =
   rule "children", seqOf(
     term(tkLBrace),
     star(term(tkNewline)),
-    star(seqOf(refTo("node"), star(term(tkNewline)))),
+    star(seqOf(
+      opt(refTo("slashdashPrefix")),
+      refTo("node"),
+      star(term(tkNewline))
+    )),
     term(tkRBrace)
   )
 
-  # Slashdashed children block: `/- { ... }` — semantically a no-op,
-  # entries may follow it (mirrors the hand parser's behavior).
+  # Slashdashed children block: `/- { ... }` (with optional newlines
+  # between the `/-` and the brace) — semantically a no-op; entries may
+  # follow it (matches the hand parser's behavior).
   rule "slashdashChildren", seqOf(
-    term(tkSlashDash),
+    refTo("slashdashPrefix"),
     refTo("children")
   )
 
@@ -220,7 +234,7 @@ proc buildKdlGrammar*(): Grammar =
   rule "document", seqOf(
     star(term(tkNewline)),
     star(seqOf(
-      opt(term(tkSlashDash)),
+      opt(refTo("slashdashPrefix")),
       refTo("node"),
       star(term(tkNewline))
     ))
@@ -642,14 +656,19 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
 proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc,
                         errs: var seq[ParseError]): seq[KdlNode] =
   ## Walk the `children` rule match. Grammar:
-  ##   children := '{' star(newline) star(seq(node, star(newline))) '}'
+  ##   children := '{' star(newline) star(seq(opt(slashdashPrefix),
+  ##                                            node, star(newline))) '}'
   ## So children.children = ['{', newlines, inner_star, '}']
-  ## inner_star.children = list of (node, newlines) seq iterations.
+  ## inner_star.children = list of (opt(slashdashPrefix), node, newlines)
+  ## seq iterations.
   if childrenMatch.children.len < 3: return
   let innerStar = childrenMatch.children[2]
   for iter in innerStar.children:
-    if iter.children.len < 1: continue
-    let nodeMatch = iter.children[0]
+    if iter.children.len < 2: continue
+    let slashdashOpt = iter.children[0]
+    if slashdashOpt.children.len > 0:
+      continue  # /-prefixed node — semantically absent
+    let nodeMatch = iter.children[1]
     result.add(buildNode(nodeMatch, doc, errs))
 
 proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode] =
@@ -778,41 +797,3 @@ proc referenceInterpret*(source: string, sourcePath = "<input>"):
     return err[KdlDoc, ParseError](semCheck.getErr)
   ok[KdlDoc, ParseError](doc)
 
-# ---------------------------------------------------------------------------
-# kdlGrammar macro — compile-time grammar validation
-# ---------------------------------------------------------------------------
-#
-# The macro is intentionally small. Its job is to make the grammar-block
-# syntactic surface look distinctive and to push validation to compile
-# time (catching typos in rule references before any test runs).
-#
-# Usage:
-#
-#   const G = kdlGrammar:
-#     # Plain Nim expression; the macro asserts validity at compile time
-#     buildKdlGrammar()
-#
-# Or more usefully for ad-hoc grammars:
-#
-#   const G = kdlGrammar:
-#     var g = Grammar(...)
-#     # ... build g
-#     g
-
-macro kdlGrammar*(body: untyped): untyped =
-  ## Wraps a grammar-building expression and validates the result. Any
-  ## rule with an undefined `refTo` target raises an AssertionDefect at
-  ## construction time — before any input ever touches the grammar.
-  ##
-  ## A compile-time variant would require `const`-evaluable grammars,
-  ## which our `ref object` rule encoding doesn't support cleanly. The
-  ## construction-time check is good enough: every code path that uses
-  ## the grammar must first build it, so a typo in `refTo("nodee")`
-  ## fires the moment the program tries to use the bad grammar.
-  result = quote do:
-    block:
-      let g = `body`
-      let errs {.used.} = validate(g)
-      doAssert errs.len == 0,
-        "grammar inconsistent: " & errs.join("; ")
-      g

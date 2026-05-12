@@ -5,16 +5,19 @@
 # Bar for adding entries: high. Each skip is a deliberate, documented
 # deviation from the spec — not a silent ignore.
 #
-# Current pass rate: 284 / 338 (84%) without these skips.
+# After the review-round-1 H-tier fixes:
+#   B / C / G most cases — CLOSED
+#   E most cases — CLOSED (slashdash skips newlines after itself)
 #
+# Remaining skips fall into these real gaps:
+
 # ===========================================================================
 # Category A: Full Unicode bare-ident charset (v0.2)
 # ===========================================================================
 # v2 spec accepts a broader bare-ident charset than the ASCII subset we
-# implement. Idents may contain Unicode bidi control codepoints, commas in
-# some positions, and chars like ⟨⟩ when matched correctly. Full Unicode
-# classification is filed as v0.2 work; for v0.1 our subset matches what
-# humans write in rule files.
+# implement. Idents may contain certain Unicode chars (commas in some
+# positions, ⟨⟩, etc.). Full Unicode classification is filed as v0.2
+# work; the bidi-control denylist for H11 covers the safety case.
 comma_in_bare_id.kdl              | A-unicode-bare-ident — v0.2
 unusual_chars_in_bare_id.kdl      | A-unicode-bare-ident — v0.2
 unusual_bare_id_chars_in_quoted_id.kdl | A-unicode-bare-ident — v0.2
@@ -22,73 +25,37 @@ unicode_silly.kdl                 | A-unicode-bare-ident — v0.2
 vertical_tab_whitespace.kdl       | A-unicode-whitespace — v2 spec includes VT (U+000B) as whitespace; v0.2
 
 # ===========================================================================
-# Category B: Negative-case Unicode bidi controls (v0.2)
+# Category B: Unicode bidi-control rejection — CLOSED by H11
 # ===========================================================================
-# v2 spec rejects these specific Unicode control codepoints in source.
-# Our lexer currently treats them as bare-ident bytes. Need full Unicode
-# classification to reject. v0.2 work; impact on amoxtli is zero
-# (nobody hand-writes bidi controls in rule files).
-unicode_fsi_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_lre_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_lrm_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_lro_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_pdf_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_pdi_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_rle_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_rli_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_rlm_fail.kdl              | B-unicode-bidi-controls — v0.2
-unicode_rlo_fail.kdl              | B-unicode-bidi-controls — v0.2
 
 # ===========================================================================
-# Category C: Tightened number-lexer rejection (v0.2)
+# Category C: Tightened number-lexer rejection — CLOSED by H12
 # ===========================================================================
-# Negative cases where my lexer accepts a number that v2 spec says should
-# fail. Need stricter rejection of e.g. `1.` (no fraction digit), `1e.5`,
-# multiple `e`s, underscore-prefixed runs. Doesn't affect well-formed
-# numbers, only flagged-as-bad ones.
-bare_ident_numeric_fail.kdl       | C-strict-numbers — v0.2
-bare_ident_numeric_sign_fail.kdl  | C-strict-numbers — v0.2
-dot_but_no_fraction_before_exponent_fail.kdl | C-strict-numbers — v0.2
-dot_but_no_fraction_fail.kdl      | C-strict-numbers — v0.2
-multiple_es_in_float_fail.kdl     | C-strict-numbers — v0.2
-illegal_char_in_hex_fail.kdl      | C-strict-numbers — v0.2
-illegal_char_in_octal_fail.kdl    | C-strict-numbers — v0.2
-underscore_at_start_of_fraction_fail.kdl | C-strict-numbers — v0.2
-underscore_at_start_of_hex_fail.kdl | C-strict-numbers — v0.2
 
 # ===========================================================================
 # Category D: int128 for hex/binary literals that don't fit int64 (v0.2)
 # ===========================================================================
-# Documented gap in ast.nim — kvBigInt variant deferred. Both corpus cases
-# use hex values > int64.high. Real amoxtli configs never approach this.
+# Real amoxtli configs never approach int64 bounds. Filed as kvBigInt
+# variant in ast.nim.
 hex.kdl                           | D-bigint — v0.2 (i128 work)
 hex_int.kdl                       | D-bigint — v0.2 (i128 work)
 
 # ===========================================================================
-# Category E: Slashdash with intervening comments / newlines (v0.2)
+# Category E: Slashdash with intervening newlines — CLOSED by H12
 # ===========================================================================
-# The corpus has cases where slashdash is followed by comments or
-# multiple newlines before the target. Our parser handles slashdash at
-# entry/node/children-block positions but not these specific layouts.
-# Each is fixable with parser-level work; v0.2 polish task.
-slashdash_false_node.kdl          | E-slashdash-layout — v0.2
-slashdash_multiple_child_blocks.kdl | E-slashdash-layout — v0.2
-slashdash_newline_before_children.kdl | E-slashdash-layout — v0.2
-slashdash_newline_before_entry.kdl | E-slashdash-layout — v0.2
-slashdash_newline_before_node.kdl | E-slashdash-layout — v0.2
-slashdash_node_in_child.kdl       | E-slashdash-layout — v0.2
-slashdash_single_line_comment_entry.kdl | E-slashdash-layout — v0.2
-slashdash_single_line_comment_node.kdl | E-slashdash-layout — v0.2
-slashdash_child_block_before_entry_err_fail.kdl | E-slashdash-layout — v0.2
-escline_slashdash.kdl             | E-slashdash-layout — v0.2
-zero_space_before_slashdash_children.kdl | E-slashdash-layout — v0.2
+# parseNode's entry loop now calls skipNewlines after consuming `/-`,
+# matching parseDocument. Line comments are lexer-absorbed already.
+#
+# Two cases still skipped (real spec corners):
+slashdash_multiple_child_blocks.kdl | E-multi-block — node accepts /-{...} blocks after a real children block; needs a second-pass children scan; v0.2
+slashdash_child_block_before_entry_err_fail.kdl | E-multi-block — related; v0.2
 
 # ===========================================================================
 # Category F: Multi-line string corner cases (v0.2)
 # ===========================================================================
-# Whitespace-escape interactions with multi-line layout. My implementation
-# handles the common case (whitespace-escape inside a multi-line body) but
-# the corpus exercises edges around the closing line and indentation.
+# Whitespace-escape interactions with multi-line layout around the
+# closing line and indentation. Our common-case implementation passes;
+# these are edges.
 multiline_string_escape_in_closing_line.kdl | F-multiline-edge — v0.2
 multiline_string_escape_in_closing_line_shallow.kdl | F-multiline-edge — v0.2
 multiline_string_escape_newline_at_end.kdl | F-multiline-edge — v0.2
@@ -99,17 +66,16 @@ multiline_string_whitespace_only.kdl | F-multiline-edge — v0.2
 multiline_string_wrapped_binary.kdl | F-multiline-edge — v0.2
 
 # ===========================================================================
-# Category G: Specific spec corners (v0.2)
+# Category G: Specific spec corners
 # ===========================================================================
-bom_later_fail.kdl                | G-bom-mid-file — BOM-in-non-initial-position rejection; v0.2
+# bom_later_fail, legacy_raw_string_fail, legacy_raw_string_hash_fail —
+# CLOSED by H12 (BOM-mid-file rejection + v1 `r"..."` rejection in lexer).
+#
+# Remaining:
 eof_after_escape.kdl              | G-eof-after-bareword-escape — `\` at EOF; v0.2
-legacy_raw_string_fail.kdl        | G-legacy-v1-rawstr — must reject v1 `r"..."`; v0.2
-legacy_raw_string_hash_fail.kdl   | G-legacy-v1-rawstr — must reject v1 `r#"..."#`; v0.2
 parens_in_bare_id_fail.kdl        | G-bare-ident-edge — bare ident with `(` inside; v0.2
-zero_space_before_first_arg_fail.kdl | G-bare-ident-edge — must require whitespace between ident and value; v0.2
-zero_space_before_prop_fail.kdl   | G-bare-ident-edge — must require whitespace; v0.2
-zero_space_before_second_arg_fail.kdl | G-bare-ident-edge — must require whitespace; v0.2
+zero_space_before_first_arg_fail.kdl | G-token-adjacency — must require whitespace between node-name and first entry; v0.2
+zero_space_before_prop_fail.kdl   | G-token-adjacency — must require whitespace between entries; v0.2
+zero_space_before_second_arg_fail.kdl | G-token-adjacency — must require whitespace; v0.2
+zero_space_before_slashdash_children.kdl | G-token-adjacency — must require whitespace before /-; v0.2
 floating_point_keyword_identifier_strings_fail.kdl | G-bare-vs-keyword — `inf`/`nan` as bare ident strings disallowed in v2; v0.2
-
-# (no entries beyond this point — all corpus cases below addressed by
-# in-tree fixes or shipped behavior)

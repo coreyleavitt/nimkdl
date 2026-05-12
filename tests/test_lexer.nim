@@ -1,7 +1,7 @@
 ## Tests for lexer.nim — exercise each token category, escape decoding,
 ## position tracking, and error recovery.
 
-import std/unittest
+import std/[strutils, unittest]
 
 import ../src/intern
 import ../src/lexer
@@ -136,6 +136,20 @@ suite "lexer: raw strings":
 
   test "unterminated raw string is error":
     let t = tokenize("#\"unclosed")
+    check tkError in t.kinds
+
+suite "lexer: raw-string DoS cap (H3)":
+  test "exactly MaxRawStringHashes opens is fine":
+    let prefix = "#".repeat(MaxRawStringHashes)
+    let src = prefix & "\"body\"" & prefix
+    let t = tokenize(src)
+    check t.kinds == @[tkRawString]
+    check t[0].rawVal == "body"
+
+  test "one past cap emits a structured error":
+    let prefix = "#".repeat(MaxRawStringHashes + 1)
+    let src = prefix & "\"body\"" & prefix
+    let t = tokenize(src)
     check tkError in t.kinds
 
 suite "lexer: multi-line strings":

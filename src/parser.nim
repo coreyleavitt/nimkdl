@@ -272,11 +272,20 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] =
                      entries: @[], children: @[], span: startSpan)
 
   # Parse zero or more entries
-  while p.canStartEntry:
+  while true:
     var skip = false
     if p.check(tkSlashDash):
       discard p.advance()
       skip = true
+      # Slashdash consumes any whitespace/newlines/comments before its
+      # target — the lexer already drops comments + plain whitespace,
+      # but newlines are emitted as significant tokens and must be
+      # skipped here so `node foo /-\n2 3` reads `/-` then the next
+      # entry across the newline.
+      p.skipNewlines()
+    # canStartEntry must be evaluated AFTER the slashdash skip so the
+    # newly-positioned token is what we test against.
+    if not skip and not p.canStartEntry: break
     # Could be a children block instead of an entry — check
     if p.check(tkLBrace):
       inc p.depth

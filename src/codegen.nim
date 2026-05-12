@@ -90,15 +90,18 @@ template kdlRename*(name: string) {.pragma.}
 # delegate to these so we have a single source of truth on KDL-value →
 # Nim-value mapping.
 
-type
-  DecodeErr* = object
-    ## Lightweight error type returned by decoders. Promoted to a
-    ## `Result` at the public `parse[T]` boundary.
-    msg*: string
-    span*: Span
+# Decoders return `Result[void, ParseError]` and short-circuit on the
+# first failure (review-round-1 un-hedge: an accumulator that the public
+# API never surfaced was the wrong abstraction). If we ever want a
+# collect-all-errors mode (LSP / batch lint), it lives as a separate
+# `decodeAll[T]` proc that opts back into accumulation — keeps the
+# default decode path applicative-style.
 
-func decodeErrAt*(msg: string, span: Span): DecodeErr {.inline.} =
-  DecodeErr(msg: msg, span: span)
+func mismatchErrAt*(msg: string, span: Span): ParseError {.inline.} =
+  initError(peTypeMismatch, span, msg)
+
+func missingErrAt*(msg: string, span: Span): ParseError {.inline.} =
+  initError(peTypeMissingRequired, span, msg)
 
 # Each primitive returns a (success, error) pair to keep call sites
 # concise. Error message becomes the `hint` field on the eventual
@@ -111,29 +114,41 @@ proc kdlDecodeValue*(target: var string, v: KdlValue, doc: var KdlDoc): bool =
   else:
     false
 
-proc kdlDecodeValue*(target: var int, v: KdlValue, doc: var KdlDoc): bool =
+proc kdlDecodeValue*[T: SomeSignedInt](target: var T, v: KdlValue,
+                                       doc: var KdlDoc): bool =
+  ## Covers int, int8, int16, int32, int64. Range-checks against the
+  ## target type so a KDL value that fits int64 but overflows int8
+  ## surfaces as a type mismatch.
   case v.kind
   of kvInt:
-    target = int(v.intVal); true
+    if v.intVal < int64(T.low) or v.intVal > int64(T.high): return false
+    target = T(v.intVal); true
   else:
     false
 
-when int.sizeof < int64.sizeof:
-  # On 32-bit targets, int and int64 are distinct types — provide both.
-  # On 64-bit (our default), int IS int64 so an extra overload is a
-  # redefinition error.
-  proc kdlDecodeValue*(target: var int64, v: KdlValue, doc: var KdlDoc): bool =
-    case v.kind
-    of kvInt: target = v.intVal; true
-    else: false
+proc kdlDecodeValue*[T: SomeUnsignedInt](target: var T, v: KdlValue,
+                                         doc: var KdlDoc): bool =
+  ## Covers uint, uint8, uint16, uint32, uint64. Range-checks against
+  ## the target's high bound; negative KDL ints fail decoding.
+  case v.kind
+  of kvInt:
+    if v.intVal < 0: return false
+    when T.sizeof < uint64.sizeof:
+      if uint64(v.intVal) > uint64(T.high): return false
+    target = T(v.intVal); true
+  else:
+    false
 
-proc kdlDecodeValue*(target: var float, v: KdlValue, doc: var KdlDoc): bool =
-  ## `float` is aliased to `float64` in Nim, so this overload covers both.
+proc kdlDecodeValue*[T: SomeFloat](target: var T, v: KdlValue,
+                                   doc: var KdlDoc): bool =
+  ## Covers float, float32, float64. KDL ints decode into floats too
+  ## (lossy past 2^53 for float64 / 2^24 for float32 — caller's
+  ## responsibility if precision matters).
   case v.kind
   of kvFloat:
-    target = v.floatVal; true
+    target = T(v.floatVal); true
   of kvInt:
-    target = float(v.intVal); true  # ints decode into floats too
+    target = T(v.intVal); true
   else:
     false
 
@@ -146,13 +161,24 @@ proc kdlDecodeValue*(target: var bool, v: KdlValue, doc: var KdlDoc): bool =
 
 proc decodeEnumFromString*[E: enum](target: var E, s: string): bool =
   ## Generic enum decoder: matches `s` against each enum member's stringified
-  ## name (via `$`). Used by the generated decoders for `kdlArg` / `kdlAttr`
-  ## fields of enum type.
+  ## name (via `$`). Used by the generic `kdlDecodeValue[T: enum]` overload
+  ## below; respects Nim 2.x's stringified-value syntax
+  ## (`akInject = "inject"` => `$akInject == "inject"`).
   for member in E.low .. E.high:
     if $member == s:
       target = member
       return true
   return false
+
+proc kdlDecodeValue*[E: enum](target: var E, v: KdlValue, doc: var KdlDoc): bool =
+  ## Enum fields decode from KDL string values. Variant discriminators
+  ## use this same path — their `.kind` field has an enum type and KDL
+  ## supplies the discriminator via a positional arg or property.
+  case v.kind
+  of kvString:
+    decodeEnumFromString(target, v.strVal)
+  else:
+    false
 
 # ---------------------------------------------------------------------------
 # Helpers used by generated decoders
@@ -249,68 +275,170 @@ proc kdlNameFromPragmas(prag: NimNode, fallback: string): string =
         if lit.kind == nnkStrLit: return lit.strVal
   fallback
 
+proc typeNodeIsSeq(t: NimNode): bool =
+  ## True if `t` is `seq[T]` for some T. Detected at the syntactic level
+  ## because `seq` is the only generic we special-case for fkChild default.
+  t.kind == nnkBracketExpr and t.len >= 1 and (($t[0]) == "seq")
+
 proc typeNodeIsObject(t: NimNode): bool =
-  ## Best-effort check: is this type a user object (rather than a
-  ## primitive / seq / option / etc.)?
-  if t.kind == nnkBracketExpr: return false  # seq[T], Option[T], …
-  let s =
-    if t.kind in {nnkIdent, nnkSym}: $t else: ""
-  case s
-  of "string", "int", "int64", "int32", "int8", "uint", "uint64",
-     "uint32", "uint8", "float", "float64", "float32", "bool", "byte":
+  ## Resolve the type and inspect its actual `nnkObjectTy` / primitive /
+  ## generic shape — replacing the string-name allowlist that broke for
+  ## Natural, uint16, type aliases, and any primitive Nim adds later.
+  ##
+  ## Anything that resolves to an object body is treated as a child node;
+  ## anything that resolves to a primitive numeric / string / bool / char
+  ## is treated as an inline value (fkAttr default).
+  if typeNodeIsSeq(t): return false  # seq[T] gets fkChild via its own path
+  # `getTypeImpl(t)` requires `t` to be a typed-context node. In the macro
+  # we receive `t` from `nnkIdentDefs[len-2]` which IS typed.
+  let impl =
+    try: t.getTypeImpl
+    except CatchableError: return false
+  case impl.kind
+  of nnkObjectTy:
+    true
+  of nnkRefTy, nnkPtrTy:
+    # ref / ptr to an object — treat as a child for now (decoding refs
+    # is not yet supported by deriveDecode; the user will get an
+    # error from the generated code if they try).
+    impl[0].kind == nnkObjectTy
+  of nnkDistinctTy:
+    # distinct T — peel one layer; if the base is an object treat as
+    # object, otherwise treat as primitive.
+    impl[0].kind == nnkObjectTy
+  of nnkBracketExpr, nnkTupleTy, nnkTupleConstr, nnkEnumTy:
+    false  # generics / tuples / enums decode as values, not children
+  of nnkSym:
+    # `nnkSym` means the implementation is itself another symbol — Nim
+    # builtins like `string`, `int`, `bool` land here. Definitely
+    # not an object.
     false
   else:
-    true
+    false
 
-proc typeNodeIsSeq(t: NimNode): bool =
-  t.kind == nnkBracketExpr and t.len >= 1 and
-  (($t[0]) == "seq")
+proc parseIdentDefs(identDefs: NimNode, argCursor: var int):
+    seq[FieldSpec] =
+  ## Walk one `nnkIdentDefs` (a single declaration line like `a, b: int = 0`)
+  ## and emit a FieldSpec per name. Mutates `argCursor` for each fkArg
+  ## field encountered.
+  expectKind(identDefs, nnkIdentDefs)
+  let typeNode = identDefs[identDefs.len - 2]
+  let defaultExpr = identDefs[identDefs.len - 1]
+  for i in 0 ..< identDefs.len - 2:
+    let nameNode = identDefs[i]
+    var prag: NimNode = newNimNode(nnkPragma)
+    var nimName: string
+    case nameNode.kind
+    of nnkIdent, nnkSym:
+      nimName = $nameNode
+    of nnkPostfix:
+      nimName = $nameNode[1]
+    of nnkPragmaExpr:
+      let inner = nameNode[0]
+      nimName =
+        case inner.kind
+        of nnkIdent, nnkSym: $inner
+        of nnkPostfix: $inner[1]
+        else: ""
+      prag = nameNode[1]
+    else:
+      nimName = ""
+    let kind =
+      if prag.len == 0:
+        (if typeNodeIsObject(typeNode) or typeNodeIsSeq(typeNode):
+           fkChild
+         else: fkAttr)
+      else: fieldKindFromPragmas(prag)
+    let kdlName = kdlNameFromPragmas(prag, nimName.toLowerAscii)
+    var spec = FieldSpec(nimName: nimName, kdlName: kdlName,
+                         kind: kind, typeNode: typeNode,
+                         defaultExpr: defaultExpr)
+    if kind == fkArg:
+      spec.argIndex = argCursor
+      inc argCursor
+    result.add(spec)
 
-proc collectFields(typedef: NimNode): seq[FieldSpec] =
-  ## Walk the `nnkObjectTy` of a type definition and produce a FieldSpec
-  ## per field. Caller is responsible for passing the actual `nnkRecList`
-  ## node (i.e. `typeImpl[2][2]` for a typical typedef).
-  expectKind(typedef, nnkRecList)
+type
+  VariantBranch* = object
+    discValue*: NimNode        ## the enum-member identifier (e.g. `akInject`)
+    fields*: seq[FieldSpec]    ## fields under this branch
+
+  VariantSpec* = object
+    disc*: FieldSpec           ## the discriminator field
+    branches*: seq[VariantBranch]
+
+  TypeShape* = object
+    shared*: seq[FieldSpec]    ## fields appearing before any case block
+    hasVariant*: bool
+    variant*: VariantSpec
+
+proc collectShape*(recList: NimNode): TypeShape =
+  ## Walk the `nnkRecList` of a type's `nnkObjectTy` and split into
+  ## (shared regular fields, optional variant spec). Detects `nnkRecCase`
+  ## as the trigger for variant decoding.
+  ##
+  ## v0.1 supports a single case block per type, single-value `of K:`
+  ## branches only. Multi-value `of K1, K2:` and `else:` branches
+  ## produce a macro-expansion error so the user gets a clear message
+  ## rather than wrong codegen.
+  expectKind(recList, nnkRecList)
   var argCursor = 0
-  for ident in typedef:
-    if ident.kind != nnkIdentDefs: continue
-    # Identifier + type + optional default value. Field list may bundle
-    # several fields with the same type — handle each separately.
-    let typeNode = ident[ident.len - 2]
-    let defaultExpr = ident[ident.len - 1]
-    for i in 0 ..< ident.len - 2:
-      let nameNode = ident[i]
-      var prag: NimNode = newNimNode(nnkPragma)
-      var nimName: string
-      case nameNode.kind
-      of nnkIdent, nnkSym:
-        nimName = $nameNode
-      of nnkPostfix:
-        nimName = $nameNode[1]
-      of nnkPragmaExpr:
-        let inner = nameNode[0]
-        nimName =
-          case inner.kind
-          of nnkIdent, nnkSym: $inner
-          of nnkPostfix: $inner[1]
-          else: ""
-        prag = nameNode[1]
-      else:
-        nimName = ""
-      let kind =
-        if prag.len == 0:
-          (if typeNodeIsObject(typeNode) or typeNodeIsSeq(typeNode):
-             fkChild
-           else: fkAttr)
-        else: fieldKindFromPragmas(prag)
-      let kdlName = kdlNameFromPragmas(prag, nimName.toLowerAscii)
-      var spec = FieldSpec(nimName: nimName, kdlName: kdlName,
-                           kind: kind, typeNode: typeNode,
-                           defaultExpr: defaultExpr)
-      if kind == fkArg:
-        spec.argIndex = argCursor
-        inc argCursor
-      result.add(spec)
+  for child in recList:
+    case child.kind
+    of nnkIdentDefs:
+      if result.hasVariant:
+        error("deriveDecode: fields after a case block aren't supported " &
+              "(v0.1); put all non-variant fields before the case", child)
+      result.shared.add(parseIdentDefs(child, argCursor))
+    of nnkRecCase:
+      if result.hasVariant:
+        error("deriveDecode: multiple case blocks per type aren't supported " &
+              "(v0.1); use one discriminator field", child)
+      result.hasVariant = true
+      # First child is the discriminator nnkIdentDefs.
+      let discDefs = child[0]
+      let discFields = parseIdentDefs(discDefs, argCursor)
+      doAssert discFields.len == 1,
+        "discriminator must be a single field"
+      let discSpec = discFields[0]
+      if discSpec.kind notin {fkArg, fkAttr}:
+        error("deriveDecode: variant discriminator '" & discSpec.nimName &
+              "' must declare its KDL position with an explicit " &
+              "{.kdlArg.} or {.kdlAttr.} pragma. " &
+              "(Discriminators are load-bearing; no implicit default.)",
+              child)
+      result.variant.disc = discSpec
+      # Walk of-branches. Each branch has its own arg cursor starting
+      # from the post-discriminator value — branches are mutually
+      # exclusive so their kdlArg slots overlap.
+      for i in 1 ..< child.len:
+        let branchNode = child[i]
+        case branchNode.kind
+        of nnkOfBranch:
+          if branchNode.len != 2:
+            error("deriveDecode: multi-value `of K1, K2: ...` branches " &
+                  "aren't supported (v0.1)", branchNode)
+          let discValue = branchNode[0]
+          let branchRecList = branchNode[1]
+          var branchArgCursor = argCursor
+          var branch = VariantBranch(discValue: discValue)
+          if branchRecList.kind == nnkRecList:
+            for bChild in branchRecList:
+              if bChild.kind == nnkIdentDefs:
+                branch.fields.add(parseIdentDefs(bChild, branchArgCursor))
+              elif bChild.kind == nnkRecCase:
+                error("deriveDecode: nested case blocks aren't supported " &
+                      "(v0.1)", bChild)
+          # Empty branch (`of K: discard`) is valid; branch.fields stays empty
+          result.variant.branches.add(branch)
+        of nnkElse:
+          error("deriveDecode: `else` branch in case object isn't supported " &
+                "(v0.1); enumerate every discriminator value explicitly",
+                branchNode)
+        else:
+          discard
+    else:
+      discard
 
 proc extractNodeName(typeSym: NimNode): string =
   ## Read the `{.kdlNode: "name".}` pragma from `typeSym`'s typedef, or
@@ -339,25 +467,118 @@ proc extractNodeName(typeSym: NimNode): string =
 # deriveDecode: the macro that emits `kdlDecodeImpl(target: var T, node, doc)`
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Field-decode emit helpers — generate the per-field statements that the
+# deriveDecode macro splices into kdlDecodeImpl's body.
+#
+# Each helper returns Nim AST that:
+#   - on success, mutates `targetAccess` (or appends to it for seq[T])
+#   - on failure, `return err[void, ParseError](...)` — short-circuits the
+#     enclosing proc. No accumulator; per the un-hedged C3 design.
+# ---------------------------------------------------------------------------
+
+proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
+    NimNode =
+  let idxLit = newLit(f.argIndex)
+  let mismatchMsg = newLit(
+    "type mismatch on positional arg " & $f.argIndex &
+    " ('" & f.kdlName & "')")
+  let missingMsg = newLit(
+    "missing required positional arg " & $f.argIndex &
+    " ('" & f.kdlName & "')")
+  let span = quote do: `nodeIdent`.span
+  let absentBranch =
+    if f.defaultExpr.kind == nnkEmpty:
+      quote do:
+        return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
+    else:
+      newEmptyNode()  # absent + has default → already set; skip
+  quote do:
+    if `nodeIdent`.hasArg(`idxLit`):
+      if not kdlDecodeValue(`targetAccess`,
+                            `nodeIdent`.findArg(`idxLit`),
+                            `docIdent`):
+        return err[void, ParseError](mismatchErrAt(`mismatchMsg`, `span`))
+    else:
+      `absentBranch`
+
+proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
+    NimNode =
+  let kdlNameStr = newLit(f.kdlName)
+  let keyIdent = genSym(nskLet, "kdlKey")
+  let mismatchMsg = newLit("type mismatch on property '" & f.kdlName & "'")
+  let missingMsg = newLit("missing required property '" & f.kdlName & "'")
+  let span = quote do: `nodeIdent`.span
+  let absentBranch =
+    if f.defaultExpr.kind == nnkEmpty:
+      quote do:
+        return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
+    else:
+      newEmptyNode()
+  quote do:
+    let `keyIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
+    if `nodeIdent`.hasProp(`keyIdent`):
+      if not kdlDecodeValue(`targetAccess`,
+                            `nodeIdent`.findProp(`keyIdent`),
+                            `docIdent`):
+        return err[void, ParseError](mismatchErrAt(`mismatchMsg`, `span`))
+    else:
+      `absentBranch`
+
+proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
+    NimNode =
+  let kdlNameStr = newLit(f.kdlName)
+  let nameIdent = genSym(nskLet, "kdlChildName")
+  if typeNodeIsSeq(f.typeNode):
+    let elemType = f.typeNode[1]
+    let elemSym = genSym(nskVar, "elem")
+    let childSym = genSym(nskForVar, "child")
+    let recurseRes = genSym(nskLet, "recurseRes")
+    quote do:
+      let `nameIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
+      for `childSym` in `nodeIdent`.childrenNamed(`nameIdent`):
+        var `elemSym`: `elemType`
+        let `recurseRes` = kdlDecodeImpl(`elemSym`, `childSym`, `docIdent`)
+        if `recurseRes`.isErr:
+          return err[void, ParseError](`recurseRes`.getErr)
+        `targetAccess`.add(`elemSym`)
+  else:
+    let recurseRes = genSym(nskLet, "recurseRes")
+    quote do:
+      let `nameIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
+      if `nodeIdent`.hasChild(`nameIdent`):
+        let `recurseRes` = kdlDecodeImpl(`targetAccess`,
+                                         `nodeIdent`.findChild(`nameIdent`),
+                                         `docIdent`)
+        if `recurseRes`.isErr:
+          return err[void, ParseError](`recurseRes`.getErr)
+
+proc emitFieldDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
+    NimNode =
+  ## Per-field statement that decodes into `targetAccess` (a field-access
+  ## expression like `target.foo` or a local-var ident). Short-circuits on
+  ## error via `return err(...)`.
+  case f.kind
+  of fkSkip: newStmtList()
+  of fkArg:  emitArgDecode(f, targetAccess, nodeIdent, docIdent)
+  of fkAttr: emitAttrDecode(f, targetAccess, nodeIdent, docIdent)
+  of fkChild: emitChildDecode(f, targetAccess, nodeIdent, docIdent)
+
 macro deriveDecode*(typ: typedesc): untyped =
   ## Emit a `kdlDecodeImpl` overload for `typ`. The procedure walks a
-  ## KdlNode and populates a `var typ` from its entries and children.
+  ## KdlNode and populates `var typ` from its entries and children.
   ##
-  ## Generated shape (illustrative):
+  ## Returns `Result[void, ParseError]`: `ok` on success, `err` on the
+  ## first decode failure (short-circuit; no error accumulation — see
+  ## review-round-1 un-hedge of C3 for rationale).
   ##
-  ## ```nim
-  ## proc kdlDecodeImpl(target: var Rule, node: KdlNode, doc: KdlDoc): seq[DecodeErr] =
-  ##   # arg fields by position
-  ##   if hasArg(node, 0):
-  ##     if not kdlDecodeValue(target.id, findArg(node, 0), doc):
-  ##       result.add(decodeErrAt("type mismatch on arg 0 of 'rule'", ...))
-  ##   # attr fields by key
-  ##   let _enabledKey = doc.interner.lookup… etc.
-  ##   # … children …
-  ## ```
+  ## Object variants (`case kind: K of K1: ...`) are supported with
+  ## atomic construction semantics: the discriminator decodes first,
+  ## then each branch's fields decode into locals, then `target` is
+  ## assigned in one expression. Any failure short-circuits without
+  ## touching `target`.
   ##
-  ## The generated code is dumpable via `-d:dumpKdlGen` (prints AST after
-  ## construction).
+  ## Generated code is dumpable via `-d:dumpKdlGen`.
 
   let typSym =
     if typ.kind == nnkBracketExpr: typ[1]
@@ -370,119 +591,99 @@ macro deriveDecode*(typ: typedesc): untyped =
     error("deriveDecode: only object types are supported (v0); got " &
           $body.kind, typ)
   let recList = body[2]
-  let fields = collectFields(recList)
+  let shape = collectShape(recList)
 
-  # Build the proc body
   let nodeIdent = ident("node")
   let docIdent  = ident("doc")
   let tgtIdent  = ident("target")
-  let resIdent  = ident("result")
   var stmts = newStmtList()
 
-  for f in fields:
-    let nimField = ident(f.nimName)
-    let fieldAccess = newDotExpr(tgtIdent, nimField)
-    let kdlNameStr = newLit(f.kdlName)
-
-    # A field is "required" if it has no `{.kdlSkip.}`, no Nim 2.x default
-    # value (`field: T = expr`), and no pragma-supplied default. When such a
-    # field is absent from the KDL document we emit peTypeMissingRequired.
-    let isRequired = f.defaultExpr.kind == nnkEmpty
-
-    case f.kind
-    of fkSkip:
-      discard
-    of fkArg:
-      let idxLit = newLit(f.argIndex)
-      let hasArgCheck = quote do:
-        `nodeIdent`.hasArg(`idxLit`)
-      let decodeCall = quote do:
-        kdlDecodeValue(`fieldAccess`,
-                       `nodeIdent`.findArg(`idxLit`),
-                       `docIdent`)
-      let mismatchMsg = newLit(
-        "type mismatch on positional arg " & $f.argIndex)
-      let missingMsg = newLit(
-        "missing required positional arg " & $f.argIndex &
-        " ('" & f.kdlName & "')")
-      let span = quote do: `nodeIdent`.span
-      let absentBranch =
-        if isRequired:
-          quote do:
-            `resIdent`.add(decodeErrAt(`missingMsg`, `span`))
-        else:
-          quote do:
-            discard  # absent + has default → keep default value
-      stmts.add quote do:
-        if `hasArgCheck`:
-          if not (`decodeCall`):
-            `resIdent`.add(decodeErrAt(`mismatchMsg`, `span`))
-        else:
-          `absentBranch`
-    of fkAttr:
-      let keyIdent = genSym(nskLet, "kdlKey")
-      let decodeCall = quote do:
-        kdlDecodeValue(`fieldAccess`,
-                       `nodeIdent`.findProp(`keyIdent`),
-                       `docIdent`)
-      let mismatchMsg = newLit("type mismatch on property '" & f.kdlName & "'")
-      let missingMsg = newLit(
-        "missing required property '" & f.kdlName & "'")
-      let span = quote do: `nodeIdent`.span
-      stmts.add quote do:
-        let `keyIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
-      let absentBranch =
-        if isRequired:
-          quote do:
-            `resIdent`.add(decodeErrAt(`missingMsg`, `span`))
-        else:
-          quote do:
-            discard
-      stmts.add quote do:
-        if `nodeIdent`.hasProp(`keyIdent`):
-          if not (`decodeCall`):
-            `resIdent`.add(decodeErrAt(`mismatchMsg`, `span`))
-        else:
-          `absentBranch`
-    of fkChild:
-      if typeNodeIsSeq(f.typeNode):
-        let elemType = f.typeNode[1]
-        let nameIdent = genSym(nskLet, "kdlChildName")
+  if not shape.hasVariant:
+    # Non-variant path: decode directly into target's fields.
+    # Apply defaults to target up front so absent-optional fields land
+    # at the right value without per-field default code paths.
+    for f in shape.shared:
+      if f.defaultExpr.kind != nnkEmpty:
+        let nimField = ident(f.nimName)
+        let dExpr = f.defaultExpr
         stmts.add quote do:
-          let `nameIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
-        let elemSym = genSym(nskVar, "elem")
-        let childSym = genSym(nskForVar, "child")
-        let recurseErrs = quote do:
-          kdlDecodeImpl(`elemSym`, `childSym`, `docIdent`)
+          `tgtIdent`.`nimField` = `dExpr`
+    for f in shape.shared:
+      let targetAccess = newDotExpr(tgtIdent, ident(f.nimName))
+      stmts.add(emitFieldDecode(f, targetAccess, nodeIdent, docIdent))
+    stmts.add quote do:
+      ok(void, ParseError)
+  else:
+    # Variant path: decode shared + discriminator into LOCALS, then
+    # construct `target` atomically inside each case branch. Atomic
+    # construction is required by Nim's case-object rules — partial
+    # mutation of branch fields without a fully-set discriminator is
+    # unsafe (Q3 (ii) — see review-round-1 H9 grilling).
+
+    # Local declarations for shared fields, with defaults if present.
+    var sharedLocals: seq[NimNode]   # parallel to shape.shared
+    for f in shape.shared:
+      let local = genSym(nskVar, "sharedLocal_" & f.nimName)
+      sharedLocals.add(local)
+      let typeNode = f.typeNode
+      if f.defaultExpr.kind != nnkEmpty:
+        let dExpr = f.defaultExpr
         stmts.add quote do:
-          for `childSym` in `nodeIdent`.childrenNamed(`nameIdent`):
-            var `elemSym`: `elemType`
-            let errs = `recurseErrs`
-            for e in errs: `resIdent`.add(e)
-            `fieldAccess`.add(`elemSym`)
+          var `local`: `typeNode` = `dExpr`
       else:
-        let nameIdent = genSym(nskLet, "kdlChildName")
-        let recurseErrs = quote do:
-          kdlDecodeImpl(`fieldAccess`,
-                        `nodeIdent`.findChild(`nameIdent`),
-                        `docIdent`)
         stmts.add quote do:
-          let `nameIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
-        stmts.add quote do:
-          if `nodeIdent`.hasChild(`nameIdent`):
-            let errs = `recurseErrs`
-            for e in errs: `resIdent`.add(e)
+          var `local`: `typeNode`
+    # Decode each shared field into its local.
+    for i, f in shape.shared:
+      stmts.add(emitFieldDecode(f, sharedLocals[i], nodeIdent, docIdent))
 
-  # Initialise defaults for fields that have explicit defaults declared
-  for f in fields:
-    if f.defaultExpr.kind != nnkEmpty:
-      let nimField = ident(f.nimName)
-      let dExpr = f.defaultExpr
-      stmts.insert(0, quote do:
-        `tgtIdent`.`nimField` = `dExpr`)
+    # Discriminator local + decode.
+    let disc = shape.variant.disc
+    let discLocal = genSym(nskVar, "disc_" & disc.nimName)
+    let discType = disc.typeNode
+    stmts.add quote do:
+      var `discLocal`: `discType`
+    stmts.add(emitFieldDecode(disc, discLocal, nodeIdent, docIdent))
+
+    # case discLocal: of each branch.
+    let typAst = typ
+    let caseStmt = nnkCaseStmt.newTree(discLocal)
+    for branch in shape.variant.branches:
+      var branchBody = newStmtList()
+      var branchLocals: seq[NimNode]
+      for f in branch.fields:
+        let local = genSym(nskVar, "branchLocal_" & f.nimName)
+        branchLocals.add(local)
+        let typeNode = f.typeNode
+        if f.defaultExpr.kind != nnkEmpty:
+          let dExpr = f.defaultExpr
+          branchBody.add quote do:
+            var `local`: `typeNode` = `dExpr`
+        else:
+          branchBody.add quote do:
+            var `local`: `typeNode`
+      for i, f in branch.fields:
+        branchBody.add(emitFieldDecode(f, branchLocals[i],
+                                       nodeIdent, docIdent))
+      # Atomic construction: target = T(kind: branchValue,
+      #   sharedField: sharedLocal, ..., branchField: branchLocal, ...)
+      let construction = nnkObjConstr.newTree(typAst)
+      construction.add(nnkExprColonExpr.newTree(
+        ident(disc.nimName), branch.discValue))
+      for i, f in shape.shared:
+        construction.add(nnkExprColonExpr.newTree(
+          ident(f.nimName), sharedLocals[i]))
+      for i, f in branch.fields:
+        construction.add(nnkExprColonExpr.newTree(
+          ident(f.nimName), branchLocals[i]))
+      branchBody.add quote do:
+        `tgtIdent` = `construction`
+      caseStmt.add(nnkOfBranch.newTree(branch.discValue, branchBody))
+    stmts.add(caseStmt)
+    stmts.add quote do:
+      ok(void, ParseError)
 
   let nodeNameLit = newLit(extractNodeName(typSym))
-  let typDescSym = ident("T_kdlDecoded")  # uniquely-named typedesc helper
   let nodeNameProc = quote do:
     proc kdlNodeNameImpl*(typ: typedesc[`typ`]): string {.inline.} =
       `nodeNameLit`
@@ -490,7 +691,7 @@ macro deriveDecode*(typ: typedesc): untyped =
   let decodeProc = quote do:
     proc kdlDecodeImpl*(`tgtIdent`: var `typ`;
                        `nodeIdent`: KdlNode;
-                       `docIdent`: var KdlDoc): seq[DecodeErr] =
+                       `docIdent`: var KdlDoc): Result[void, ParseError] =
       `stmts`
 
   result = newStmtList(nodeNameProc, decodeProc)
@@ -597,34 +798,29 @@ proc decode*[T](source: string,
     let wantName = kdlNodeNameImpl(typeof(Elem))
     let nameKey = doc.interner.lookupOrIntern(wantName)
     var elems: T = @[]
-    var errs: seq[DecodeErr] = @[]
     for i in 0 ..< doc.nodes.len:
       if doc.nodes[i].name == nameKey:
         var elem: Elem
-        let perErrs = kdlDecodeImpl(elem, doc.nodes[i], doc)
-        for e in perErrs: errs.add(e)
+        let r = kdlDecodeImpl(elem, doc.nodes[i], doc)
+        if r.isErr:
+          return err[T, ParseError](r.getErr)
         elems.add(elem)
-    if errs.len > 0:
-      err[T, ParseError](initError(peTypeMismatch, errs[0].span, errs[0].msg))
-    else:
-      ok[T, ParseError](elems)
+    ok[T, ParseError](elems)
   else:
     let wantName = kdlNodeNameImpl(typeof(T))
     let nameKey = doc.interner.lookupOrIntern(wantName)
     var outValue: T
     var found = false
-    var errs: seq[DecodeErr] = @[]
     for i in 0 ..< doc.nodes.len:
       if doc.nodes[i].name == nameKey:
-        let perErrs = kdlDecodeImpl(outValue, doc.nodes[i], doc)
-        for e in perErrs: errs.add(e)
+        let r = kdlDecodeImpl(outValue, doc.nodes[i], doc)
+        if r.isErr:
+          return err[T, ParseError](r.getErr)
         found = true
         break
     if not found:
       err[T, ParseError](initError(peTypeMissingRequired,
         pointSpan(StartPosition),
         "expected node '" & wantName & "' at top level"))
-    elif errs.len > 0:
-      err[T, ParseError](initError(peTypeMismatch, errs[0].span, errs[0].msg))
     else:
       ok[T, ParseError](outValue)

@@ -149,17 +149,18 @@ macro path*(source: typed; expr: untyped): untyped =
     if predicate != nil: predicate
     else: newLit(true)
 
-  # Manual collect-into-seq. The yield type is computed via a
-  # `typeof(block: ...)` expression that declares `it` with the same
-  # symbol used inside `accessExpr`, so the same name binds in both
-  # the type computation and the runtime loop.
-  let resultSym = genSym(nskVar, "pathResult")
+  # Emit an iterator (not a materialized seq) — matches the `where`
+  # template's shape and the module docstring's promise. The iterator's
+  # yield type is computed via a `typeof(block: var it; accessExpr)`
+  # expression that uses the same `it` symbol the for-loop binds, so
+  # the same name resolves consistently in both the type computation
+  # and the runtime walk.
+  let iterSym = genSym(nskIterator, "pathIter")
   result = quote do:
-    block:
-      var `resultSym`: seq[(typeof(block:
+    iterator `iterSym`(): typeof(block:
         var `itSym`: typeof(`source`[0])
-        `accessExpr`))] = @[]
+        `accessExpr`) =
       for `itSym` in `source`:
         if `predExpr`:
-          `resultSym`.add(`accessExpr`)
-      `resultSym`
+          yield `accessExpr`
+    `iterSym`()

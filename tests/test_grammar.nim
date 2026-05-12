@@ -207,8 +207,6 @@ suite "Reference interpreter: defensive paths":
     # now it must return a structured ParseError.
     var bad = Grammar(rules: initTable[string, Rule](), startRule: "root")
     bad.rules["root"] = seqOf(refTo("missing"), eof())
-    # Bypass `kdlGrammar` macro validation to feed the broken grammar
-    # straight to the interpreter — the situation we're guarding against.
     var doc = newDoc("<test>")
     let tokens = lex("anything", doc.interner)
     var s = InterpState(tokens: tokens, pos: 0, grammar: bad, haveError: false)
@@ -216,13 +214,3 @@ suite "Reference interpreter: defensive paths":
     check res.isErr
     if res.isErr:
       check "undefined rule" in res.getErr.hint
-
-suite "kdlGrammar macro":
-  test "wraps a valid grammar without complaint":
-    let g = kdlGrammar:
-      buildKdlGrammar()
-    check g.startRule == "document"
-
-  # We can't (easily) test that the macro REJECTS a bad grammar with
-  # `check` — it would be a compile error in this test file. The
-  # validate() unit test above covers the underlying check.

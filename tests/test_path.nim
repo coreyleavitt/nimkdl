@@ -5,6 +5,9 @@ import std/[sequtils, unittest]
 
 import ../src/path
 
+# path() yields an iterator — collect into a seq via std/sequtils.toSeq
+# when tests want value equality against a literal list.
+
 type
   Action = object
     kind*: string
@@ -42,20 +45,20 @@ suite "path: typed-iterator chain":
 
 suite "path: path() macro":
   test "single field on each element":
-    let ids = path(rules, id)
+    let ids = toSeq(path(rules, id))
     check ids == @["a", "b", "c"]
 
   test "predicate + terminal field":
     # Drops disabled rules; yields each remaining rule's template
-    let kept = path(rules, [it.enabled].id)
+    let kept = toSeq(path(rules, [it.enabled].id))
     check kept == @["a", "c"]
 
   test "two-level field access":
-    let templates = path(rules, action.tmpl)
+    let templates = toSeq(path(rules, action.tmpl))
     check templates == @["TA", "TB", "TC"]
 
   test "predicate + nested field":
-    let templates = path(rules, [it.action.kind == "inject"].action.tmpl)
+    let templates = toSeq(path(rules, [it.action.kind == "inject"].action.tmpl))
     check templates == @["TA", "TC"]
 
 suite "path: compile-time typo detection":
@@ -69,7 +72,7 @@ suite "path: compile-time typo detection":
     check compiles(toSeq(rules.where(it.enabled)))
 
   test "misspelled field in path() macro is a compile error":
-    check not compiles(path(rules, [it.enabel].id))
+    check not compiles(toSeq(path(rules, [it.enabel].id)))
 
   test "misspelled terminal in path() macro is a compile error":
-    check not compiles(path(rules, action.tmpll))
+    check not compiles(toSeq(path(rules, action.tmpll)))

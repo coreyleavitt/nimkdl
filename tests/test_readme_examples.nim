@@ -5,7 +5,7 @@
 ## If this test fails, the README is the source of truth — fix the
 ## library to match the example, or update both together.
 
-import std/[strutils, unittest]
+import std/[sequtils, strutils, unittest]
 
 import ../src/kdl
 
@@ -69,7 +69,7 @@ suite "README: type-driven decode":
 
 suite "README: typed query — three styles":
   test "path() macro yields filtered fields":
-    let ids = path(queryRules, [it.enabled].id)
+    let ids = toSeq(path(queryRules, [it.enabled].id))
     check ids == @["a", "c"]
 
   test "where iterator chain":
@@ -84,10 +84,10 @@ suite "README: typed query — three styles":
 
 suite "README: compile-time typo demo":
   test "misspelled `enabel` does NOT compile":
-    check not compiles(path(demoRules, [it.enabel].id))
+    check not compiles(toSeq(path(demoRules, [it.enabel].id)))
 
   test "correct `enabled` DOES compile":
-    check compiles(path(demoRules, [it.enabled].id))
+    check compiles(toSeq(path(demoRules, [it.enabled].id)))
 
 suite "README: differential testing":
   test "hand parser and reference interpreter agree":
