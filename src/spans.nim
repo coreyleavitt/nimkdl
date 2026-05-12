@@ -44,6 +44,10 @@ type
     peReservedTypeInvalid     ## value content fails the standard
                               ## interpretation of its reserved type
                               ## annotation (RFC/ISO/IEEE per tag)
+    peTypeReservedMismatch    ## decode-time: source value's type
+                              ## annotation differs from the
+                              ## `kdlReserved` pragma declaration on
+                              ## the target field
 
     # Parser (#523)
     peParseUnexpected         ## token where none was expected
@@ -150,6 +154,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peLexInvalidIdentifier: "invalid identifier"
   of peLexReservedKeyword:   "reserved keyword used as bare identifier"
   of peReservedTypeInvalid:  "value does not match its reserved type annotation"
+  of peTypeReservedMismatch: "source value's type annotation does not match the field's kdlReserved declaration"
   of peParseUnexpected:      "unexpected token"
   of peParseExpected:        "expected token not found"
   of peParseDepthExceeded:   "nesting depth exceeded"

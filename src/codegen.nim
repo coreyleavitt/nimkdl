@@ -77,6 +77,12 @@ template kdlSkip*() {.pragma.}
   ## Field-level: do not parse — keep Nim's default.
 template kdlRename*(name: string) {.pragma.}
   ## Field-level: KDL name differs from Nim field name.
+template kdlReserved*(tag: string) {.pragma.}
+  ## Field-level: assert the source KDL value carries this reserved-type
+  ## annotation (e.g. `{.kdlReserved: "ipv4".}`). At decode time, a
+  ## value lacking the declared tag — or carrying a different one —
+  ## produces `peTypeReservedMismatch`. Layer-1 parse-time validation
+  ## (see src/reserved.nim) still applies to the tag's content.
 
 # Note: the `default` pragma is `std/macros.default` for object defaults
 # in Nim 2.x — we read field defaults via getTypeImpl rather than a custom
@@ -269,6 +275,9 @@ type
                             ## of peTypeEnumInvalid (discriminator
                             ## failure is more severe — the variant
                             ## is fundamentally the wrong shape)
+    expectedReserved: string  ## non-empty ⇒ source value must carry
+                              ## this reserved-type annotation (set
+                              ## by the `{.kdlReserved: "tag".}` pragma)
 
 proc fieldKindFromPragmas(prag: NimNode): FieldKind =
   ## Walk a field's pragma list and return its FieldKind from explicit
@@ -298,6 +307,16 @@ proc kdlNameFromPragmas(prag: NimNode, fallback: string): string =
         let lit = p[1]
         if lit.kind == nnkStrLit: return lit.strVal
   fallback
+
+proc reservedFromPragmas(prag: NimNode): string =
+  ## Returns the `kdlReserved` declared tag for the field, or "" if
+  ## absent. Empty means "no constraint on the source value's tag".
+  for p in prag:
+    if p.kind in {nnkExprColonExpr, nnkCall} and p.len >= 2:
+      if $p[0] == "kdlReserved":
+        let lit = p[1]
+        if lit.kind == nnkStrLit: return lit.strVal
+  ""
 
 proc typeNodeIsSeq(t: NimNode): bool =
   ## True if `t` is `seq[T]` for some T. Detected at the syntactic level
@@ -391,7 +410,8 @@ proc parseIdentDefs(identDefs: NimNode, argCursor: var int):
     var spec = FieldSpec(nimName: nimName, kdlName: kdlName,
                          kind: kind, typeNode: typeNode,
                          defaultExpr: defaultExpr,
-                         typeIsEnum: typeNodeIsEnum(typeNode))
+                         typeIsEnum: typeNodeIsEnum(typeNode),
+                         expectedReserved: reservedFromPragmas(prag))
     if kind == fkArg:
       spec.argIndex = argCursor
       inc argCursor
@@ -526,6 +546,28 @@ proc mismatchEmitter(f: FieldSpec): NimNode =
   elif f.typeIsEnum:    ident("enumMismatchErrAt")
   else:                 ident("mismatchErrAt")
 
+proc emitReservedTagCheck(f: FieldSpec, valIdent, docIdent: NimNode): NimNode =
+  ## Emit a runtime check that `valIdent`'s typeAnnotation matches the
+  ## `kdlReserved` declaration. Returns an empty stmt if no constraint
+  ## is declared. The check looks the tag up via the doc's interner so
+  ## the comparison is a single string equality.
+  if f.expectedReserved.len == 0:
+    return newEmptyNode()
+  let expectedLit = newLit(f.expectedReserved)
+  let fieldNameLit = newLit(f.kdlName)
+  quote do:
+    if `valIdent`.typeAnnotation == InvalidInterned:
+      return err[void, ParseError](initError(peTypeReservedMismatch,
+        `valIdent`.span,
+        "field '" & `fieldNameLit` & "' expects (" & `expectedLit` &
+        ") tag but source value has no annotation"))
+    let actualTag = `docIdent`.interner.lookup(`valIdent`.typeAnnotation)
+    if actualTag != `expectedLit`:
+      return err[void, ParseError](initError(peTypeReservedMismatch,
+        `valIdent`.span,
+        "field '" & `fieldNameLit` & "' expects (" & `expectedLit` &
+        ") tag but source has (" & actualTag & ")"))
+
 proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     NimNode =
   let idxLit = newLit(f.argIndex)
@@ -543,11 +585,13 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
         return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
     else:
       newEmptyNode()  # absent + has default → already set; skip
+  let valSym = genSym(nskLet, "kdlArgVal")
+  let reservedCheck = emitReservedTagCheck(f, valSym, docIdent)
   quote do:
     if `nodeIdent`.hasArg(`idxLit`):
-      if not kdlDecodeValue(`targetAccess`,
-                            `nodeIdent`.findArg(`idxLit`),
-                            `docIdent`):
+      let `valSym` = `nodeIdent`.findArg(`idxLit`)
+      `reservedCheck`
+      if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
         return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
     else:
       `absentBranch`
@@ -566,12 +610,14 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
         return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
     else:
       newEmptyNode()
+  let valSym = genSym(nskLet, "kdlAttrVal")
+  let reservedCheck = emitReservedTagCheck(f, valSym, docIdent)
   quote do:
     let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
     if `nodeIdent`.hasProp(`keyIdent`):
-      if not kdlDecodeValue(`targetAccess`,
-                            `nodeIdent`.findProp(`keyIdent`),
-                            `docIdent`):
+      let `valSym` = `nodeIdent`.findProp(`keyIdent`)
+      `reservedCheck`
+      if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
         return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
     else:
       `absentBranch`
