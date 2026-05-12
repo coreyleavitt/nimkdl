@@ -454,6 +454,44 @@ proc parseDocument(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffe
     p.skipNewlines()
   ok[seq[KdlNode], ParseError](nodes)
 
+proc skipToRecovery(p: var Parser) {.noSideEffect.} =
+  ## Multi-error recovery: advance past the failed construct so the
+  ## next parseNode call gets a clean start. We stop at the first
+  ## node-terminator token (newline, semicolon, `}`, or EOF) and
+  ## consume it. tkError tokens — already-collected lex errors — are
+  ## skipped silently since we logged them up front.
+  while not p.atEnd:
+    let k = p.peek.kind
+    if k == tkEof: return
+    if k == tkRBrace: return  # let the children-block loop close out
+    discard p.advance()
+    if k == tkNewline or k == tkSemicolon: return
+
+proc parseDocumentAccumulating(p: var Parser, errors: var seq[ParseError]):
+    seq[KdlNode] {.noSideEffect.} =
+  ## Multi-error variant of parseDocument. Collects every node-level
+  ## failure into `errors` and re-syncs at node terminators, then
+  ## continues. Returns the partial node list.
+  p.skipNewlines()
+  while not p.atEnd:
+    var skipNode = false
+    if p.check(tkSlashDash):
+      discard p.advance()
+      p.skipNewlines()
+      skipNode = true
+    if p.atEnd: break
+    let savedCursor = p.cursor
+    let nRes = p.parseNode()
+    if nRes.isErr:
+      errors.add(nRes.getErr)
+      # Ensure forward progress even if parseNode left the cursor
+      # in place. skipToRecovery will advance to a terminator.
+      if p.cursor == savedCursor: discard p.advance()
+      p.skipToRecovery()
+    else:
+      if not skipNode: result.add(nRes.get)
+    p.skipNewlines()
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -479,3 +517,28 @@ proc parse*(source: string, sourcePath = "<input>"):
   # are preserved.
   p.doc.nodes = dRes.get
   ok[KdlDoc, ParseError](p.doc)
+
+proc parseAll*(source: string, sourcePath = "<input>"):
+    tuple[doc: KdlDoc, errors: seq[ParseError]] {.noSideEffect.} =
+  ## Multi-error variant of `parse`. Collects every lex- and node-level
+  ## error into `errors` while continuing to parse the rest of the
+  ## source. The returned `doc` is a partial document built from the
+  ## nodes that DID parse; consumers can either show the user every
+  ## error at once (IDE / CI) or use the partial doc for best-effort
+  ## recovery (REPL).
+  ##
+  ## Caller contract:
+  ##   - If `errors.len == 0`, the doc is a valid, complete parse.
+  ##   - If `errors.len > 0`, the doc holds whichever nodes survived.
+  ##
+  ## `parse()` continues to return only the first error and matches
+  ## `parseAll(source).errors[0]` when failures exist.
+  result.doc = newDoc(sourcePath)
+  let tokens = lex(source, result.doc.interner)
+  for t in tokens:
+    if t.kind == tkError:
+      result.errors.add(t.error)
+  var p = Parser(tokens: tokens, cursor: 0, depth: 0, doc: result.doc)
+  let nodes = parseDocumentAccumulating(p, result.errors)
+  p.doc.nodes = nodes
+  result.doc = p.doc

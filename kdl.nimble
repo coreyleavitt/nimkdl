@@ -36,6 +36,7 @@ task test, "Run unit tests":
   exec cmd & " tests/test_accessors.nim"
   exec cmd & " tests/test_derive_encode.nim"
   exec cmd & " tests/test_builder.nim"
+  exec cmd & " tests/test_multi_error.nim"
   exec cmd & " tests/test_encode.nim"
   exec cmd & " tests/test_grammar.nim"
   exec cmd & " tests/test_conformance.nim"
