@@ -340,3 +340,61 @@ iterator properties*(n: KdlNode): tuple[name: InternedStr, value: KdlValue] =
     if e.kind == keProperty:
       yield (e.propName, e.propValue)
 
+iterator namedProperties*(n: KdlNode, doc: KdlDoc):
+    tuple[name: string, value: KdlValue] =
+  ## Like `properties` but yields the resolved name as a `string`.
+  ## Convenience for ad-hoc inspection where the caller doesn't want
+  ## to thread the interner.
+  for e in n.entries:
+    if e.kind == keProperty:
+      yield (doc.interner.lookup(e.propName), e.propValue)
+
+# ---------------------------------------------------------------------------
+# String-keyed convenience accessors
+# ---------------------------------------------------------------------------
+#
+# Thin wrappers over the InternedStr-keyed primitives in codegen.nim:
+# look up the name via the doc's interner once, then walk the linear
+# entries / children seq. Sentinel returns match the InternedStr-keyed
+# helpers — `newNullValue()` for absent property, `KdlNode(name:
+# InvalidInterned)` for absent child / node.
+
+func prop*(n: KdlNode, doc: KdlDoc, name: string): KdlValue =
+  ## Return property `name`, or a `kvNull` value if absent.
+  for e in n.entries:
+    if e.kind == keProperty and
+       doc.interner.lookup(e.propName) == name:
+      return e.propValue
+  newNullValue()
+
+func hasProp*(n: KdlNode, doc: KdlDoc, name: string): bool =
+  for e in n.entries:
+    if e.kind == keProperty and
+       doc.interner.lookup(e.propName) == name:
+      return true
+  false
+
+func child*(n: KdlNode, doc: KdlDoc, name: string): KdlNode =
+  ## Return the first child whose name matches `name`, or a sentinel
+  ## node with `name == InvalidInterned` when absent.
+  for c in n.children:
+    if doc.interner.lookup(c.name) == name: return c
+  KdlNode(name: InvalidInterned)
+
+func children*(n: KdlNode, doc: KdlDoc, name: string): seq[KdlNode] =
+  for c in n.children:
+    if doc.interner.lookup(c.name) == name:
+      result.add(c)
+
+func findNode*(doc: KdlDoc, name: string): KdlNode =
+  ## Return the first top-level node with the given name, or a sentinel
+  ## with `name == InvalidInterned`.
+  for n in doc.nodes:
+    if doc.interner.lookup(n.name) == name: return n
+  KdlNode(name: InvalidInterned)
+
+func findNodes*(doc: KdlDoc, name: string): seq[KdlNode] =
+  for n in doc.nodes:
+    if doc.interner.lookup(n.name) == name:
+      result.add(n)
+
