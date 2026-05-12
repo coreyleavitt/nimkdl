@@ -561,6 +561,321 @@ func validateBase85(v: KdlValue): Result[void, ParseError] =
         "(base85) invalid character at position " & $i))
   ok(void, ParseError)
 
+func isAsciiAlpha(c: char): bool {.inline.} =
+  case c
+  of 'a'..'z', 'A'..'Z': true
+  else: false
+
+func isAsciiAlphaNum(c: char): bool {.inline.} =
+  case c
+  of 'a'..'z', 'A'..'Z', '0'..'9': true
+  else: false
+
+func validateHostnameLabel(label: string): bool =
+  ## RFC 1035 §2.3.1 label: 1-63 letters/digits/hyphens, must start
+  ## and end with alphanumeric.
+  if label.len == 0 or label.len > 63: return false
+  if not isAsciiAlphaNum(label[0]): return false
+  if not isAsciiAlphaNum(label[^1]): return false
+  for c in label:
+    if not (isAsciiAlphaNum(c) or c == '-'): return false
+  true
+
+func validateHostname(v: KdlValue): Result[void, ParseError] =
+  ## `(hostname)` — RFC 1035 §2.3.1 preferred-name form. Dot-separated
+  ## labels, each 1-63 alphanumerics-plus-hyphens, no leading/trailing
+  ## hyphen. Total <= 253 chars.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(hostname) requires a string value"))
+  let s = v.strVal
+  if s.len == 0 or s.len > 253:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(hostname) length must be 1..253"))
+  var labelStart = 0
+  for i, c in s:
+    if c == '.':
+      if not validateHostnameLabel(s[labelStart ..< i]):
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(hostname) invalid label: '" & s[labelStart ..< i] & "'"))
+      labelStart = i + 1
+  if not validateHostnameLabel(s[labelStart .. ^1]):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(hostname) invalid final label"))
+  ok(void, ParseError)
+
+func validateIdnHostnameLabel(label: string): bool =
+  ## RFC 5891 IDN label: ASCII labels follow LDH rules; Unicode labels
+  ## are anything not containing forbidden chars. We accept ASCII-LDH
+  ## or any non-ASCII-containing label of length 1..63 bytes.
+  if label.len == 0 or label.len > 63: return false
+  var anyHigh = false
+  for c in label:
+    let b = uint8(c)
+    if b >= 0x80'u8:
+      anyHigh = true
+    elif not isAsciiAlphaNum(c) and c != '-':
+      return false
+  if not anyHigh:
+    if not isAsciiAlphaNum(label[0]) or not isAsciiAlphaNum(label[^1]):
+      return false
+  true
+
+func validateIdnHostname(v: KdlValue): Result[void, ParseError] =
+  ## `(idn-hostname)` — RFC 5891. We accept either ASCII (LDH form,
+  ## including `xn--` punycode labels) or Unicode labels. Full IDNA2008
+  ## compliance (NFC normalization, BiDi rules) is deferred — this is a
+  ## shape check.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(idn-hostname) requires a string value"))
+  let s = v.strVal
+  if s.len == 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(idn-hostname) empty"))
+  var labelStart = 0
+  for i, c in s:
+    if c == '.':
+      if not validateIdnHostnameLabel(s[labelStart ..< i]):
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(idn-hostname) invalid label"))
+      labelStart = i + 1
+  if not validateIdnHostnameLabel(s[labelStart .. ^1]):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(idn-hostname) invalid final label"))
+  ok(void, ParseError)
+
+func isUrlScheme(s: string, last: var int): bool =
+  ## RFC 3986 §3.1: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+  ## Sets `last` to the index of the `:` if found.
+  if s.len == 0 or not isAsciiAlpha(s[0]): return false
+  var i = 1
+  while i < s.len:
+    let c = s[i]
+    if c == ':':
+      last = i
+      return i > 0
+    if not (isAsciiAlphaNum(c) or c == '+' or c == '-' or c == '.'):
+      return false
+    inc i
+  false
+
+func validateUrl(v: KdlValue): Result[void, ParseError] =
+  ## `(url)` — RFC 3986 absolute URI shape: scheme `:` hier-part
+  ## [`?` query] [`#` fragment]. Validates scheme syntax and requires
+  ## a non-empty body after the scheme.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(url) requires a string value"))
+  let s = v.strVal
+  if s.len == 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(url) empty"))
+  var colonAt = -1
+  if not isUrlScheme(s, colonAt):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(url) missing or invalid scheme"))
+  if colonAt + 1 >= s.len:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(url) scheme without body"))
+  ok(void, ParseError)
+
+func validateUrlReference(v: KdlValue): Result[void, ParseError] =
+  ## `(url-reference)` — RFC 3986 §4.1: either an absolute URI or a
+  ## relative-ref. Effectively any non-control string is acceptable
+  ## syntactically; the empty string is also a valid relative-ref.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(url-reference) requires a string value"))
+  # Allow empty; otherwise just reject ASCII control chars in the
+  # reference (matches the URI ABNF's exclusion of CTL).
+  for i, c in v.strVal:
+    if uint8(c) < 0x20'u8 or uint8(c) == 0x7F'u8:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(url-reference) contains control character at position " & $i))
+  ok(void, ParseError)
+
+func validateIrl(v: KdlValue): Result[void, ParseError] =
+  ## `(irl)` — RFC 3987 IRI. Same as URL but the "iunreserved" set
+  ## allows non-ASCII. We require a valid scheme like (url) but accept
+  ## any Unicode codepoints (other than disallowed-literal-codepoints
+  ## which are already rejected at lex time).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(irl) requires a string value"))
+  let s = v.strVal
+  var colonAt = -1
+  if not isUrlScheme(s, colonAt):
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(irl) missing or invalid scheme"))
+  if colonAt + 1 >= s.len:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(irl) scheme without body"))
+  ok(void, ParseError)
+
+func validateIrlReference(v: KdlValue): Result[void, ParseError] =
+  ## `(irl-reference)` — RFC 3987 relative-or-absolute IRI. Like
+  ## url-reference but Unicode is allowed in the path/query/fragment.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(irl-reference) requires a string value"))
+  # Same minimal check as url-reference; non-ASCII is permitted.
+  for i, c in v.strVal:
+    if uint8(c) < 0x20'u8 or uint8(c) == 0x7F'u8:
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(irl-reference) contains control character at position " & $i))
+  ok(void, ParseError)
+
+func validateUrlTemplate(v: KdlValue): Result[void, ParseError] =
+  ## `(url-template)` — RFC 6570 URI Template. The literal portions
+  ## follow URI rules; the expression portions are `{...}`. We require
+  ## balanced `{` `}` (no nesting, no unclosed expression).
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(url-template) requires a string value"))
+  var inExpr = false
+  for i, c in v.strVal:
+    if c == '{':
+      if inExpr:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(url-template) nested '{' at position " & $i))
+      inExpr = true
+    elif c == '}':
+      if not inExpr:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(url-template) unmatched '}' at position " & $i))
+      inExpr = false
+  if inExpr:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(url-template) unclosed expression"))
+  ok(void, ParseError)
+
+func validateEmail(v: KdlValue): Result[void, ParseError] =
+  ## `(email)` — RFC 5322 simplified: exactly one `@` separating a
+  ## non-empty local-part from a hostname-shaped domain. Full RFC 5322
+  ## grammar (quoted local-parts, comments, etc.) is deferred — this
+  ## is the 99% form.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(email) requires a string value"))
+  let s = v.strVal
+  if s.len == 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(email) empty"))
+  var atAt = -1
+  for i, c in s:
+    if c == '@':
+      if atAt >= 0:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(email) multiple '@' chars"))
+      atAt = i
+  if atAt < 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(email) missing '@'"))
+  if atAt == 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(email) empty local-part"))
+  if atAt == s.len - 1:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(email) empty domain"))
+  # Validate local-part: 1-64 chars, atom-shape (no spaces, no control).
+  let local = s[0 ..< atAt]
+  if local.len > 64:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(email) local-part exceeds 64 chars"))
+  for c in local:
+    let b = uint8(c)
+    if b < 0x21'u8 or b == 0x7F'u8 or c == '@' or c == ',' or c == '<' or
+       c == '>' or c == '"' or c == '\\':
+      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        "(email) invalid character in local-part"))
+  # Validate domain via hostname rules.
+  let domain = s[atAt + 1 .. ^1]
+  let domainV = newStringValue(domain, v.span)
+  let dr = validateHostname(domainV)
+  if dr.isErr:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(email) invalid domain: " & domain))
+  ok(void, ParseError)
+
+func validateIdnEmail(v: KdlValue): Result[void, ParseError] =
+  ## `(idn-email)` — RFC 6531. Local-part may include UTF-8; domain
+  ## follows IDN hostname rules.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(idn-email) requires a string value"))
+  let s = v.strVal
+  if s.len == 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(idn-email) empty"))
+  var atAt = -1
+  for i, c in s:
+    if c == '@':
+      if atAt >= 0:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(idn-email) multiple '@'"))
+      atAt = i
+  if atAt <= 0 or atAt == s.len - 1:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(idn-email) malformed"))
+  let domain = s[atAt + 1 .. ^1]
+  let domainV = newStringValue(domain, v.span)
+  let dr = validateIdnHostname(domainV)
+  if dr.isErr:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(idn-email) invalid domain"))
+  ok(void, ParseError)
+
+func validateRegex(v: KdlValue): Result[void, ParseError] =
+  ## `(regex)` — ECMA-262 RegExp grammar (per spec). We don't run the
+  ## regex; we validate the source: balanced `(` `)` and `[` `]`, no
+  ## dangling `\` escapes. Full ECMA-262 syntax (named groups,
+  ## lookahead, etc.) is implicitly accepted because we don't reject
+  ## anything that's syntactically structured.
+  if v.kind != kvString:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(regex) requires a string value"))
+  let s = v.strVal
+  if s.len == 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(regex) empty pattern"))
+  var i = 0
+  var parenDepth = 0
+  var inClass = false
+  while i < s.len:
+    let c = s[i]
+    if c == '\\':
+      if i + 1 >= s.len:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(regex) dangling backslash"))
+      i += 2
+      continue
+    if inClass:
+      if c == ']':
+        inClass = false
+      inc i
+      continue
+    case c
+    of '[':
+      inClass = true
+    of '(':
+      inc parenDepth
+    of ')':
+      if parenDepth == 0:
+        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+          "(regex) unmatched ')'"))
+      dec parenDepth
+    else:
+      discard
+    inc i
+  if inClass:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(regex) unclosed character class '['"))
+  if parenDepth != 0:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(regex) unclosed group '('"))
+  ok(void, ParseError)
+
 func validateReserved*(tag: string, v: KdlValue):
     Result[void, ParseError] {.noSideEffect.} =
   ## Dispatch a reserved tag to its validator. Returns ok for unknown
@@ -589,4 +904,14 @@ func validateReserved*(tag: string, v: KdlValue):
   of "duration":  validateDuration(v)
   of "base64":    validateBase64(v)
   of "base85":    validateBase85(v)
+  of "hostname":      validateHostname(v)
+  of "idn-hostname":  validateIdnHostname(v)
+  of "url":           validateUrl(v)
+  of "url-reference": validateUrlReference(v)
+  of "irl":           validateIrl(v)
+  of "irl-reference": validateIrlReference(v)
+  of "url-template":  validateUrlTemplate(v)
+  of "email":         validateEmail(v)
+  of "idn-email":     validateIdnEmail(v)
+  of "regex":         validateRegex(v)
   else:       return ok(void, ParseError)  # user-defined or not-yet-implemented

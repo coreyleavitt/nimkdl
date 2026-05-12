@@ -243,6 +243,93 @@ suite "reserved types — strings (tier 2)":
     parseErr("n (base85)\"abc \"", peReservedTypeInvalid)   # space disallowed
     parseErr("n (base85)\"abc\\\"\"", peReservedTypeInvalid) # quote disallowed
 
+  test "(hostname) RFC 1035 valid forms":
+    parseOkSilent("n (hostname)\"example.com\"")
+    parseOkSilent("n (hostname)\"sub.example.com\"")
+    parseOkSilent("n (hostname)\"a\"")
+    parseOkSilent("n (hostname)\"x123.example\"")
+    parseOkSilent("n (hostname)\"foo-bar.example\"")
+
+  test "(hostname) rejects malformed":
+    parseErr("n (hostname)\"\"", peReservedTypeInvalid)
+    parseErr("n (hostname)\"-foo.com\"", peReservedTypeInvalid)   # leading hyphen
+    parseErr("n (hostname)\"foo-.com\"", peReservedTypeInvalid)   # trailing hyphen
+    parseErr("n (hostname)\".foo\"", peReservedTypeInvalid)       # empty label
+    parseErr("n (hostname)\"foo..bar\"", peReservedTypeInvalid)   # empty label
+    parseErr("n (hostname)\"a_b.com\"", peReservedTypeInvalid)    # underscore not allowed
+
+  test "(url) RFC 3986 valid forms":
+    parseOkSilent("n (url)\"http://example.com\"")
+    parseOkSilent("n (url)\"https://example.com:8080/path?q=1#frag\"")
+    parseOkSilent("n (url)\"mailto:user@example.com\"")
+    parseOkSilent("n (url)\"file:///etc/hosts\"")
+
+  test "(url) rejects malformed":
+    parseErr("n (url)\"\"", peReservedTypeInvalid)
+    parseErr("n (url)\"://no-scheme\"", peReservedTypeInvalid)
+    parseErr("n (url)\"http:\"", peReservedTypeInvalid)         # nothing after scheme
+    parseErr("n (url)\"1http://x\"", peReservedTypeInvalid)     # scheme can't start with digit
+
+  test "(url-reference) RFC 3986 examples":
+    parseOkSilent("n (url-reference)\"http://example.com\"")    # absolute
+    parseOkSilent("n (url-reference)\"/path\"")                  # relative
+    parseOkSilent("n (url-reference)\"?q=1\"")                   # query only
+    parseOkSilent("n (url-reference)\"#frag\"")                  # fragment only
+    parseOkSilent("n (url-reference)\"\"")                        # empty allowed
+
+  test "(email) RFC 5322 simplified shape":
+    parseOkSilent("n (email)\"user@example.com\"")
+    parseOkSilent("n (email)\"a.b+c@sub.example.com\"")
+    parseOkSilent("n (email)\"x@y.z\"")
+
+  test "(email) rejects malformed":
+    parseErr("n (email)\"\"", peReservedTypeInvalid)
+    parseErr("n (email)\"no-at-sign.com\"", peReservedTypeInvalid)
+    parseErr("n (email)\"@no-local.com\"", peReservedTypeInvalid)
+    parseErr("n (email)\"local@\"", peReservedTypeInvalid)
+    parseErr("n (email)\"user@.com\"", peReservedTypeInvalid)    # bad domain
+
+  test "(regex) ECMA-262 RegExp grammar shape":
+    parseOkSilent("n (regex)\".\"")
+    parseOkSilent("n (regex)\"[a-z]+\"")
+    parseOkSilent("n (regex)\"^foo$\"")
+    parseOkSilent("n (regex)\"(a|b)*\"")
+    parseOkSilent("n (regex)\"\\\\d+\"")
+
+  test "(regex) rejects malformed":
+    parseErr("n (regex)\"\"", peReservedTypeInvalid)
+    parseErr("n (regex)\"[\"", peReservedTypeInvalid)          # unclosed class
+    parseErr("n (regex)\"(\"", peReservedTypeInvalid)          # unclosed group
+    parseErr("n (regex)\"\\\\\"", peReservedTypeInvalid)       # dangling escape
+
+  test "(idn-hostname) accepts plain ASCII as a hostname":
+    parseOkSilent("n (idn-hostname)\"example.com\"")
+
+  test "(idn-hostname) accepts xn-- punycode labels":
+    # Per RFC 5891, IDN labels can be ACE-encoded.
+    parseOkSilent("n (idn-hostname)\"xn--rsum-bpad.example\"")
+
+  test "(idn-email) accepts ASCII email":
+    parseOkSilent("n (idn-email)\"user@example.com\"")
+
+  test "(irl) accepts URL with non-ASCII allowed":
+    # IRIs allow non-ASCII in the "iunreserved" set.
+    parseOkSilent("n (irl)\"http://example.com\"")
+    parseOkSilent("n (irl)\"http://\xE6\x97\xA5\xE6\x9C\xAC.example/\"")
+
+  test "(irl-reference) like url-reference but IRI rules":
+    parseOkSilent("n (irl-reference)\"/path\"")
+    parseOkSilent("n (irl-reference)\"http://example.com\"")
+
+  test "(url-template) RFC 6570 examples":
+    parseOkSilent("n (url-template)\"http://example.com/{path}\"")
+    parseOkSilent("n (url-template)\"/search{?q,lang}\"")
+    parseOkSilent("n (url-template)\"http://example.com/\"")  # no expression
+
+  test "(url-template) rejects unclosed expression":
+    parseErr("n (url-template)\"http://example.com/{path\"",
+             peReservedTypeInvalid)
+
 suite "reserved types — numeric tier-1 property sweep":
   # Deterministic boundary sweep over all 8 sub-int-64 numeric tags.
   # Each tag's accept/reject must agree with its declared range, exactly.
