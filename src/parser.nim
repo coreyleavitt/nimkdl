@@ -78,13 +78,6 @@ proc skipNewlines(p: var Parser) {.noSideEffect.} =
     discard p.advance()
 
 # ---------------------------------------------------------------------------
-# Error construction
-# ---------------------------------------------------------------------------
-
-func parseErr(code: ParseErrorCode, span: Span, hint = ""): ParseError =
-  initError(code, span, hint)
-
-# ---------------------------------------------------------------------------
 # Value parsing
 # ---------------------------------------------------------------------------
 
@@ -100,10 +93,10 @@ proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] {.noSideEffec
     let tok = p.advance()
     handle = p.doc.interner.intern(tok.strVal)
   else:
-    return err[InternedStr, ParseError](parseErr(peParseExpected,
+    return err[InternedStr, ParseError](initError(peParseExpected,
       p.peek.span, "expected identifier or string inside type annotation"))
   if not p.check(tkRParen):
-    return err[InternedStr, ParseError](parseErr(peParseExpected,
+    return err[InternedStr, ParseError](initError(peParseExpected,
       p.peek.span, "expected ')' to close type annotation"))
   discard p.advance()  # consume `)`
   ok[InternedStr, ParseError](handle)
@@ -164,7 +157,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     discard p.advance()
     return err[KdlValue, ParseError](tok.error)
   else:
-    return err[KdlValue, ParseError](parseErr(peParseExpected, tok.span,
+    return err[KdlValue, ParseError](initError(peParseExpected, tok.span,
       "expected a value (string, number, keyword)"))
 
 # ---------------------------------------------------------------------------
@@ -179,14 +172,14 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
   let startSpan = p.peek.span
   # Reject keyword-shape tokens as property keys per v2 spec.
   if p.peek.kind == tkKeyword and p.peek(1).kind == tkEquals:
-    return err[KdlEntry, ParseError](parseErr(peParseUnexpected,
+    return err[KdlEntry, ParseError](initError(peParseUnexpected,
       p.peek.span, "keyword cannot be used as a property key"))
   # Reject bare idents that look like reserved keywords (true/false/null
   # /inf/-inf/nan). v2 forbids these in key position even without `#`.
   if p.peek.kind == tkIdent and p.peek(1).kind == tkEquals:
     let kw = p.doc.interner.lookup(p.peek.ident)
     if kw in ["true", "false", "null", "inf", "-inf", "nan"]:
-      return err[KdlEntry, ParseError](parseErr(peParseUnexpected,
+      return err[KdlEntry, ParseError](initError(peParseUnexpected,
         p.peek.span,
         "reserved keyword '" & kw & "' cannot be used as a property key"))
   # Property: bare ident, quoted string, or raw string followed by `=`.
@@ -241,7 +234,7 @@ proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffe
 proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   ## Parse a single node. Caller has skipped leading slashdash if any.
   if p.depth >= MaxParserDepth:
-    return err[KdlNode, ParseError](parseErr(peParseDepthExceeded,
+    return err[KdlNode, ParseError](initError(peParseDepthExceeded,
       p.peek.span, "nesting depth exceeded MaxParserDepth"))
 
   let startSpan = p.peek.span
@@ -265,7 +258,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   of tkError:
     return err[KdlNode, ParseError](p.advance().error)
   else:
-    return err[KdlNode, ParseError](parseErr(peParseExpected,
+    return err[KdlNode, ParseError](initError(peParseExpected,
       p.peek.span, "expected node name"))
 
   var node = KdlNode(name: nameHandle, typeAnnotation: anno,
@@ -333,7 +326,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   of tkError:
     return err[KdlNode, ParseError](p.advance().error)
   else:
-    return err[KdlNode, ParseError](parseErr(peParseUnexpected,
+    return err[KdlNode, ParseError](initError(peParseUnexpected,
       p.peek.span, "expected newline, ';', or end of node"))
 
   node.span = initSpan(startSpan.start, p.peek.span.start)
@@ -355,7 +348,7 @@ proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffe
       nodes.add(nRes.get)
     p.skipNewlines()
   if not p.check(tkRBrace):
-    return err[seq[KdlNode], ParseError](parseErr(peParseExpected,
+    return err[seq[KdlNode], ParseError](initError(peParseExpected,
       p.peek.span, "expected '}' to close children block"))
   discard p.advance()  # consume `}`
   ok[seq[KdlNode], ParseError](nodes)

@@ -122,6 +122,9 @@ proc intern*(interner: var Interner, s: string): InternedStr =
         if entry.heapHash == h and entry.payload == s:
           return InternedStr(idx)
 
+  doAssert interner.entries.len < int(uint32.high),
+    "Interner exhausted: 4G distinct strings interned. The next handle " &
+    "would alias InvalidInterned and silently corrupt lookups."
   let newIdx = uint32(interner.entries.len)
   if s.len <= InlineCapacity:
     interner.entries.add(makeInline(s.toOpenArray(0, s.high)))
@@ -151,6 +154,50 @@ func lookup*(interner: Interner, handle: InternedStr): string =
 func len*(interner: Interner): int {.inline.} =
   ## Number of distinct interned strings.
   interner.entries.len
+
+func entryByteLen(e: Entry): int {.inline.} =
+  case e.kind
+  of ekInline: int(e.length)
+  of ekHeap:   e.payload.len
+
+func entryByteAt(e: Entry, i: int): char {.inline.} =
+  case e.kind
+  of ekInline: e.data[i]
+  of ekHeap:   e.payload[i]
+
+func equals*(interner: Interner, handle: InternedStr,
+             s: openArray[char]): bool =
+  ## Compare `handle`'s interned bytes against `s` without allocating.
+  ## Use in hot paths where `lookup(...) == s` would build a temporary
+  ## string just to compare against a literal/known buffer.
+  let idx = int(uint32(handle))
+  if handle == InvalidInterned or idx >= interner.entries.len:
+    return s.len == 0
+  let e = interner.entries[idx]
+  if entryByteLen(e) != s.len: return false
+  for i in 0 ..< s.len:
+    if entryByteAt(e, i) != s[i]: return false
+  true
+
+func equalsAcross*(aInterner: Interner, aHandle: InternedStr,
+                  bInterner: Interner, bHandle: InternedStr): bool =
+  ## Compare two handles drawn from different interners without
+  ## allocating an intermediate `string`. The hot path in
+  ## `ast.nodeEqual` / `docEqual` calls this once per cross-doc
+  ## name/property/type-annotation comparison.
+  let aIdx = int(uint32(aHandle))
+  let bIdx = int(uint32(bHandle))
+  let aValid = aHandle != InvalidInterned and aIdx < aInterner.entries.len
+  let bValid = bHandle != InvalidInterned and bIdx < bInterner.entries.len
+  if not aValid or not bValid:
+    return aValid == bValid  # both invalid → equal (both "")
+  let aE = aInterner.entries[aIdx]
+  let bE = bInterner.entries[bIdx]
+  let n = entryByteLen(aE)
+  if entryByteLen(bE) != n: return false
+  for i in 0 ..< n:
+    if entryByteAt(aE, i) != entryByteAt(bE, i): return false
+  true
 
 func isInline*(interner: Interner, handle: InternedStr): bool =
   ## True if the entry is stored inline (no heap allocation for its bytes).

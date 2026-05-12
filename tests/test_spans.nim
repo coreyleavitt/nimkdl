@@ -83,6 +83,48 @@ suite "Result[T, E]":
     check a.kind == rkOk
     check b.kind == rkErr
 
+suite "Result combinators (M4)":
+  test "map: Ok composes":
+    let r = ok[int, string](7)
+    let mapped = r.map(proc(v: int): int = v * 2)
+    check mapped.isOk
+    check mapped.get == 14
+
+  test "map: Err passes through unchanged":
+    let r = err[int, string]("boom")
+    let mapped = r.map(proc(v: int): int = v * 2)
+    check mapped.isErr
+    check mapped.getErr == "boom"
+
+  test "mapErr: Err transforms":
+    let r = err[int, string]("oops")
+    let mapped = r.mapErr(proc(e: string): int = e.len)
+    check mapped.isErr
+    check mapped.getErr == 4
+
+  test "mapErr: Ok passes through unchanged":
+    let r = ok[int, string](7)
+    let mapped = r.mapErr(proc(e: string): int = e.len)
+    check mapped.isOk
+    check mapped.get == 7
+
+  test "flatMap: sequences two Result-returning steps":
+    proc step(v: int): Result[string, string] =
+      if v > 0: ok[string, string]("positive")
+      else: err[string, string]("non-positive")
+    let r = ok[int, string](5).flatMap(step)
+    check r.isOk
+    check r.get == "positive"
+    let r2 = ok[int, string](-1).flatMap(step)
+    check r2.isErr
+    check r2.getErr == "non-positive"
+
+  test "flatMap: initial Err short-circuits":
+    proc step(v: int): Result[string, string] = ok[string, string]("never")
+    let r = err[int, string]("upstream").flatMap(step)
+    check r.isErr
+    check r.getErr == "upstream"
+
 suite "formatError diagnostic":
   test "renders code, location, source line, and caret":
     let src = "rule \"foo\" @action {\n  predicate true\n}\n"

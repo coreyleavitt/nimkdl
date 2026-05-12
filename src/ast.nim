@@ -151,13 +151,11 @@ func `==`*(a, b: KdlValue): bool
 
 func valueEqual*(aDoc, bDoc: KdlDoc, a, b: KdlValue): bool =
   ## Value equality across docs — resolves type annotations against each
-  ## doc's interner.
+  ## doc's interner without allocating intermediate strings.
   if a.kind != b.kind: return false
-  let aType =
-    if a.typeAnnotation == InvalidInterned: "" else: aDoc.interner.lookup(a.typeAnnotation)
-  let bType =
-    if b.typeAnnotation == InvalidInterned: "" else: bDoc.interner.lookup(b.typeAnnotation)
-  if aType != bType: return false
+  if not equalsAcross(aDoc.interner, a.typeAnnotation,
+                      bDoc.interner, b.typeAnnotation):
+    return false
   case a.kind
   of kvString: a.strVal == b.strVal
   of kvInt:    a.intVal == b.intVal
@@ -201,14 +199,14 @@ func `==`*(a, b: KdlNode): bool =
 
 proc nodeEqual*(aDoc, bDoc: KdlDoc, a, b: KdlNode): bool =
   ## Cross-doc node equality — resolves names + properties through each
-  ## doc's interner so handle differences don't trip the comparison.
-  if aDoc.interner.lookup(a.name) != bDoc.interner.lookup(b.name):
+  ## doc's interner without allocating intermediate strings (the inner
+  ## comparison helper `equalsAcross` walks both entries' byte storage
+  ## in lockstep). Hot path: 4 cross-interner comparisons per node.
+  if not equalsAcross(aDoc.interner, a.name, bDoc.interner, b.name):
     return false
-  let aAnno =
-    if a.typeAnnotation == InvalidInterned: "" else: aDoc.interner.lookup(a.typeAnnotation)
-  let bAnno =
-    if b.typeAnnotation == InvalidInterned: "" else: bDoc.interner.lookup(b.typeAnnotation)
-  if aAnno != bAnno: return false
+  if not equalsAcross(aDoc.interner, a.typeAnnotation,
+                      bDoc.interner, b.typeAnnotation):
+    return false
   if a.entries.len != b.entries.len: return false
   for i in 0 ..< a.entries.len:
     let ae = a.entries[i]
@@ -218,7 +216,8 @@ proc nodeEqual*(aDoc, bDoc: KdlDoc, a, b: KdlNode): bool =
     of keArgument:
       if not valueEqual(aDoc, bDoc, ae.argValue, be.argValue): return false
     of keProperty:
-      if aDoc.interner.lookup(ae.propName) != bDoc.interner.lookup(be.propName):
+      if not equalsAcross(aDoc.interner, ae.propName,
+                          bDoc.interner, be.propName):
         return false
       if not valueEqual(aDoc, bDoc, ae.propValue, be.propValue): return false
   if a.children.len != b.children.len: return false
@@ -300,22 +299,22 @@ proc typeAnnotationOf*(doc: KdlDoc, n: KdlNode): string =
   if n.typeAnnotation == InvalidInterned: ""
   else: doc.interner.lookup(n.typeAnnotation)
 
-iterator children*(n: KdlNode): KdlNode =
-  for c in n.children:
-    yield c
-
-iterator entries*(n: KdlNode): KdlEntry =
-  for e in n.entries:
-    yield e
+# `iterator children` and `iterator entries` removed — they shadowed
+# the field of the same name and added zero behaviour over plain
+# `for c in n.children: ...`. The two filtering iterators below carry
+# their weight: they extract typed values from the heterogeneous
+# `entries` seq.
 
 iterator arguments*(n: KdlNode): KdlValue =
-  ## Positional arguments only, in source order.
+  ## Positional arguments only, in source order. Filters the
+  ## heterogeneous `entries` seq to its `keArgument` payloads.
   for e in n.entries:
     if e.kind == keArgument:
       yield e.argValue
 
 iterator properties*(n: KdlNode): tuple[name: InternedStr, value: KdlValue] =
-  ## Properties only, in source order.
+  ## Properties only, in source order. Filters the heterogeneous
+  ## `entries` seq to its `keProperty` payloads.
   for e in n.entries:
     if e.kind == keProperty:
       yield (e.propName, e.propValue)

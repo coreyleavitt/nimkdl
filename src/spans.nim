@@ -232,3 +232,39 @@ func get*[T, E](r: Result[T, E]): T {.inline.} =
 
 func getErr*[T, E](r: Result[T, E]): E {.inline.} =
   r.error
+
+# ---------------------------------------------------------------------------
+# Combinators on Result — the applicative-style ergonomics that callers
+# previously had to write inline. `try?` is the workhorse: it turns
+# `if r.isErr: return err[U, E](r.getErr); ... use r.get ...` into one
+# line. `map` / `flatMap` / `mapErr` cover the rest.
+# ---------------------------------------------------------------------------
+
+func map*[T, U, E](r: Result[T, E], fn: proc(v: T): U {.noSideEffect.}):
+    Result[U, E] {.inline.} =
+  ## Apply `fn` to the Ok payload; pass Err through unchanged.
+  if r.isErr: err[U, E](r.error)
+  else: ok[U, E](fn(r.value))
+
+func mapErr*[T, E, F](r: Result[T, E], fn: proc(e: E): F {.noSideEffect.}):
+    Result[T, F] {.inline.} =
+  ## Apply `fn` to the Err payload; pass Ok through unchanged.
+  if r.isOk: ok[T, F](r.value)
+  else: err[T, F](fn(r.error))
+
+func flatMap*[T, U, E](r: Result[T, E],
+                       fn: proc(v: T): Result[U, E] {.noSideEffect.}):
+    Result[U, E] {.inline.} =
+  ## Sequence two Result-returning steps; aka `andThen` in some
+  ## ecosystems.
+  if r.isErr: err[U, E](r.error)
+  else: fn(r.value)
+
+# Note: a `?`-style early-return template (e.g. `let v = tryGet
+# someCall()`) was considered. Nim's template hygiene around `result`-
+# typed inference made the void / non-void cases require two separate
+# templates with different signatures — more complexity than the
+# explicit `if r.isErr: return err(...)` form, which is also more
+# greppable. Keeping the explicit form; `map` / `flatMap` / `mapErr`
+# above cover the chained-pure-functions case where you don't want
+# to early-return.

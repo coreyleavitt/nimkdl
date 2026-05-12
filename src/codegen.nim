@@ -516,7 +516,7 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     else:
       newEmptyNode()
   quote do:
-    let `keyIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
+    let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
     if `nodeIdent`.hasProp(`keyIdent`):
       if not kdlDecodeValue(`targetAccess`,
                             `nodeIdent`.findProp(`keyIdent`),
@@ -535,7 +535,7 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let childSym = genSym(nskForVar, "child")
     let recurseRes = genSym(nskLet, "recurseRes")
     quote do:
-      let `nameIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
+      let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
       for `childSym` in `nodeIdent`.childrenNamed(`nameIdent`):
         var `elemSym`: `elemType`
         let `recurseRes` = kdlDecodeImpl(`elemSym`, `childSym`, `docIdent`)
@@ -545,7 +545,7 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
   else:
     let recurseRes = genSym(nskLet, "recurseRes")
     quote do:
-      let `nameIdent` = `docIdent`.interner.lookupOrIntern(`kdlNameStr`)
+      let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
       if `nodeIdent`.hasChild(`nameIdent`):
         let `recurseRes` = kdlDecodeImpl(`targetAccess`,
                                          `nodeIdent`.findChild(`nameIdent`),
@@ -701,15 +701,6 @@ macro deriveDecode*(typ: typedesc): untyped =
     echo "==="
 
 # ---------------------------------------------------------------------------
-# Convenience: lookupOrIntern (Interner doesn't have it)
-# ---------------------------------------------------------------------------
-
-proc lookupOrIntern*(interner: var Interner, s: string): InternedStr {.inline.} =
-  ## Find or insert. Different name from `intern` to avoid widening the
-  ## intern API; the conformance harness + decoders just want a handle.
-  interner.intern(s)
-
-# ---------------------------------------------------------------------------
 # parse[T]
 # ---------------------------------------------------------------------------
 
@@ -802,7 +793,7 @@ proc decode*[T](source: string,
   when T is seq:
     type Elem = typeof(default(T)[0])
     let wantName = kdlNodeNameImpl(typeof(Elem))
-    let nameKey = doc.interner.lookupOrIntern(wantName)
+    let nameKey = doc.interner.intern(wantName)
     var elems: T = @[]
     for i in 0 ..< doc.nodes.len:
       if doc.nodes[i].name == nameKey:
@@ -814,7 +805,7 @@ proc decode*[T](source: string,
     ok[T, ParseError](elems)
   else:
     let wantName = kdlNodeNameImpl(typeof(T))
-    let nameKey = doc.interner.lookupOrIntern(wantName)
+    let nameKey = doc.interner.intern(wantName)
     var outValue: T
     var found = false
     for i in 0 ..< doc.nodes.len:

@@ -42,7 +42,7 @@ type
 const
   PrettyIndent = "    "
   ReservedBarewords = [
-    "true", "false", "null", "inf", "nan"
+    "true", "false", "null", "inf", "-inf", "nan"
   ]
 
 # ---------------------------------------------------------------------------
