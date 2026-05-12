@@ -312,7 +312,13 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   var node = KdlNode(name: nameHandle, typeAnnotation: anno,
                      entries: @[], children: @[], span: startSpan)
 
-  # Parse zero or more entries
+  # Parse zero or more entries, then zero or more children blocks.
+  # Spec rule (from corpus slashdash_multiple_child_blocks and the paired
+  # _fail case): once *any* children block (real or slashdashed) has been
+  # consumed, no more entries are permitted. Real and slashdashed children
+  # blocks may freely interleave, but at most one real block contributes.
+  var seenChildrenBlock = false
+  var realChildrenSeen = false
   while true:
     var skip = false
     if p.check(tkSlashDash):
@@ -326,7 +332,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
       p.skipNewlines()
     # canStartEntry must be evaluated AFTER the slashdash skip so the
     # newly-positioned token is what we test against.
-    if not skip and not p.canStartEntry: break
+    if not skip and not p.canStartEntry and not p.check(tkLBrace): break
     if skip and not p.canStartEntry and not p.check(tkLBrace):
       # Slashdash consumed but the next token cannot begin an entry or
       # children-block — give a targeted diagnostic instead of letting
@@ -340,14 +346,20 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
       let cRes = p.parseChildren()
       dec p.depth
       if cRes.isErr: return err[KdlNode, ParseError](cRes.getErr)
+      seenChildrenBlock = true
       if not skip:
-        # A real (non-skipped) children block ends the node; nothing
-        # may follow before the terminator. A slashdashed block is
-        # semantically absent — keep parsing entries after it.
+        if realChildrenSeen:
+          return err[KdlNode, ParseError](initError(peParseUnexpected,
+            p.peek.span, "a node may have at most one real children block"))
         node.children = cRes.get
-        break
-      # else: slashdashed block — fall through to keep parsing entries
+        realChildrenSeen = true
       continue
+    # An entry. Spec disallows entries after any children block has been
+    # consumed (real or slashdashed).
+    if seenChildrenBlock:
+      return err[KdlNode, ParseError](initError(peParseUnexpected,
+        p.peek.span,
+        "entries are not permitted after a children block"))
     let eRes = p.parseEntry()
     if eRes.isErr: return err[KdlNode, ParseError](eRes.getErr)
     if not skip:
@@ -363,14 +375,6 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
           else:
             inc i
       node.entries.add(newEntry)
-
-  # Optional children block (if we didn't already consume one above)
-  if p.check(tkLBrace):
-    inc p.depth
-    let cRes = p.parseChildren()
-    dec p.depth
-    if cRes.isErr: return err[KdlNode, ParseError](cRes.getErr)
-    node.children = cRes.get
 
   # Terminator
   case p.peek.kind

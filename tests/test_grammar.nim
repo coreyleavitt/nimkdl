@@ -117,7 +117,11 @@ suite "Reference interpreter: slashdash":
     same("rule /- skipped=1 kept=2")
 
   test "slashdash on children":
-    same("rule /- {\n  hidden\n} visible=#true")
+    # Spec: no entries after any children block; sibling node follows.
+    same("rule /- {\n  hidden\n}\nsibling visible=#true")
+
+  test "multiple slashdashed children blocks around a real one":
+    same("node foo /-{\n  one\n} /-{\n  two\n} {\n  three\n} /-{\n  four\n}")
 
 suite "Reference interpreter: realistic fragments":
   test "rule with action subtree matches hand parser":

@@ -47,8 +47,6 @@ hex_int.kdl                       | D-bigint — v0.2 (i128 work)
 # matching parseDocument. Line comments are lexer-absorbed already.
 #
 # Two cases still skipped (real spec corners):
-slashdash_multiple_child_blocks.kdl | E-multi-block — node accepts /-{...} blocks after a real children block; needs a second-pass children scan; v0.2
-slashdash_child_block_before_entry_err_fail.kdl | E-multi-block — related; v0.2
 
 # ===========================================================================
 # Category F: Multi-line string corner cases (v0.2)

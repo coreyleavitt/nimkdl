@@ -174,11 +174,33 @@ suite "parser: slashdash":
       check doc.interner.lookup(n.entries[0].propName) == "kept"
 
   test "slashdash on children block skips block":
-    parseOk("rule /- {\n  hidden\n} visible=#true"):
+    # Slashdashed children block, then a sibling node — no entries may
+    # follow the block (spec corpus slashdash_child_block_before_entry).
+    parseOk("rule /- {\n  hidden\n}\nsibling visible=#true"):
       let n = doc.nodes[0]
+      check nameOf(doc, n) == "rule"
       check n.children.len == 0
-      check n.entries.len == 1
-      check doc.interner.lookup(n.entries[0].propName) == "visible"
+      check n.entries.len == 0
+      check doc.nodes.len == 2
+      check nameOf(doc, doc.nodes[1]) == "sibling"
+
+  test "multiple slashdashed children blocks around a real one":
+    # Spec corpus slashdash_multiple_child_blocks.kdl: entries followed
+    # by any mix of real and slashdashed children blocks; only the real
+    # block's children survive.
+    parseOk("node foo /-{\n    one\n} /-{\n    two\n} {\n    three\n} /-{\n    four\n}"):
+      let n = doc.nodes[0]
+      check nameOf(doc, n) == "node"
+      check n.entries.len == 1  # only foo
+      check n.children.len == 1
+      check nameOf(doc, n.children[0]) == "three"
+
+  test "entry after slashdashed children block is rejected":
+    # Spec corpus slashdash_child_block_before_entry_err_fail.kdl: once
+    # any children block (real or slashdashed) is consumed, no more
+    # entries are allowed.
+    parseErrCheck("node /-{\n    child\n} foo {\n    bar\n}",
+                  peParseUnexpected)
 
 suite "parser: type annotations":
   test "type annotation on node":

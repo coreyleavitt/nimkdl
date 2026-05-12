@@ -229,11 +229,17 @@ proc buildKdlGrammar*(): Grammar =
     term(tkNumber), term(tkKeyword)
   )
 
+  # Spec rule (per corpus slashdash_child_block_before_entry_err_fail):
+  # entries first, then any mix of slashdashed and real children blocks
+  # — but no entries after any children block. At-most-one *real*
+  # children block is enforced post-build in buildNode.
+  rule "childBlock", altOf(refTo("slashdashChildren"), refTo("children"))
+
   rule "node", seqOf(
     opt(refTo("typeAnno")),
     refTo("name"),
-    star(altOf(refTo("entry"), refTo("slashdashChildren"))),
-    opt(refTo("children")),
+    star(refTo("entry")),
+    star(refTo("childBlock")),
     refTo("terminator")
   )
 
@@ -730,12 +736,27 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
           inc i
     result.entries.add(newEntry)
 
-  # A real children block at the end of the node — the grammar separates
-  # this from slashdashed-children (which lives inside the entry loop and
-  # is dropped here as a no-op).
-  let childrenMatch = findImmediate(node, "children")
-  if childrenMatch != nil:
-    result.children = buildChildrenBlock(childrenMatch, doc, tokens, errs)
+  # Walk childBlocks — each childBlock is an `altOf(slashdashChildren,
+  # children)` so its immediate-child ParseNode tells us which arm. Spec
+  # rule (corpus slashdash_multiple_child_blocks): at most one real block
+  # contributes; extra real blocks are an error. Slashdashed blocks are
+  # semantically absent but must still be structurally consumed.
+  # `childBlock` is altOf(slashdashChildren, children); interpRule re-stamps
+  # the resulting ParseNode with the outer rule name, clobbering whichever
+  # arm matched. Detect the slashdashed arm by looking at the first token
+  # of the block — a slashdashed block always starts with `/-`.
+  var realChildrenSeen = false
+  for childBlock in findImmediateAll(node, "childBlock"):
+    let blockToks = collectTokens(childBlock)
+    let skipped = blockToks.len > 0 and blockToks[0].kind == tkSlashDash
+    if skipped:
+      continue  # structurally consumed, semantically absent
+    if realChildrenSeen:
+      errs.add(initError(peParseUnexpected, result.span,
+        "a node may have at most one real children block"))
+      continue
+    result.children = buildChildrenBlock(childBlock, doc, tokens, errs)
+    realChildrenSeen = true
 
 proc buildDoc(root: ParseNode, doc: var KdlDoc,
               tokens: seq[Token],
