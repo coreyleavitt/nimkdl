@@ -38,6 +38,9 @@ type
     peLexInvalidEscape        ## bad escape sequence inside a string
     peLexInvalidNumber        ## malformed numeric literal
     peLexInvalidIdentifier    ## bare-word that can't form an identifier
+    peLexReservedKeyword      ## bare ident matches a v2 reserved keyword
+                              ## (true/false/null/inf/-inf/nan) — must be
+                              ## quoted or `#`-prefixed per spec
 
     # Parser (#523)
     peParseUnexpected         ## token where none was expected
@@ -142,6 +145,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peLexInvalidEscape:     "invalid escape sequence"
   of peLexInvalidNumber:     "malformed number literal"
   of peLexInvalidIdentifier: "invalid identifier"
+  of peLexReservedKeyword:   "reserved keyword used as bare identifier"
   of peParseUnexpected:      "unexpected token"
   of peParseExpected:        "expected token not found"
   of peParseDepthExceeded:   "nesting depth exceeded"

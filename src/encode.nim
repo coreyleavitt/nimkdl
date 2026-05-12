@@ -33,6 +33,7 @@ import std/strutils
 
 import ./ast
 import ./intern
+import ./lexer  # ReservedBarewords (centralized v2 keyword denylist)
 
 type
   EncodeMode* = enum
@@ -41,9 +42,6 @@ type
 
 const
   PrettyIndent = "    "
-  ReservedBarewords = [
-    "true", "false", "null", "inf", "-inf", "nan"
-  ]
 
 # ---------------------------------------------------------------------------
 # Identifier emission

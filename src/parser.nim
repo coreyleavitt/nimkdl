@@ -128,11 +128,17 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     v.typeAnnotation = anno
     return ok[KdlValue, ParseError](v)
   of tkIdent:
-    # KDL v2 allows bare identifiers as string values. The lexer already
-    # interned the bytes; resolve them back through the doc's interner
-    # so the parser stays a single source of truth on the string contents.
+    # KDL v2 allows bare identifiers as string values, except for the
+    # six reserved keywords (true/false/null/inf/-inf/nan) which must be
+    # quoted or `#`-prefixed.
     discard p.advance()
-    var v = newStringValue(p.doc.interner.lookup(tok.ident), tok.span)
+    let identStr = p.doc.interner.lookup(tok.ident)
+    if identStr in ReservedBarewords:
+      return err[KdlValue, ParseError](initError(peLexReservedKeyword,
+        tok.span,
+        "reserved keyword '" & identStr & "' cannot be used as a bare " &
+        "value; quote it or use '#" & identStr & "'"))
+    var v = newStringValue(identStr, tok.span)
     v.typeAnnotation = anno
     return ok[KdlValue, ParseError](v)
   of tkRawString:
@@ -193,8 +199,8 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
   # /inf/-inf/nan). v2 forbids these in key position even without `#`.
   if p.peek.kind == tkIdent and p.peek(1).kind == tkEquals:
     let kw = p.doc.interner.lookup(p.peek.ident)
-    if kw in ["true", "false", "null", "inf", "-inf", "nan"]:
-      return err[KdlEntry, ParseError](initError(peParseUnexpected,
+    if kw in ReservedBarewords:
+      return err[KdlEntry, ParseError](initError(peLexReservedKeyword,
         p.peek.span,
         "reserved keyword '" & kw & "' cannot be used as a property key"))
   # Property: bare ident, quoted string, or raw string followed by `=`.
@@ -277,7 +283,14 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   var nameHandle: InternedStr
   case p.peek.kind
   of tkIdent:
-    nameHandle = p.advance().ident
+    let tok = p.advance()
+    let identStr = p.doc.interner.lookup(tok.ident)
+    if identStr in ReservedBarewords:
+      return err[KdlNode, ParseError](initError(peLexReservedKeyword,
+        tok.span,
+        "reserved keyword '" & identStr & "' cannot be used as a bare " &
+        "node name; quote it or use '#" & identStr & "'"))
+    nameHandle = tok.ident
   of tkString:
     let tok = p.advance()
     if containsBidiControl(tok.strVal):

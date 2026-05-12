@@ -38,6 +38,13 @@ import ./intern
 
 const
   MaxRawStringHashes* = 255
+
+  ReservedBarewords* = [
+    "true", "false", "null", "inf", "-inf", "nan"
+  ] ## KDL v2 forbids these as bare identifiers in *any* position (node
+    ## name, property key, or value); they must be `#`-prefixed (booleans/
+    ## null/special floats) or quoted (string values). Centralized here so
+    ## parser, reference interpreter, and encoder agree.
     ## Maximum number of `#` characters allowed at the start of a raw
     ## string literal (`#"..."#`, `##"..."##`, …). KDL imposes no spec
     ## limit, but matching closing-hash scans are O(H * N) over the

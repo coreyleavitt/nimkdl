@@ -78,4 +78,3 @@ zero_space_before_first_arg_fail.kdl | G-token-adjacency — must require whites
 zero_space_before_prop_fail.kdl   | G-token-adjacency — must require whitespace between entries; v0.2
 zero_space_before_second_arg_fail.kdl | G-token-adjacency — must require whitespace; v0.2
 zero_space_before_slashdash_children.kdl | G-token-adjacency — must require whitespace before /-; v0.2
-floating_point_keyword_identifier_strings_fail.kdl | G-bare-vs-keyword — `inf`/`nan` as bare ident strings disallowed in v2; v0.2

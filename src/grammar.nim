@@ -597,7 +597,13 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc,
     result = newStringValue(v.rawVal, v.span)
   of tkIdent:
     # Bare-ident value: resolves through the doc's interner.
-    result = newStringValue(doc.interner.lookup(v.ident), v.span)
+    let identStr = doc.interner.lookup(v.ident)
+    if identStr in ReservedBarewords:
+      errs.add(initError(peLexReservedKeyword, v.span,
+        "reserved keyword '" & identStr & "' cannot be used as a bare value"))
+      result = newNullValue(v.span)
+    else:
+      result = newStringValue(identStr, v.span)
   of tkNumber:
     if looksLikeFloat(v):
       let floatRes = decodeFloatFromToken(v)
@@ -758,21 +764,28 @@ proc buildDoc(root: ParseNode, doc: var KdlDoc,
 # below is a pure walk over the doc and returns `Result[void, ParseError]`
 # consistent with the rest of the parse boundary.
 
-proc checkNoReservedPropertyKeys*(nodes: seq[KdlNode], doc: KdlDoc):
+proc checkNoReservedKeywords(nodes: seq[KdlNode], doc: KdlDoc):
     Result[void, ParseError] =
-  ## KDL v2 forbids the keyword-shaped barewords (true / false / null /
-  ## inf / -inf / nan) in property-key position even without the `#`
-  ## prefix. The hand parser checks this inline; the reference
-  ## interpreter checks here after the build.
+  ## KDL v2 forbids the keyword-shaped barewords (`ReservedBarewords`) in
+  ## node-name and property-key positions even without the `#` prefix.
+  ## (Bare-ident-as-value rejection is performed inline in `buildValue`
+  ## because the AST loses the bare-vs-quoted distinction once stored.)
+  ## The hand parser checks these inline; the reference interpreter
+  ## checks here after the build.
   for n in nodes:
+    let nameStr = doc.interner.lookup(n.name)
+    if nameStr in ReservedBarewords:
+      return err[void, ParseError](initError(peLexReservedKeyword,
+        n.span,
+        "reserved keyword '" & nameStr & "' cannot be used as a bare node name"))
     for e in n.entries:
       if e.kind == keProperty:
         let k = doc.interner.lookup(e.propName)
-        if k in ["true", "false", "null", "inf", "-inf", "nan"]:
-          return err[void, ParseError](initError(peParseUnexpected,
+        if k in ReservedBarewords:
+          return err[void, ParseError](initError(peLexReservedKeyword,
             e.span,
             "reserved keyword '" & k & "' cannot be used as a property key"))
-    let childRes = checkNoReservedPropertyKeys(n.children, doc)
+    let childRes = checkNoReservedKeywords(n.children, doc)
     if childRes.isErr:
       return childRes
   ok(void, ParseError)
@@ -801,7 +814,7 @@ proc referenceInterpret*(source: string, sourcePath = "<input>"):
   buildDoc(res.get, doc, tokens, buildErrs)
   if buildErrs.len > 0:
     return err[KdlDoc, ParseError](buildErrs[0])
-  let semCheck = checkNoReservedPropertyKeys(doc.nodes, doc)
+  let semCheck = checkNoReservedKeywords(doc.nodes, doc)
   if semCheck.isErr:
     return err[KdlDoc, ParseError](semCheck.getErr)
   ok[KdlDoc, ParseError](doc)
