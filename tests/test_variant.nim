@@ -76,11 +76,11 @@ suite "variant: error paths (Q3 (ii) atomicity)":
     if r.isErr:
       check r.getErr.code == peTypeMissingRequired
 
-  test "unknown discriminator value → Err":
+  test "unknown discriminator value → Err (peTypeDiscriminatorBad)":
     let r = decode[Action]("action \"unrecognized\"")
     check r.isErr
     if r.isErr:
-      check r.getErr.code == peTypeMismatch
+      check r.getErr.code == peTypeDiscriminatorBad
 
   test "missing required branch field → Err":
     # akInject requires `template`; KDL omits it.

@@ -14,7 +14,7 @@
 ## - Numbers: decimal (with underscores), hex `0x...`, octal `0o...`,
 ##   binary `0b...`, with optional `-`/`+` sign
 ## - Keywords: `#true`, `#false`, `#null`, `#inf`, `#-inf`, `#nan`
-## - Escape sequences in regular strings: `\n \t \r \" \\ \/ \b \f`
+## - Escape sequences in regular strings: `\n \t \r \" \\ \s \b \f`
 ##   plus `\u{XXXX}` (1-6 hex digits, surrogate range rejected)
 ## - Line continuation `\` followed by newline (consumed; no token emitted)
 ##
@@ -121,6 +121,55 @@ func isIdentCont(ch: char): bool {.inline.} =
 
 func isAsciiWhitespace(ch: char): bool {.inline.} =
   ch == ' ' or ch == '\t'
+
+func isWellFormedUtf8*(s: string): bool =
+  ## Reject malformed UTF-8 sequences: over-long encodings, lone
+  ## continuation bytes, truncated multi-byte sequences, surrogate
+  ## halves encoded as 3-byte UTF-8, and codepoints above U+10FFFF.
+  ##
+  ## Pairs with `containsBidiControl` — the bidi denylist looks for
+  ## the canonical 3-byte UTF-8 of forbidden codepoints. An attacker
+  ## who encodes U+202E as the over-long 4-byte form `F0 82 80 AE`
+  ## (leading byte 0xF0, not 0xE2) would bypass the denylist while
+  ## any conforming renderer treats it identically. Reject the
+  ## over-long form here so the denylist's coverage is sound.
+  var i = 0
+  while i < s.len:
+    let b0 = uint8(s[i])
+    if b0 < 0x80'u8:
+      inc i
+      continue
+    var width: int
+    var cp: int
+    if (b0 and 0xE0'u8) == 0xC0'u8:
+      width = 2; cp = int(b0 and 0x1F'u8)
+      if b0 < 0xC2'u8: return false  # over-long 2-byte
+    elif (b0 and 0xF0'u8) == 0xE0'u8:
+      width = 3; cp = int(b0 and 0x0F'u8)
+    elif (b0 and 0xF8'u8) == 0xF0'u8:
+      width = 4; cp = int(b0 and 0x07'u8)
+      if b0 > 0xF4'u8: return false  # > U+10FFFF
+    else:
+      return false  # continuation byte at lead position, or 5-/6-byte
+    if i + width > s.len: return false
+    for j in 1 ..< width:
+      let bj = uint8(s[i + j])
+      if (bj and 0xC0'u8) != 0x80'u8: return false  # not a continuation
+      cp = (cp shl 6) or int(bj and 0x3F'u8)
+    # Reject over-long encodings: codepoint must require the byte width
+    # we just consumed.
+    case width
+    of 2:
+      if cp < 0x80: return false
+    of 3:
+      if cp < 0x800: return false
+      if cp >= 0xD800 and cp <= 0xDFFF: return false  # surrogate range
+    of 4:
+      if cp < 0x10000: return false
+      if cp > 0x10FFFF: return false
+    else: discard
+    inc i, width
+  true
 
 func containsBidiControl*(s: string): bool =
   ## True if `s` contains any of the 10 Unicode bidirectional control
@@ -953,6 +1002,15 @@ proc lex*(source: string, interner: var Interner): seq[Token]
   ## the Lexer struct — keeps the whole tokenizer VM-callable so the
   ## parser chain runs at compile time via `embed[T]`.
   var lx = Lexer(source: source, pos: StartPosition, tokens: @[])
+  # Reject malformed UTF-8 up front — checked once over the whole input
+  # so downstream lexing can assume byte-by-byte iteration is safe.
+  # Pairs with `containsBidiControl` to prevent denylist bypass via
+  # over-long encodings or surrogate halves.
+  if not isWellFormedUtf8(source):
+    lx.emitError(peLexUnexpectedChar, pointSpan(StartPosition),
+                 "input is not well-formed UTF-8")
+    lx.emit(Token(kind: tkEof, span: pointSpan(StartPosition)))
+    return lx.tokens
   # Skip BOM (U+FEFF, encoded as EF BB BF) at start of input — per
   # KDL v2 spec it's silently consumed at position 0 but flagged as an
   # error if it appears later. We handle the start-of-input case here.

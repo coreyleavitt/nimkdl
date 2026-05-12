@@ -91,6 +91,9 @@ proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] {.noSideEffec
     handle = p.advance().ident
   of tkString:
     let tok = p.advance()
+    if containsBidiControl(tok.strVal):
+      return err[InternedStr, ParseError](initError(peLexInvalidIdentifier,
+        tok.span, "bidi control codepoint in type annotation name"))
     handle = p.doc.interner.intern(tok.strVal)
   else:
     return err[InternedStr, ParseError](initError(peParseExpected,
@@ -191,9 +194,15 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
     of tkIdent: key = p.advance().ident
     of tkString:
       let tok = p.advance()
+      if containsBidiControl(tok.strVal):
+        return err[KdlEntry, ParseError](initError(peLexInvalidIdentifier,
+          tok.span, "bidi control codepoint in property key"))
       key = p.doc.interner.intern(tok.strVal)
     of tkRawString:
       let tok = p.advance()
+      if containsBidiControl(tok.rawVal):
+        return err[KdlEntry, ParseError](initError(peLexInvalidIdentifier,
+          tok.span, "bidi control codepoint in property key"))
       key = p.doc.interner.intern(tok.rawVal)
     else: discard  # unreachable (guarded above)
     discard p.advance()  # consume `=`
@@ -218,14 +227,22 @@ func canStartValue(t: Token): bool {.inline.} =
 
 func canStartEntry(p: Parser): bool =
   ## True if the next token can begin an entry (argument or property).
-  ## An ident followed by `=` is a property; an ident without `=` would
-  ## be ambiguous against the next-node case at the top level, so the
-  ## parser only treats `ident =` as an entry-start. Bare values are
-  ## entry-starts too.
+  ## Three classes start an entry:
+  ##   - slashdash (skips the next entry)
+  ##   - any value-shaped token (string / raw string / number / keyword /
+  ##     `(` for typed value / bare ident for v2 string-value)
+  ##   - any name-shape (ident / string / raw string) followed by `=`
+  ##     which is the property-key path
+  ##
+  ## The third clause overlaps with the second for ident/string/raw —
+  ## a property-shaped lookahead is just a more specific form of
+  ## value-shaped lookahead. We keep the explicit clause so the
+  ## property recognition is greppable, not an accidental fall-through.
   let t = p.peek
   if t.kind == tkSlashDash: return true
   if canStartValue(t): return true
-  if (t.kind == tkIdent or t.kind == tkString) and
+  if (t.kind == tkIdent or t.kind == tkString or
+      t.kind == tkRawString) and
      p.peek(1).kind == tkEquals: return true
   false
 
@@ -251,9 +268,15 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
     nameHandle = p.advance().ident
   of tkString:
     let tok = p.advance()
+    if containsBidiControl(tok.strVal):
+      return err[KdlNode, ParseError](initError(peLexInvalidIdentifier,
+        tok.span, "bidi control codepoint in node name"))
     nameHandle = p.doc.interner.intern(tok.strVal)
   of tkRawString:
     let tok = p.advance()
+    if containsBidiControl(tok.rawVal):
+      return err[KdlNode, ParseError](initError(peLexInvalidIdentifier,
+        tok.span, "bidi control codepoint in node name"))
     nameHandle = p.doc.interner.intern(tok.rawVal)
   of tkError:
     return err[KdlNode, ParseError](p.advance().error)

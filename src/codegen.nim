@@ -103,6 +103,19 @@ func mismatchErrAt*(msg: string, span: Span): ParseError {.inline.} =
 func missingErrAt*(msg: string, span: Span): ParseError {.inline.} =
   initError(peTypeMissingRequired, span, msg)
 
+func enumMismatchErrAt*(msg: string, span: Span): ParseError {.inline.} =
+  ## Routed by the codegen when the failing field has an enum type.
+  ## Lets a caller distinguish "value didn't match any enum member"
+  ## from "value had the wrong primitive type."
+  initError(peTypeEnumInvalid, span, msg)
+
+func discriminatorErrAt*(msg: string, span: Span): ParseError {.inline.} =
+  ## Routed by the codegen when the failing field is a variant's
+  ## discriminator. The structural shape of `target` is now wrong;
+  ## callers may want to retry, fall back, or surface specifically
+  ## "we couldn't tell which variant this was."
+  initError(peTypeDiscriminatorBad, span, msg)
+
 # Each primitive returns a (success, error) pair to keep call sites
 # concise. Error message becomes the `hint` field on the eventual
 # ParseError.
@@ -238,20 +251,22 @@ type
     typeNode: NimNode       ## the field's type AST
     defaultExpr: NimNode    ## `nil` if none
     argIndex: int           ## position among `fkArg` fields
-
-proc kdlNodeName*(typ: typedesc): string =
-  ## Runtime helper to read the type-level `kdlNode` pragma. Returns the
-  ## type name lowercased if absent. Implemented at compile time via the
-  ## sibling macro; see `kdlNodeNameOf` below.
-  ##
-  ## This stub exists so untyped contexts can refer to the symbol; the
-  ## real value comes from compile-time resolution in `parse[T]`.
-  ""  # never called; macros resolve at compile time
+    typeIsEnum: bool        ## true ⇒ route decode failures to
+                            ## peTypeEnumInvalid rather than the
+                            ## generic peTypeMismatch; lets callers
+                            ## branch on the failure mode
+    isDiscriminator: bool   ## true for the variant discriminator
+                            ## field ⇒ peTypeDiscriminatorBad instead
+                            ## of peTypeEnumInvalid (discriminator
+                            ## failure is more severe — the variant
+                            ## is fundamentally the wrong shape)
 
 proc fieldKindFromPragmas(prag: NimNode): FieldKind =
-  ## Walk a field's pragma list and return its FieldKind. Default is
-  ## fkAttr for primitives, fkChild for nested objects; callers override
-  ## this when no explicit pragma is present.
+  ## Walk a field's pragma list and return its FieldKind from explicit
+  ## `{.kdlArg.}` / `{.kdlAttr.}` / `{.kdlChild.}` / `{.kdlSkip.}` pragmas.
+  ## When no pragma is present, returns `fkAttr` as a placeholder; the
+  ## caller (`reflectField`) then promotes that to `fkChild` for nested
+  ## object / seq fields based on the field's type.
   for p in prag:
     let name =
       case p.kind
@@ -279,6 +294,20 @@ proc typeNodeIsSeq(t: NimNode): bool =
   ## True if `t` is `seq[T]` for some T. Detected at the syntactic level
   ## because `seq` is the only generic we special-case for fkChild default.
   t.kind == nnkBracketExpr and t.len >= 1 and (($t[0]) == "seq")
+
+proc typeNodeIsEnum(t: NimNode): bool =
+  ## True if `t` resolves to an `nnkEnumTy`. Routes decode failures
+  ## to `peTypeEnumInvalid` (and discriminator failures to
+  ## `peTypeDiscriminatorBad`) so callers can branch on the specific
+  ## failure mode.
+  if typeNodeIsSeq(t): return false
+  let impl =
+    try: t.getTypeImpl
+    except CatchableError: return false
+  case impl.kind
+  of nnkEnumTy: true
+  of nnkDistinctTy: impl[0].kind == nnkEnumTy
+  else: false
 
 proc typeNodeIsObject(t: NimNode): bool =
   ## Resolve the type and inspect its actual `nnkObjectTy` / primitive /
@@ -352,7 +381,8 @@ proc parseIdentDefs(identDefs: NimNode, argCursor: var int):
     let kdlName = kdlNameFromPragmas(prag, nimName.toLowerAscii)
     var spec = FieldSpec(nimName: nimName, kdlName: kdlName,
                          kind: kind, typeNode: typeNode,
-                         defaultExpr: defaultExpr)
+                         defaultExpr: defaultExpr,
+                         typeIsEnum: typeNodeIsEnum(typeNode))
     if kind == fkArg:
       spec.argIndex = argCursor
       inc argCursor
@@ -400,7 +430,8 @@ proc collectShape*(recList: NimNode): TypeShape =
       let discFields = parseIdentDefs(discDefs, argCursor)
       doAssert discFields.len == 1,
         "discriminator must be a single field"
-      let discSpec = discFields[0]
+      var discSpec = discFields[0]
+      discSpec.isDiscriminator = true   # routes failures to peTypeDiscriminatorBad
       if discSpec.kind notin {fkArg, fkAttr}:
         error("deriveDecode: variant discriminator '" & discSpec.nimName &
               "' must declare its KDL position with an explicit " &
@@ -477,6 +508,15 @@ proc extractNodeName(typeSym: NimNode): string =
 #     enclosing proc. No accumulator; per the un-hedged C3 design.
 # ---------------------------------------------------------------------------
 
+proc mismatchEmitter(f: FieldSpec): NimNode =
+  ## Pick the right ParseError-construction helper based on field shape:
+  ## - discriminator → peTypeDiscriminatorBad (variant shape is wrong)
+  ## - enum field → peTypeEnumInvalid (string didn't match any member)
+  ## - everything else → peTypeMismatch (wrong primitive type)
+  if f.isDiscriminator: ident("discriminatorErrAt")
+  elif f.typeIsEnum:    ident("enumMismatchErrAt")
+  else:                 ident("mismatchErrAt")
+
 proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     NimNode =
   let idxLit = newLit(f.argIndex)
@@ -487,6 +527,7 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     "missing required positional arg " & $f.argIndex &
     " ('" & f.kdlName & "')")
   let span = quote do: `nodeIdent`.span
+  let mEmit = mismatchEmitter(f)
   let absentBranch =
     if f.defaultExpr.kind == nnkEmpty:
       quote do:
@@ -498,7 +539,7 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
       if not kdlDecodeValue(`targetAccess`,
                             `nodeIdent`.findArg(`idxLit`),
                             `docIdent`):
-        return err[void, ParseError](mismatchErrAt(`mismatchMsg`, `span`))
+        return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
     else:
       `absentBranch`
 
@@ -509,6 +550,7 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
   let mismatchMsg = newLit("type mismatch on property '" & f.kdlName & "'")
   let missingMsg = newLit("missing required property '" & f.kdlName & "'")
   let span = quote do: `nodeIdent`.span
+  let mEmit = mismatchEmitter(f)
   let absentBranch =
     if f.defaultExpr.kind == nnkEmpty:
       quote do:
@@ -521,7 +563,7 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
       if not kdlDecodeValue(`targetAccess`,
                             `nodeIdent`.findProp(`keyIdent`),
                             `docIdent`):
-        return err[void, ParseError](mismatchErrAt(`mismatchMsg`, `span`))
+        return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
     else:
       `absentBranch`
 
@@ -543,7 +585,20 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
           return err[void, ParseError](`recurseRes`.getErr)
         `targetAccess`.add(`elemSym`)
   else:
+    # Scalar kdlChild. Required-vs-optional follows the same rule as
+    # fkArg / fkAttr: a field with no default value (and no kdlSkip)
+    # is required, so an absent child surfaces peTypeMissingRequired
+    # rather than silently leaving the field at default(T).
     let recurseRes = genSym(nskLet, "recurseRes")
+    let missingMsg = newLit(
+      "missing required child node '" & f.kdlName & "'")
+    let span = quote do: `nodeIdent`.span
+    let absentBranch =
+      if f.defaultExpr.kind == nnkEmpty:
+        quote do:
+          return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
+      else:
+        newEmptyNode()
     quote do:
       let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
       if `nodeIdent`.hasChild(`nameIdent`):
@@ -552,6 +607,8 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
                                          `docIdent`)
         if `recurseRes`.isErr:
           return err[void, ParseError](`recurseRes`.getErr)
+      else:
+        `absentBranch`
 
 proc emitFieldDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     NimNode =
@@ -691,7 +748,8 @@ macro deriveDecode*(typ: typedesc): untyped =
   let decodeProc = quote do:
     proc kdlDecodeImpl*(`tgtIdent`: var `typ`;
                        `nodeIdent`: KdlNode;
-                       `docIdent`: var KdlDoc): Result[void, ParseError] =
+                       `docIdent`: var KdlDoc): Result[void, ParseError]
+        {.noSideEffect.} =
       `stmts`
 
   result = newStmtList(nodeNameProc, decodeProc)
@@ -733,9 +791,13 @@ macro embedAux*(T: typed; path, callerFile: static[string]): untyped =
   ## `callerFile` is the absolute path of the .nim file at the call site;
   ## the template fills it via `instantiationInfo`.
   ##
-  ## Emits a `const`-evaluated decode call. The whole parse+decode chain
-  ## runs in Nim's VM at compile time — no module-init parse cost, and
-  ## a malformed file produces a build error with the parse diagnostic.
+  ## Emits a `const`-evaluated decode call. The parse+decode chain runs
+  ## in Nim's VM when invoked in a `const` context (which `embed[T]`'s
+  ## `compileTimeDecoded` binding forces); a malformed file then surfaces
+  ## as a compile-time error carrying the parse diagnostic. The decoded
+  ## `Result` is still copied into a runtime location at module init —
+  ## the win is moving parse work to build time, not eliminating module
+  ## init entirely.
   let resolved =
     if isAbsolute(path): path
     else: callerFile.parentDir / path

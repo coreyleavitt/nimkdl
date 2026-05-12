@@ -107,10 +107,15 @@ suite "codegen: nested child node":
       check value.label == "x"
       check value.inner.value == 7
 
-  test "missing child stays at default":
-    parseOk[WithChild]("outer label=\"x\""):
-      check value.label == "x"
-      check value.inner.value == 0
+  test "missing required child surfaces as Err (R2-H1)":
+    # WithChild.inner has no default → required. Earlier behavior
+    # silently set inner to default(Inner); after R2-H1 we emit
+    # peTypeMissingRequired.
+    let r = decode[WithChild]("outer label=\"x\"")
+    check r.isErr
+    if r.isErr:
+      check r.getErr.code == peTypeMissingRequired
+      check "inner" in r.getErr.hint
 
 suite "codegen: seq[T] child":
   test "multiple inner nodes accumulate":

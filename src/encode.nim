@@ -151,7 +151,7 @@ func emitEntry(e: KdlEntry, interner: Interner): string =
 # Node emission
 # ---------------------------------------------------------------------------
 
-proc emitNode(n: KdlNode, interner: Interner,
+func emitNode(n: KdlNode, interner: Interner,
               mode: EncodeMode, indent: int): string =
   let pad = (if mode == emPretty: PrettyIndent.repeat(indent) else: "")
   let annoPrefix =
@@ -182,7 +182,7 @@ proc emitNode(n: KdlNode, interner: Interner,
 # Document emission
 # ---------------------------------------------------------------------------
 
-proc encode*(doc: KdlDoc, mode = emPretty): string =
+func encode*(doc: KdlDoc, mode = emPretty): string =
   ## Render `doc` to canonical KDL v2 text.
   case mode
   of emPretty:

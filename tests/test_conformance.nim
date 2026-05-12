@@ -144,14 +144,18 @@ suite "KDL v2 conformance corpus":
 
     echo "conformance: ", pass, " pass, ", fail, " fail, ",
          skip, " skip (of ", inputs.len, " cases)"
-    # Dump the complete failure list to a project-relative path so it's
-    # visible on the host (Docker mounts the project dir).
+    # Failure log lives at a project-relative path (Docker mounts the
+    # project dir, so the host sees it). Write unconditionally — a
+    # stale file from an earlier failing run would otherwise mislead
+    # the developer after a green run.
     let dumpPath = currentSourcePath.parentDir / ".last-conformance-failures.log"
     var buf = ""
     for r in firstFailures:
       buf.add(r.name & " | " & r.reason & "\n")
+    if buf.len == 0:
+      buf = "(no failures)\n"
+    writeFile(dumpPath, buf)
     if firstFailures.len > 0:
-      writeFile(dumpPath, buf)
       echo "  (full failure list at ", dumpPath, ")"
     for r in firstFailures:
       echo "  FAIL ", r.name, " — ", r.reason

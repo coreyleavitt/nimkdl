@@ -53,13 +53,11 @@ Every other config-language query system (JSON Path, jq, CUE, KQL, …) silently
 - Parser: documents, nodes (incl. quoted/raw-string names), entries (positional args + properties with last-write-wins on repeats), nested children, type annotations on nodes/values/property-values, slashdash on nodes/entries/children-blocks.
 - Encoder: canonical form — bare-emit identifiers when safe (with reserved-bareword quoting), hex/oct/bin → decimal, underscore-stripping, `#inf`/`#-inf`/`#nan` keyword form, minimal-escape strings, type-annotation preservation. Pretty (4-space indent) + compact modes.
 
-Conformance: **284 / 338** of the [kdl-org/kdl test corpus](https://github.com/kdl-org/kdl/tree/main/tests/test_cases) passes (vendored at `tests/conformance/`). 54 cases skipped with documented v0.2 reasons in `tests/conformance/skips.txt`:
+Conformance: **314 / 338** of the [kdl-org/kdl test corpus](https://github.com/kdl-org/kdl/tree/main/tests/test_cases) passes (vendored at `tests/conformance/`). 24 cases skipped with documented v0.2 reasons in `tests/conformance/skips.txt`:
 
 - Full Unicode bare-ident charset
-- Unicode bidi-control rejection
 - Tighter number-lexer rejection of malformed forms (`1e`, `.0`, `1_`, etc.)
 - Hex literals that exceed int64 (deferred until kvBigInt variant)
-- Slashdash + comment / multi-newline interleaving polish
 - Multi-line string corner cases (escape interactions with closing-line indent)
 - Specific spec corners (BOM-mid-file rejection, v1 legacy raw-string rejection, etc.)
 

@@ -520,30 +520,20 @@ proc interpRule*(s: var InterpState, ruleName: string, depth: int):
 # rule. Hand-coded — recognition is data-driven, but semantics still need
 # human-authored mapping.
 
-proc treeFlatten(n: ParseNode, acc: var seq[ParseNode]) =
-  acc.add(n)
-  for c in n.children: treeFlatten(c, acc)
-
-proc toSpan(s: Slice[int], toks: seq[Token]): Span =
-  ## Best-effort span across a token range.
-  if toks.len == 0 or s.a >= toks.len: return pointSpan(StartPosition)
-  let startTok = toks[max(0, s.a)]
-  let endTok = toks[min(toks.len - 1, max(s.a, s.b - 1))]
+proc toSpan(consumed: Slice[int], toks: seq[Token]): Span =
+  ## Span covering the token range a ParseNode consumed. Used by
+  ## buildNode / buildEntry to produce real positional diagnostics
+  ## (rather than the StartPosition-everywhere placeholder).
+  if toks.len == 0 or consumed.a >= toks.len:
+    return pointSpan(StartPosition)
+  let startTok = toks[max(0, consumed.a)]
+  let endTok = toks[min(toks.len - 1, max(consumed.a, consumed.b - 1))]
   initSpan(startTok.span.start, endTok.span.finish)
 
-proc findFirst(n: ParseNode, ruleName: string): ParseNode =
-  ## DFS for the first child match of a given rule. Returns nil if absent.
-  for c in n.children:
-    if c.ruleName == ruleName: return c
-    let deeper = findFirst(c, ruleName)
-    if deeper != nil: return deeper
-  return nil
-
-proc findAll(n: ParseNode, ruleName: string): seq[ParseNode] =
-  ## All immediate-or-descendant matches of `ruleName` within `n`.
-  for c in n.children:
-    if c.ruleName == ruleName: result.add(c)
-    else: result.add(findAll(c, ruleName))
+# treeFlatten / findFirst / findAll were dead-by-refactor when buildXxx
+# moved to the scope-respecting findImmediate / findImmediateAll family
+# in R1 (the unscoped variants picked up matches from nested rule
+# scopes — see R1 grilling on H8). Deleted in R2.
 
 proc collectTokens(n: ParseNode): seq[Token] =
   result.add(n.tokens)
@@ -587,12 +577,12 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc,
     let toks = collectTokens(typeAnno)
     if toks.len >= 3:
       anno = resolveName(@[toks[1]], doc)
+  # The grammar enforces `value := opt(typeAnno) rawValue`, so a value
+  # match always has a non-empty rawValue child. No defensive paths —
+  # if the invariant ever breaks, an out-of-bounds access here is the
+  # right way to surface it (loud bug, not silent null).
   let rawNode = findImmediate(valueMatch, "rawValue")
-  if rawNode == nil:
-    return newNullValue()
   let toks = collectTokens(rawNode)
-  if toks.len == 0:
-    return newNullValue()
   let v = toks[0]
   case v.kind
   of tkString:
@@ -630,10 +620,15 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc,
   result.typeAnnotation = anno
 
 proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc,
+                tokens: seq[Token],
                 errs: var seq[ParseError]): KdlEntry =
   ## Build an entry. Grammar:
   ##   entry := opt(slashdash) (property | value)
   ## So look for a property first; absence means it's an argument-value.
+  ## `tokens` is the original token stream — used to compute real spans
+  ## on the resulting entry (rather than the StartPosition placeholder
+  ## the build* procs used to emit).
+  let entrySpan = toSpan(entryMatch.consumed, tokens)
   let prop = findImmediate(entryMatch, "property")
   if prop != nil:
     let nameMatch = findImmediate(prop, "name")
@@ -644,16 +639,22 @@ proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc,
     let v =
       if valueMatch != nil: buildValue(valueMatch, doc, errs)
       else: newNullValue()
-    return KdlEntry(kind: keProperty, propName: key, propValue: v)
+    return KdlEntry(kind: keProperty, propName: key, propValue: v,
+                    span: entrySpan)
   let valueMatch = findImmediate(entryMatch, "value")
   if valueMatch != nil:
-    return newArgument(buildValue(valueMatch, doc, errs))
-  return newArgument(newNullValue())
+    return KdlEntry(kind: keArgument,
+                    argValue: buildValue(valueMatch, doc, errs),
+                    span: entrySpan)
+  return KdlEntry(kind: keArgument, argValue: newNullValue(),
+                  span: entrySpan)
 
 proc buildNode(node: ParseNode, doc: var KdlDoc,
+               tokens: seq[Token],
                errs: var seq[ParseError]): KdlNode
 
 proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc,
+                        tokens: seq[Token],
                         errs: var seq[ParseError]): seq[KdlNode] =
   ## Walk the `children` rule match. Grammar:
   ##   children := '{' star(newline) star(seq(opt(slashdashPrefix),
@@ -669,10 +670,11 @@ proc buildChildrenBlock(childrenMatch: ParseNode, doc: var KdlDoc,
     if slashdashOpt.children.len > 0:
       continue  # /-prefixed node — semantically absent
     let nodeMatch = iter.children[1]
-    result.add(buildNode(nodeMatch, doc, errs))
+    result.add(buildNode(nodeMatch, doc, tokens, errs))
 
 proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode] =
-  ## Like `findAll` but only walks structural (unstamped) descendants.
+  ## Like the deleted `findAll` but only walks structural (unstamped)
+  ## descendants — stops at named-rule scope boundaries.
   for c in n.children:
     if c.ruleName == ruleName:
       result.add(c)
@@ -680,6 +682,7 @@ proc findImmediateAll(n: ParseNode, ruleName: string): seq[ParseNode] =
       result.add(findImmediateAll(c, ruleName))
 
 proc buildNode(node: ParseNode, doc: var KdlDoc,
+               tokens: seq[Token],
                errs: var seq[ParseError]): KdlNode =
   ## Build a KdlNode from a `node` rule match. Grammar:
   ##   node := opt(typeAnno) name star(entry) opt(children) terminator
@@ -697,13 +700,13 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
 
   result = KdlNode(name: name, typeAnnotation: anno,
                    entries: @[], children: @[],
-                   span: pointSpan(StartPosition))
+                   span: toSpan(node.consumed, tokens))
 
   for entryMatch in findImmediateAll(node, "entry"):
     let etoks = collectTokens(entryMatch)
     if etoks.len > 0 and etoks[0].kind == tkSlashDash:
       continue  # slashdashed entry
-    let newEntry = buildEntry(entryMatch, doc, errs)
+    let newEntry = buildEntry(entryMatch, doc, tokens, errs)
     if newEntry.kind == keProperty:
       # KDL v2: repeated property keys → last-write-wins. Drop any
       # earlier entry with the same key before appending.
@@ -721,9 +724,10 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
   # is dropped here as a no-op).
   let childrenMatch = findImmediate(node, "children")
   if childrenMatch != nil:
-    result.children = buildChildrenBlock(childrenMatch, doc, errs)
+    result.children = buildChildrenBlock(childrenMatch, doc, tokens, errs)
 
 proc buildDoc(root: ParseNode, doc: var KdlDoc,
+              tokens: seq[Token],
               errs: var seq[ParseError]) =
   ## Walk the `document` rule match. Grammar:
   ##   document := star(newline) star(seq(opt(slashdash), node, star(newline)))
@@ -737,7 +741,7 @@ proc buildDoc(root: ParseNode, doc: var KdlDoc,
     let isSkipped = slashdashOpt.children.len > 0  # opt matched ⇒ skipped
     if isSkipped: continue
     let nodeMatch = iter.children[1]
-    doc.nodes.add(buildNode(nodeMatch, doc, errs))
+    doc.nodes.add(buildNode(nodeMatch, doc, tokens, errs))
 
 # ---------------------------------------------------------------------------
 # Semantic validation pass on the built KdlDoc
@@ -789,7 +793,7 @@ proc referenceInterpret*(source: string, sourcePath = "<input>"):
     return err[KdlDoc, ParseError](
       initError(peParseUnexpected, span, "trailing tokens after document"))
   var buildErrs: seq[ParseError] = @[]
-  buildDoc(res.get, doc, buildErrs)
+  buildDoc(res.get, doc, tokens, buildErrs)
   if buildErrs.len > 0:
     return err[KdlDoc, ParseError](buildErrs[0])
   let semCheck = checkNoReservedPropertyKeys(doc.nodes, doc)

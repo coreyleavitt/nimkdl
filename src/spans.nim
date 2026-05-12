@@ -70,7 +70,7 @@ type
     ## dep we don't need elsewhere.
     ##
     ## `Result[void, E]` is a valid specialization: the `rkOk` branch has
-    ## no payload, only the discriminator. Use `okUnit[E]()` to construct.
+    ## no payload, only the discriminator. Use `ok(void, E)` to construct.
     case kind*: ResultKind
     of rkOk:
       when T isnot void:
@@ -152,7 +152,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peTypeDiscriminatorBad: "unrecognized variant discriminator"
   of peOther:                "parse error"
 
-proc lineSlice(source: string, line: int): string =
+func lineSlice(source: string, line: int): string =
   ## Extract the Nth (1-based) line of `source`, without the terminator.
   ## Returns empty string when line is out of range — caller decides
   ## whether to render anything in that case.
