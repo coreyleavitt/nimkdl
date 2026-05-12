@@ -785,6 +785,31 @@ proc buildDoc(root: ParseNode, doc: var KdlDoc,
 # below is a pure walk over the doc and returns `Result[void, ParseError]`
 # consistent with the rest of the parse boundary.
 
+proc checkTokenAdjacency(tokens: seq[Token]): Result[void, ParseError] =
+  ## KDL v2 requires whitespace before every entry-start token (string,
+  ## raw string, number, keyword, bare identifier). Exemptions: when the
+  ## previous token is `=` (property value follows), `(` (type-anno
+  ## name follows), `)` (annotated value follows), or `/-` (the entry is
+  ## semantically absent but still a fresh phrase). The lexer stamps
+  ## `precededByWs` for us; this walk enforces the rule.
+  ##
+  ## See corpus `zero_space_before_*_fail.kdl`.
+  const entryStartKinds = {tkString, tkRawString, tkNumber, tkKeyword, tkIdent}
+  const exemptPrev = {tkEquals, tkLParen, tkRParen, tkSlashDash, tkLBrace}
+    ## `{` and `;` start a fresh node context where adjacency doesn't
+    ## apply; `;` is already handled because the lexer sets `wsPending`
+    ## after emitting a separator, so the following token's
+    ## `precededByWs` is true and never enters this check.
+  for i in 0 ..< tokens.len:
+    let cur = tokens[i]
+    if cur.kind notin entryStartKinds: continue
+    if cur.precededByWs: continue
+    if i == 0: continue  # start of stream
+    if tokens[i-1].kind in exemptPrev: continue
+    return err[void, ParseError](initError(peParseExpected, cur.span,
+      "whitespace required before this entry"))
+  ok(void, ParseError)
+
 proc checkNoReservedKeywords(nodes: seq[KdlNode], doc: KdlDoc):
     Result[void, ParseError] =
   ## KDL v2 forbids the keyword-shaped barewords (`ReservedBarewords`) in
@@ -821,6 +846,9 @@ proc referenceInterpret*(source: string, sourcePath = "<input>"):
   for t in tokens:
     if t.kind == tkError:
       return err[KdlDoc, ParseError](t.error)
+  let adjCheck = checkTokenAdjacency(tokens)
+  if adjCheck.isErr:
+    return err[KdlDoc, ParseError](adjCheck.getErr)
   var s = InterpState(tokens: tokens, pos: 0,
                       grammar: KdlV2Grammar, haveError: false)
   let res = interpRule(s, KdlV2Grammar.startRule, 0)

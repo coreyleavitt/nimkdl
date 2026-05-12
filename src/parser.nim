@@ -360,6 +360,13 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
       return err[KdlNode, ParseError](initError(peParseUnexpected,
         p.peek.span,
         "entries are not permitted after a children block"))
+    # Token-adjacency: spec corpus `zero_space_before_*_fail` requires
+    # whitespace (or a newline / `;` / `/-`) before every entry-start
+    # token. The lexer stamps `precededByWs` for us.
+    if not skip and not p.peek.precededByWs:
+      return err[KdlNode, ParseError](initError(peParseExpected,
+        p.peek.span,
+        "whitespace required before this entry"))
     let eRes = p.parseEntry()
     if eRes.isErr: return err[KdlNode, ParseError](eRes.getErr)
     if not skip:

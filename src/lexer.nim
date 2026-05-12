@@ -82,6 +82,12 @@ type
 
   Token* = object
     span*: Span
+    precededByWs*: bool
+      ## True if any whitespace, comment, newline-token, semicolon, or
+      ## line-continuation preceded this token (or it is the first token
+      ## in the stream). Set by the lexer; consumed by the parser at
+      ## entry-position sites to enforce the v2 spec's token-adjacency
+      ## rules (corpus `zero_space_before_*_fail`).
     case kind*: TokenKind
     of tkIdent:     ident*: InternedStr
     of tkString:    strVal*: string
@@ -103,6 +109,10 @@ type
     source: string
     pos: Position
     tokens: seq[Token]
+    wsPending: bool
+      ## True if the next emitted token should be marked precededByWs.
+      ## Initial state and after consuming any whitespace/comment/newline/
+      ## semicolon/line-continuation/slashdash. Cleared on each emit.
 
 # ---------------------------------------------------------------------------
 # Char classifiers
@@ -269,7 +279,17 @@ func isNewline(ch: char): bool {.inline.} =
 # ---------------------------------------------------------------------------
 
 proc emit(lx: var Lexer, tok: sink Token) =
-  lx.tokens.add(tok)
+  var t = tok
+  t.precededByWs = lx.wsPending
+  lx.tokens.add(t)
+  # Structural tokens that semantically end a "phrase" implicitly grant
+  # the next token wsPending. tkNewline, tkSemicolon, and tkSlashDash all
+  # act like whitespace as far as entry-adjacency is concerned.
+  case t.kind
+  of tkNewline, tkSemicolon, tkSlashDash:
+    lx.wsPending = true
+  else:
+    lx.wsPending = false
 
 proc emitError(lx: var Lexer, code: ParseErrorCode, span: Span, hint = "") =
   lx.emit(Token(kind: tkError, span: span,
@@ -347,6 +367,9 @@ proc skipWhitespaceAndComments(lx: var Lexer) =
   ## Consume runs of whitespace + comments + line continuations. Stops
   ## at the first significant byte (or EOF). Newlines are NOT consumed
   ## here — they're significant tokens to KDL's grammar.
+  ## Sets `wsPending` so the next emitted token records that whitespace
+  ## preceded it (token-adjacency enforcement at the parser layer).
+  let entryPos = lx.pos.offset
   while not lx.atEof:
     let ch = lx.peek
     if isAsciiWhitespace(ch):
@@ -359,9 +382,12 @@ proc skipWhitespaceAndComments(lx: var Lexer) =
       if not lx.skipBlockComment(): return
     elif ch == '\\':
       if not lx.skipLineContinuation():
+        if lx.pos.offset > entryPos: lx.wsPending = true
         return  # bare `\` — let caller handle as error
     else:
+      if lx.pos.offset > entryPos: lx.wsPending = true
       return
+  if lx.pos.offset > entryPos: lx.wsPending = true
 
 # ---------------------------------------------------------------------------
 # String escape decoding
@@ -1047,7 +1073,8 @@ proc lex*(source: string, interner: var Interner): seq[Token]
   ## procs that actually intern (just `lexBareIdent`). No `ptr` field in
   ## the Lexer struct — keeps the whole tokenizer VM-callable so the
   ## parser chain runs at compile time via `embed[T]`.
-  var lx = Lexer(source: source, pos: StartPosition, tokens: @[])
+  var lx = Lexer(source: source, pos: StartPosition, tokens: @[],
+                 wsPending: true)  # start of input counts as preceded by ws
   # Reject malformed UTF-8 up front — checked once over the whole input
   # so downstream lexing can assume byte-by-byte iteration is safe.
   # Pairs with `containsBidiControl` to prevent denylist bypass via

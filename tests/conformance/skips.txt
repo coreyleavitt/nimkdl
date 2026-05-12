@@ -71,7 +71,3 @@ multiline_string_wrapped_binary.kdl | F-multiline-edge — v0.2
 #
 # Remaining:
 parens_in_bare_id_fail.kdl        | G-bare-ident-edge — bare ident with `(` inside; v0.2
-zero_space_before_first_arg_fail.kdl | G-token-adjacency — must require whitespace between node-name and first entry; v0.2
-zero_space_before_prop_fail.kdl   | G-token-adjacency — must require whitespace between entries; v0.2
-zero_space_before_second_arg_fail.kdl | G-token-adjacency — must require whitespace; v0.2
-zero_space_before_slashdash_children.kdl | G-token-adjacency — must require whitespace before /-; v0.2

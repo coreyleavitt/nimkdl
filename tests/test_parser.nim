@@ -195,6 +195,34 @@ suite "parser: slashdash":
       check n.children.len == 1
       check nameOf(doc, n.children[0]) == "three"
 
+  test "slashdashed children block may abut preceding entry (no ws)":
+    # Spec corpus zero_space_before_slashdash_children.kdl: `/-` (and the
+    # `{` block it introduces) does not require whitespace before it.
+    parseOk("node \"string\"/-{}"):
+      check doc.nodes.len == 1
+      check doc.nodes[0].entries.len == 1
+      check doc.nodes[0].children.len == 0
+
+  test "slashdashed children block may abut preceding real children":
+    parseOk("node \"string\" {}/-{}"):
+      check doc.nodes.len == 1
+      check doc.nodes[0].entries.len == 1
+      check doc.nodes[0].children.len == 0  # real {} was empty
+
+suite "parser: token adjacency (G-token-adjacency)":
+  test "node name directly abutted by string entry is rejected":
+    # Spec corpus zero_space_before_first_arg_fail.kdl
+    parseErrCheck("node\"string\"", peParseExpected)
+
+  test "property value directly abutted by next property key is rejected":
+    # Spec corpus zero_space_before_prop_fail.kdl
+    parseErrCheck("node foo=\"value\"bar=5", peParseExpected)
+
+  test "first entry directly abutted by next argument is rejected":
+    # Spec corpus zero_space_before_second_arg_fail.kdl
+    parseErrCheck("node \"string\"1", peParseExpected)
+
+suite "parser: residual slashdash entry-position check":
   test "entry after slashdashed children block is rejected":
     # Spec corpus slashdash_child_block_before_entry_err_fail.kdl: once
     # any children block (real or slashdashed) is consumed, no more
