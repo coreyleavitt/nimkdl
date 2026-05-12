@@ -695,22 +695,45 @@ proc lexRegularOrMultiline(lx: var Lexer) =
           return
         var dedented = ""
         # Intermediate content = lines[0 .. ^2]; lines[^1] is the closing
-        # prefix consumed above. The opening-`"""` newline was eaten by
-        # advanceNewline() before the read loop, so rawBuf has no
-        # synthetic leading empty line.
+        # prefix consumed above. Per spec: a line that contains ONLY
+        # whitespace is exempt from the prefix-match requirement; it
+        # contributes whatever bytes remain after stripping the longest
+        # common prefix shared with `closingPrefix`. A non-whitespace
+        # intermediate line MUST start with the full closing prefix.
         for i in 0 ..< lines.len - 1:
           if i > 0: dedented.add('\n')
           let lineStr = lines[i]
           if lineStr.len == 0:
-            # Whitespace-only line — keep empty regardless of indent.
             discard
           elif lineStr.startsWith(closingPrefix):
             dedented.add(lineStr[closingPrefix.len .. ^1])
           else:
-            lx.emitError(peLexUnterminatedString, initSpan(start, lx.pos),
-                         "line content does not start with the closing " &
-                         "indentation prefix")
-            return
+            # Probe: is `lineStr` all-whitespace?
+            var wsOnly = true
+            var k = 0
+            while k < lineStr.len:
+              let b = uint8(lineStr[k])
+              if b < 0x80'u8:
+                if lineStr[k] != ' ' and lineStr[k] != '\t':
+                  wsOnly = false; break
+                inc k
+              else:
+                let (cp, w) = decodeUtf8At(lineStr, k)
+                if cp < 0 or not isUnicodeWhitespace(cp):
+                  wsOnly = false; break
+                inc k, w
+            if not wsOnly:
+              lx.emitError(peLexUnterminatedString, initSpan(start, lx.pos),
+                           "line content does not start with the closing " &
+                           "indentation prefix")
+              return
+            # Whitespace-only line: strip the longest byte-wise common
+            # prefix with closingPrefix and contribute the rest.
+            var c = 0
+            while c < lineStr.len and c < closingPrefix.len and
+                  lineStr[c] == closingPrefix[c]:
+              inc c
+            dedented.add(lineStr[c .. ^1])
         # Phase 3: resolve other backslash escapes on the dedented buffer.
         var decoded = ""
         var j = 0
@@ -890,11 +913,22 @@ proc lexRawString(lx: var Lexer) =
           for _ in 0 ..< 3 + hashCount:
             lx.advanceOne()
           let closingPrefix = rawLines[^1]
-          var valid = true
-          for c in closingPrefix:
-            if not (c == ' ' or c == '\t'):
-              valid = false; break
-          if not valid:
+          # Same Unicode-whitespace + whitespace-only-line rules as the
+          # regular `"""…"""` path; see lexRegularOrMultiline.
+          var ci = 0
+          var prefixOk = true
+          while ci < closingPrefix.len:
+            let b = uint8(closingPrefix[ci])
+            if b < 0x80'u8:
+              if closingPrefix[ci] != ' ' and closingPrefix[ci] != '\t':
+                prefixOk = false; break
+              inc ci
+            else:
+              let (cp, w) = decodeUtf8At(closingPrefix, ci)
+              if cp < 0 or not isUnicodeWhitespace(cp):
+                prefixOk = false; break
+              inc ci, w
+          if not prefixOk:
             let span = initSpan(start, lx.pos)
             lx.emitError(peLexUnterminatedString, span,
                          "closing #\"\"\"… must be on its own line")
@@ -903,15 +937,34 @@ proc lexRawString(lx: var Lexer) =
           for j in 0 ..< rawLines.len - 1:
             let line = rawLines[j]
             if j > 0: decoded.add('\n')
-            if line.startsWith(closingPrefix):
-              decoded.add(line[closingPrefix.len .. ^1])
-            elif line.len == 0:
+            if line.len == 0:
               discard
+            elif line.startsWith(closingPrefix):
+              decoded.add(line[closingPrefix.len .. ^1])
             else:
-              let span = initSpan(start, lx.pos)
-              lx.emitError(peLexUnterminatedString, span,
-                           "line content has less indent than closing #\"\"\"…")
-              return
+              var wsOnly = true
+              var k = 0
+              while k < line.len:
+                let b = uint8(line[k])
+                if b < 0x80'u8:
+                  if line[k] != ' ' and line[k] != '\t':
+                    wsOnly = false; break
+                  inc k
+                else:
+                  let (cp, w) = decodeUtf8At(line, k)
+                  if cp < 0 or not isUnicodeWhitespace(cp):
+                    wsOnly = false; break
+                  inc k, w
+              if not wsOnly:
+                let span = initSpan(start, lx.pos)
+                lx.emitError(peLexUnterminatedString, span,
+                             "line content has less indent than closing #\"\"\"…")
+                return
+              var c2 = 0
+              while c2 < line.len and c2 < closingPrefix.len and
+                    line[c2] == closingPrefix[c2]:
+                inc c2
+              decoded.add(line[c2 .. ^1])
           lx.emit(Token(kind: tkRawString, rawVal: decoded,
                         span: initSpan(start, lx.pos)))
           return

@@ -48,13 +48,16 @@
 # closing line and indentation. Our common-case implementation passes;
 # these are edges.
 #
-# Remaining: whitespace-only-line semantics. Spec §multi-line-string:
-# intermediate lines containing only whitespace are exempt from the
-# byte-for-byte prefix match (they need not start with the closing
-# prefix). Implementing this needs a "whitespace-only line" predicate
-# applied per-line during dedent, and a decision on what those lines
-# contribute to the output (likely empty after prefix strip).
-multiline_string_whitespace_only.kdl | F-multiline-edge — needs whitespace-only-line semantics in dedent pass; v0.2
+# Remaining: a single fixture exercising five multi-line strings with
+# exotic Unicode whitespace combinations (U+2001 EM QUAD, U+00A0 NBSP,
+# U+205F MMSP, U+3000 IDEOGRAPHIC SPACE etc.) AND raw multi-line
+# semantics interleaved. The whitespace-only-line predicate + Unicode
+# closing-prefix check both land via ebed48a/follow-on, so the input
+# now parses cleanly — but the produced KdlDoc doesn't equal the
+# corpus expected_kdl byte-for-byte (likely a contribution-of-
+# whitespace-only-line edge that doesn't fall out of the "longest
+# common prefix" rule we use). Defer to a focused trace.
+multiline_string_whitespace_only.kdl | F-multiline-edge — input parses, output differs from expected_kdl in a whitespace-only-line contribution; v0.2
 
 # ===========================================================================
 # Category G: Specific spec corners
