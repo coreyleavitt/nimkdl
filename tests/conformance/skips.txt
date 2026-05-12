@@ -72,7 +72,6 @@ multiline_string_wrapped_binary.kdl | F-multiline-edge — v0.2
 # CLOSED by H12 (BOM-mid-file rejection + v1 `r"..."` rejection in lexer).
 #
 # Remaining:
-eof_after_escape.kdl              | G-eof-after-bareword-escape — `\` at EOF; v0.2
 parens_in_bare_id_fail.kdl        | G-bare-ident-edge — bare ident with `(` inside; v0.2
 zero_space_before_first_arg_fail.kdl | G-token-adjacency — must require whitespace between node-name and first entry; v0.2
 zero_space_before_prop_fail.kdl   | G-token-adjacency — must require whitespace between entries; v0.2

@@ -52,6 +52,15 @@ suite "parser: empty + trivial":
     parseOk("a; b"):
       check doc.nodes.len == 2
 
+  test "trailing line-continuation at EOF parses cleanly":
+    # Spec corpus eof_after_escape.kdl: `node \<EOF>` (no newline).
+    # Line continuation at EOF is a valid terminator — an implicit empty
+    # line after the document. Equivalent to `node` followed by EOL.
+    parseOk("node \\"):
+      check doc.nodes.len == 1
+      check nameOf(doc, doc.nodes[0]) == "node"
+      check doc.nodes[0].entries.len == 0
+
 suite "parser: arguments":
   test "node with string argument":
     parseOk("rule \"compaction\""):

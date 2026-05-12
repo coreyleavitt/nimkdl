@@ -334,6 +334,11 @@ proc skipLineContinuation(lx: var Lexer): bool =
   if not lx.atEof and isNewline(lx.peek):
     lx.advanceNewline()
     return true
+  if lx.atEof:
+    # `\` at EOF (possibly after intervening whitespace/comments) — spec
+    # corpus `eof_after_escape.kdl` requires this to parse cleanly as if
+    # the continuation ended at an implicit final newline.
+    return true
   # Not a line continuation; rewind and let the caller error on `\`.
   lx.pos = save
   false
