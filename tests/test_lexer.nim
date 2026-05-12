@@ -1,10 +1,12 @@
 ## Tests for lexer.nim — exercise each token category, escape decoding,
 ## position tracking, and error recovery.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
+import ../src/ast
 import ../src/intern
 import ../src/lexer
+import ../src/parser
 import ../src/spans
 
 proc tokenize(src: string): seq[Token] =
@@ -226,6 +228,29 @@ suite "lexer: multi-line strings":
     let src = "\"\"\"\n  foo\n  bar\\\n  \"\"\""
     let t = tokenize(src)
     check tkError in t.kinds
+
+  test "whitespace-only intermediate lines contribute empty (F8)":
+    # multiline_string_whitespace_only.kdl. The fixture has 5 multi-line
+    # strings; the whitespace-only-line semantics rule says any
+    # intermediate line that contains only whitespace contributes the
+    # empty string (NOT its bytes-after-longest-common-prefix). Test
+    # via parse(), not raw tokenize, because the fixture file goes
+    # through the parser.
+    const path = currentSourcePath.parentDir &
+      "/conformance/test_cases/input/multiline_string_whitespace_only.kdl"
+    let src = readFile(path)
+    let res = parse(src)
+    check res.isOk
+    if res.isOk:
+      let doc = res.get
+      check doc.nodes.len == 1
+      let n = doc.nodes[0]
+      check n.entries.len == 5
+      check n.entries[0].argValue.strVal == ""
+      check n.entries[1].argValue.strVal == ""
+      check n.entries[2].argValue.strVal == ""
+      check n.entries[3].argValue.strVal == "\n\n    "
+      check n.entries[4].argValue.strVal == "\n"
 
   test "non-literal-whitespace prefix on intermediate line is error (F7)":
     # multiline_string_non_literal_prefix_fail — `\s` doesn't count as a
