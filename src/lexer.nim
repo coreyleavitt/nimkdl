@@ -88,10 +88,14 @@ type
     else:           discard
 
   Lexer = object
+    ## Lexer state during a `lex(source, interner)` call. The interner
+    ## is NOT a field — it's threaded as a `var Interner` parameter
+    ## through the few procs that intern. This keeps the Lexer
+    ## `ptr`-free so the whole tokenization can run in Nim's VM at
+    ## compile time (enables `embed[T]`'s real const evaluation).
     source: string
     pos: Position
     tokens: seq[Token]
-    interner: ptr Interner
 
 # ---------------------------------------------------------------------------
 # Char classifiers
@@ -799,7 +803,7 @@ proc lexNumber(lx: var Lexer) =
 # Identifiers + keywords
 # ---------------------------------------------------------------------------
 
-proc lexBareIdent(lx: var Lexer) =
+proc lexBareIdent(lx: var Lexer, interner: var Interner) =
   let start = lx.pos
   while not lx.atEof and isIdentCont(lx.peek):
     lx.advanceOne()
@@ -824,7 +828,7 @@ proc lexBareIdent(lx: var Lexer) =
                  "KDL v1 raw-string syntax `r\"...\"` is not valid in v2; " &
                  "use `#\"...\"#` instead")
     return
-  let handle = lx.interner[].intern(text)
+  let handle = interner.intern(text)
   lx.emit(Token(kind: tkIdent, ident: handle, span: span))
 
 proc lexKeyword(lx: var Lexer) =
@@ -860,7 +864,7 @@ proc lexKeyword(lx: var Lexer) =
 # Top-level loop
 # ---------------------------------------------------------------------------
 
-proc lexOne(lx: var Lexer) =
+proc lexOne(lx: var Lexer, interner: var Interner) =
   if lx.atEof:
     lx.emit(Token(kind: tkEof, span: pointSpan(lx.pos)))
     return
@@ -920,7 +924,7 @@ proc lexOne(lx: var Lexer) =
     if lx.peek(1) >= '0' and lx.peek(1) <= '9':
       lx.lexNumber()
     else:
-      lx.lexBareIdent()
+      lx.lexBareIdent(interner)
   else:
     # `.` followed by a digit looks like a number-without-int-prefix
     # (`.0`), which v2 forbids — emit as an error rather than letting
@@ -932,18 +936,23 @@ proc lexOne(lx: var Lexer) =
                    "number literals need an integer part before the '.'")
       return
     if isIdentStart(ch):
-      lx.lexBareIdent()
+      lx.lexBareIdent(interner)
     else:
       let s = lx.pos; lx.advanceOne()
       lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
                    "unexpected character '" & $ch & "'")
 
-proc lex*(source: string, interner: var Interner): seq[Token] =
+proc lex*(source: string, interner: var Interner): seq[Token]
+    {.noSideEffect.} =
   ## Tokenize `source`. Always returns a stream terminated by `tkEof`.
   ## Errors are surfaced as `tkError` tokens with embedded `ParseError`
   ## diagnostics; the parser handles re-sync.
-  var lx = Lexer(source: source, pos: StartPosition,
-                 tokens: @[], interner: addr interner)
+  ##
+  ## `interner` is threaded as a `var` parameter through the few internal
+  ## procs that actually intern (just `lexBareIdent`). No `ptr` field in
+  ## the Lexer struct — keeps the whole tokenizer VM-callable so the
+  ## parser chain runs at compile time via `embed[T]`.
+  var lx = Lexer(source: source, pos: StartPosition, tokens: @[])
   # Skip BOM (U+FEFF, encoded as EF BB BF) at start of input — per
   # KDL v2 spec it's silently consumed at position 0 but flagged as an
   # error if it appears later. We handle the start-of-input case here.
@@ -954,7 +963,7 @@ proc lex*(source: string, interner: var Interner): seq[Token] =
   while not lx.atEof:
     lx.skipWhitespaceAndComments()
     if lx.atEof: break
-    lx.lexOne()
+    lx.lexOne(interner)
   if lx.tokens.len == 0 or lx.tokens[^1].kind != tkEof:
     lx.emit(Token(kind: tkEof, span: pointSpan(lx.pos)))
   result = lx.tokens

@@ -66,14 +66,14 @@ func peek(p: Parser, ahead = 0): Token {.inline.} =
   else:
     Token(kind: tkEof, span: pointSpan(StartPosition))
 
-proc advance(p: var Parser): Token {.inline.} =
+proc advance(p: var Parser): Token {.inline, noSideEffect.} =
   result = p.tokens[p.cursor]
   inc p.cursor
 
-proc check(p: Parser, kind: TokenKind): bool {.inline.} =
+proc check(p: Parser, kind: TokenKind): bool {.inline, noSideEffect.} =
   p.peek.kind == kind
 
-proc skipNewlines(p: var Parser) =
+proc skipNewlines(p: var Parser) {.noSideEffect.} =
   while p.check(tkNewline):
     discard p.advance()
 
@@ -88,7 +88,7 @@ func parseErr(code: ParseErrorCode, span: Span, hint = ""): ParseError =
 # Value parsing
 # ---------------------------------------------------------------------------
 
-proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] =
+proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] {.noSideEffect.} =
   ## Consumes `(name)`. Name is a bare ident OR quoted string (incl. "").
   ## Caller has already confirmed the leading `(`.
   discard p.advance()  # consume `(`
@@ -108,7 +108,7 @@ proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] =
   discard p.advance()  # consume `)`
   ok[InternedStr, ParseError](handle)
 
-proc parseValue(p: var Parser): Result[KdlValue, ParseError] =
+proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
   ## Reads an optional type annotation prefix + a literal value.
   var anno = InvalidInterned
   if p.check(tkLParen):
@@ -171,7 +171,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] =
 # Entry parsing (argument vs property)
 # ---------------------------------------------------------------------------
 
-proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] =
+proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
   ## Entries are either properties (`ident = value`) or arguments (`value`).
   ## We can tell them apart by lookahead: `ident` followed by `=` is a
   ## property; anything else starting with a value (incl. a type-annotated
@@ -236,9 +236,9 @@ func canStartEntry(p: Parser): bool =
      p.peek(1).kind == tkEquals: return true
   false
 
-proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError]
+proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffect.}
 
-proc parseNode(p: var Parser): Result[KdlNode, ParseError] =
+proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   ## Parse a single node. Caller has skipped leading slashdash if any.
   if p.depth >= MaxParserDepth:
     return err[KdlNode, ParseError](parseErr(peParseDepthExceeded,
@@ -339,7 +339,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] =
   node.span = initSpan(startSpan.start, p.peek.span.start)
   ok[KdlNode, ParseError](node)
 
-proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] =
+proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffect.} =
   ## Parse `{ node* }`. Caller has confirmed the opening `{`.
   discard p.advance()  # consume `{`
   var nodes: seq[KdlNode] = @[]
@@ -364,7 +364,7 @@ proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] =
 # Document parsing
 # ---------------------------------------------------------------------------
 
-proc parseDocument(p: var Parser): Result[seq[KdlNode], ParseError] =
+proc parseDocument(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffect.} =
   var nodes: seq[KdlNode] = @[]
   p.skipNewlines()
   while not p.atEnd:
@@ -387,7 +387,7 @@ proc parseDocument(p: var Parser): Result[seq[KdlNode], ParseError] =
 # ---------------------------------------------------------------------------
 
 proc parse*(source: string, sourcePath = "<input>"):
-    Result[KdlDoc, ParseError] =
+    Result[KdlDoc, ParseError] {.noSideEffect.} =
   ## Parse `source` into a `KdlDoc`. Returns the first error encountered
   ## (lexer or parser). The doc owns its interner.
   var doc = newDoc(sourcePath)

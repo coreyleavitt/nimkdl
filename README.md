@@ -123,12 +123,21 @@ doAssert r.get.action.kind == "inject"
 
 ### Compile-time embedded builtins
 
+`embed[T]("path")` evaluates the entire `lex → parse → decode[T]` chain
+inside Nim's VM at compile time and emits a real `const`. **A parse
+error fails the build**, not the runtime. Zero module-init cost — the
+typed value is already in the binary's data segment.
+
 ```nim
-# rules/defaults.kdl ships in the binary via staticRead at compile time;
-# build fails if the file is missing or unreadable.
-let builtins = embed[seq[Rule]]("rules/defaults.kdl")
-doAssert builtins.isOk
+const builtins = embed[seq[Rule]]("rules/defaults.kdl")
+doAssert builtins.isOk    # always true at runtime — error would have
+                          # failed the build
 ```
+
+This works because every layer of the parser chain is `{.noSideEffect.}`
+and `ptr`-free. The lexer's interner is threaded as `var Interner` rather
+than stashed as a `ptr`; the parser holds its doc by value; `kdlDecodeImpl`
+returns `Result[void, ParseError]` with no mutable accumulators.
 
 ### Typed query — three styles
 

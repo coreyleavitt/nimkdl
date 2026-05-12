@@ -37,4 +37,5 @@ task test, "Run unit tests":
   exec cmd & " tests/test_embed.nim"
   exec cmd & " tests/test_path.nim"
   exec cmd & " tests/test_variant.nim"
+  exec cmd & " tests/test_h2_compiletime.nim"
   exec cmd & " tests/test_readme_examples.nim"

@@ -741,6 +741,10 @@ macro embedAux*(T: typed; path, callerFile: static[string]): untyped =
   ## here at compile time; the resulting bytes are embedded as a literal.
   ## `callerFile` is the absolute path of the .nim file at the call site;
   ## the template fills it via `instantiationInfo`.
+  ##
+  ## Emits a `const`-evaluated decode call. The whole parse+decode chain
+  ## runs in Nim's VM at compile time — no module-init parse cost, and
+  ## a malformed file produces a build error with the parse diagnostic.
   let resolved =
     if isAbsolute(path): path
     else: callerFile.parentDir / path
@@ -748,7 +752,8 @@ macro embedAux*(T: typed; path, callerFile: static[string]): untyped =
   let bodyLit = newLit(body)
   let pathLit = newLit(resolved)
   result = quote do:
-    decode[`T`](`bodyLit`, `pathLit`)
+    const compileTimeDecoded = decode[`T`](`bodyLit`, `pathLit`)
+    compileTimeDecoded
 
 template embed*[T](path: static[string]): Result[T, ParseError] =
   ## Embed a KDL file's contents into the binary at compile time and
@@ -772,7 +777,8 @@ proc kdlNodeNameImpl*(typ: typedesc): string =
   ""
 
 proc decode*[T](source: string,
-                sourcePath: string = "<input>"): Result[T, ParseError] =
+                sourcePath: string = "<input>"): Result[T, ParseError]
+    {.noSideEffect.} =
   ## Parse `source` as a KDL document and decode into `T`.
   ## (Named `decode` rather than `parse` to disambiguate from
   ## `parser.parse`, which returns the untyped KdlDoc.)
