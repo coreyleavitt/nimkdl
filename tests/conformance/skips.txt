@@ -61,4 +61,3 @@ multiline_string_whitespace_only.kdl | F-multiline-edge — needs Unicode whites
 # CLOSED by H12 (BOM-mid-file rejection + v1 `r"..."` rejection in lexer).
 #
 # Remaining:
-parens_in_bare_id_fail.kdl        | G-bare-ident-edge — bare ident with `(` inside; v0.2

@@ -796,7 +796,8 @@ proc checkTokenAdjacency(tokens: seq[Token]): Result[void, ParseError] =
   ## `precededByWs` for us; this walk enforces the rule.
   ##
   ## See corpus `zero_space_before_*_fail.kdl`.
-  const entryStartKinds = {tkString, tkRawString, tkNumber, tkKeyword, tkIdent}
+  const entryStartKinds = {tkString, tkRawString, tkNumber, tkKeyword,
+                           tkIdent, tkLParen}
   const exemptPrev = {tkEquals, tkLParen, tkRParen, tkSlashDash, tkLBrace}
     ## `{` and `;` start a fresh node context where adjacency doesn't
     ## apply; `;` is already handled because the lexer sets `wsPending`
