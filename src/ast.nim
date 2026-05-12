@@ -93,7 +93,22 @@ type
     ##
     ## `sourcePath` is the file path (or "<input>" / "<test>" etc.)
     ## for diagnostics; it doesn't open the file.
+    ##
+    ## `sourceText` holds the original input bytes when this doc was
+    ## produced by `parse()`. Combined with the per-AST-node `Span`s,
+    ## it enables byte-lossless round-trip via `encode(doc, emPreserve)`
+    ## — strictly more compact than trivia-per-node alternatives, and
+    ## preserves every representation choice (number bases, escape
+    ## styles, raw-string `#`-counts, bare-vs-quoted) for free.
+    ##
+    ## `mutated` flips to true on the first builder/mutation op. The
+    ## preserving encoder falls back to canonical when set, since the
+    ## AST no longer matches the source bytes byte-for-byte. Cleared
+    ## by `clearSource(doc)` if the consumer wants to disclaim the
+    ## source-preservation property explicitly.
     sourcePath*: string
+    sourceText*: string
+    mutated*: bool
     interner*: Interner
     nodes*: seq[KdlNode]
 
@@ -410,23 +425,42 @@ func findNodes*(doc: KdlDoc, name: string): seq[KdlNode] =
 # itself a mutation of the interner. Read-only operations take
 # `KdlDoc`.
 
+proc markMutated*(doc: var KdlDoc) {.inline.} =
+  ## Disclaim source-byte preservation. Sets `doc.mutated = true` so
+  ## `encode(doc, emPreserve)` falls back to canonical. The mutation
+  ## helpers below call this for you; expose it for consumers who edit
+  ## the AST through raw field access (`doc.nodes[i].entries[j] = ...`)
+  ## rather than the helpers.
+  doc.mutated = true
+
+proc clearSource*(doc: var KdlDoc) {.inline.} =
+  ## Disclaim source preservation explicitly: drop the cached sourceText
+  ## and mark the doc mutated. Call this if you intend to edit and
+  ## don't want emPreserve to carry stale bytes around.
+  doc.sourceText = ""
+  doc.mutated = true
+
 proc add*(doc: var KdlDoc, n: sink KdlNode) {.inline.} =
   ## Append a top-level node.
   doc.nodes.add(n)
+  doc.mutated = true
 
-proc addArg*(n: var KdlNode, v: KdlValue) {.inline.} =
+proc addArg*(n: var KdlNode, doc: var KdlDoc, v: KdlValue) {.inline.} =
   ## Append a positional argument entry.
   n.entries.add(KdlEntry(kind: keArgument, argValue: v, span: n.span))
+  doc.mutated = true
 
-proc addChild*(n: var KdlNode, c: sink KdlNode) {.inline.} =
+proc addChild*(n: var KdlNode, doc: var KdlDoc, c: sink KdlNode) {.inline.} =
   ## Append a child node.
   n.children.add(c)
+  doc.mutated = true
 
 proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
   ## Set property `name = v`. If a property with that name already
   ## exists, its value is replaced in place (preserving source order).
   ## Otherwise the property is appended.
   let key = doc.interner.intern(name)
+  doc.mutated = true
   for i in 0 ..< n.entries.len:
     if n.entries[i].kind == keProperty and n.entries[i].propName == key:
       n.entries[i] = KdlEntry(kind: keProperty, propName: key,
@@ -435,7 +469,7 @@ proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
   n.entries.add(KdlEntry(kind: keProperty, propName: key, propValue: v,
                          span: n.span))
 
-proc removeProp*(n: var KdlNode, doc: KdlDoc, name: string): bool =
+proc removeProp*(n: var KdlNode, doc: var KdlDoc, name: string): bool =
   ## Remove the first property with the given name. Returns true iff
   ## a property was removed.
   var i = 0
@@ -443,11 +477,12 @@ proc removeProp*(n: var KdlNode, doc: KdlDoc, name: string): bool =
     if n.entries[i].kind == keProperty and
        doc.interner.lookup(n.entries[i].propName) == name:
       n.entries.delete(i)
+      doc.mutated = true
       return true
     inc i
   false
 
-proc removeChild*(n: var KdlNode, doc: KdlDoc, name: string): int =
+proc removeChild*(n: var KdlNode, doc: var KdlDoc, name: string): int =
   ## Remove every child whose name matches. Returns the number removed.
   var i = 0
   while i < n.children.len:
@@ -456,34 +491,41 @@ proc removeChild*(n: var KdlNode, doc: KdlDoc, name: string): int =
       inc result
     else:
       inc i
+  if result > 0: doc.mutated = true
 
-proc replaceChild*(n: var KdlNode, doc: KdlDoc, name: string,
+proc replaceChild*(n: var KdlNode, doc: var KdlDoc, name: string,
                    replacement: sink KdlNode): bool =
   ## Replace the first child with the given name. Returns true iff a
   ## match was found and replaced.
   for i in 0 ..< n.children.len:
     if doc.interner.lookup(n.children[i].name) == name:
       n.children[i] = replacement
+      doc.mutated = true
       return true
   false
 
 proc setName*(n: var KdlNode, doc: var KdlDoc, name: string) {.inline.} =
   ## Change the node's name. Interns the new name via the doc.
   n.name = doc.interner.intern(name)
+  doc.mutated = true
 
 proc setTypeAnnotation*(n: var KdlNode, doc: var KdlDoc, tag: string) {.inline.} =
   ## Tag the node with a type annotation.
   n.typeAnnotation = doc.interner.intern(tag)
+  doc.mutated = true
 
-proc clearTypeAnnotation*(n: var KdlNode) {.inline.} =
+proc clearTypeAnnotation*(n: var KdlNode, doc: var KdlDoc) {.inline.} =
   n.typeAnnotation = InvalidInterned
+  doc.mutated = true
 
 proc setTypeAnnotation*(v: var KdlValue, doc: var KdlDoc, tag: string) {.inline.} =
   ## Tag a value with a type annotation (e.g. `(ipv4)"1.2.3.4"`).
   v.typeAnnotation = doc.interner.intern(tag)
+  doc.mutated = true
 
-proc clearTypeAnnotation*(v: var KdlValue) {.inline.} =
+proc clearTypeAnnotation*(v: var KdlValue, doc: var KdlDoc) {.inline.} =
   v.typeAnnotation = InvalidInterned
+  doc.mutated = true
 
 proc remove*(doc: var KdlDoc, name: string): int =
   ## Remove every top-level node with the given name. Returns count.
@@ -494,6 +536,7 @@ proc remove*(doc: var KdlDoc, name: string): int =
       inc result
     else:
       inc i
+  if result > 0: doc.mutated = true
 
 proc replace*(doc: var KdlDoc, name: string,
               replacement: sink KdlNode): bool =
@@ -502,6 +545,7 @@ proc replace*(doc: var KdlDoc, name: string,
   for i in 0 ..< doc.nodes.len:
     if doc.interner.lookup(doc.nodes[i].name) == name:
       doc.nodes[i] = replacement
+      doc.mutated = true
       return true
   false
 

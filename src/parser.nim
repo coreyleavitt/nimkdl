@@ -516,6 +516,7 @@ proc parse*(source: string, sourcePath = "<input>"):
   # Reach into p.doc rather than the original `doc` so those interns
   # are preserved.
   p.doc.nodes = dRes.get
+  p.doc.sourceText = source
   ok[KdlDoc, ParseError](p.doc)
 
 proc parseAll*(source: string, sourcePath = "<input>"):
@@ -541,4 +542,5 @@ proc parseAll*(source: string, sourcePath = "<input>"):
   var p = Parser(tokens: tokens, cursor: 0, depth: 0, doc: result.doc)
   let nodes = parseDocumentAccumulating(p, result.errors)
   p.doc.nodes = nodes
+  p.doc.sourceText = source
   result.doc = p.doc

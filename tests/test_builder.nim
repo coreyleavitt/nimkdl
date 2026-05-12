@@ -22,7 +22,7 @@ suite "builder — programmatic construction":
   test "build a doc from scratch and encode round-trips":
     var doc = newDoc()
     var n = newNode(doc, "rule")
-    n.addArg(newStringValue("compaction"))
+    n.addArg(doc, newStringValue("compaction"))
     n.setProp(doc, "enabled", newBoolValue(true))
     n.setProp(doc, "max", newIntValue(42))
     doc.add(n)
@@ -37,7 +37,7 @@ suite "builder — programmatic construction":
     var parent = newNode(doc, "outer")
     var child = newNode(doc, "inner")
     child.setProp(doc, "label", newStringValue("hi"))
-    parent.addChild(child)
+    parent.addChild(doc, child)
     doc.add(parent)
     let text = encode(doc)
     check "outer" in text
@@ -95,7 +95,7 @@ suite "builder — mutation on parsed docs":
   test "doc.replace swaps the first matching top-level node":
     parseGet("a 1\nb\na 2", doc):
       var newer = newNode(doc, "a")
-      newer.addArg(newStringValue("replaced"))
+      newer.addArg(doc, newStringValue("replaced"))
       check doc.replace("a", newer)
       # First `a` was replaced; second `a` still present.
       let matches = doc.findNodes("a")
@@ -106,7 +106,7 @@ suite "builder — round-trip after edits":
   test "edit a parsed doc and reparse yields the edited shape":
     parseGet("rule \"foo\"\nrule \"bar\"", doc):
       var n = newNode(doc, "rule")
-      n.addArg(newStringValue("baz"))
+      n.addArg(doc, newStringValue("baz"))
       doc.add(n)
       let text = encode(doc)
       let reparsed = parse(text)

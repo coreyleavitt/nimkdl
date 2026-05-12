@@ -37,8 +37,11 @@ import ./lexer  # ReservedBarewords (centralized v2 keyword denylist)
 
 type
   EncodeMode* = enum
-    emPretty   ## indented multi-line; default
-    emCompact  ## single line, `;` between sibling nodes
+    emPreserve ## byte-lossless: emit `doc.sourceText` verbatim when the
+               ## doc was parsed and has not been mutated; falls back to
+               ## canonical pretty otherwise. Default.
+    emPretty   ## canonical: indented multi-line
+    emCompact  ## canonical: single line, `;` between sibling nodes
 
 const
   PrettyIndent = "    "
@@ -195,10 +198,10 @@ func emitNode(n: KdlNode, interner: Interner,
   result = pad & parts.join(" ")
   if n.children.len > 0:
     case mode
-    of emPretty:
+    of emPreserve, emPretty:
       result.add(" {\n")
       for c in n.children:
-        result.add(emitNode(c, interner, mode, indent + 1))
+        result.add(emitNode(c, interner, emPretty, indent + 1))
         result.add("\n")
       result.add(pad & "}")
     of emCompact:
@@ -214,9 +217,26 @@ func emitNode(n: KdlNode, interner: Interner,
 # Document emission
 # ---------------------------------------------------------------------------
 
-func encode*(doc: KdlDoc, mode = emPretty): string =
-  ## Render `doc` to canonical KDL v2 text.
+func encode*(doc: KdlDoc, mode = emPreserve): string =
+  ## Render `doc` to KDL v2 text.
+  ##
+  ## `emPreserve` (default): byte-lossless for parsed docs that haven't
+  ## been mutated. Returns `doc.sourceText` verbatim. Falls back to
+  ## `emPretty` when the doc was built from scratch or has been edited.
+  ##
+  ## `emPretty` / `emCompact`: canonical output. `emPretty` is multi-
+  ## line + indented; `emCompact` is single-line with `;` separators.
   case mode
+  of emPreserve:
+    if doc.sourceText.len > 0 and not doc.mutated:
+      return doc.sourceText
+    # Fallback: canonical pretty form.
+    var parts: seq[string] = @[]
+    for n in doc.nodes:
+      parts.add(emitNode(n, doc.interner, emPretty, 0))
+    result = parts.join("\n")
+    if result.len > 0:
+      result.add("\n")
   of emPretty:
     var parts: seq[string] = @[]
     for n in doc.nodes:
