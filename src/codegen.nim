@@ -142,20 +142,22 @@ proc kdlDecodeValue*[T: SomeSignedInt](target: var T, v: KdlValue,
 proc kdlDecodeValue*[T: SomeUnsignedInt](target: var T, v: KdlValue,
                                          doc: var KdlDoc): bool =
   ## Covers uint, uint8, uint16, uint32, uint64. Range-checks against
-  ## the target's high bound; negative KDL ints fail decoding.
-  ##
-  ## **`uint64` quirk**: `KdlValue.intVal` is `int64`, so values in
-  ## `int64.high + 1 .. uint64.high` cannot reach this proc — the lexer
-  ## rejects them with `peLexInvalidNumber`. The `T.sizeof < uint64.sizeof`
-  ## branch is therefore guarded only for sub-`int64` widths; full 64-bit
-  ## unsigned support waits for the `kvBigInt` variant (ast.nim docs the
-  ## same limitation).
+  ## the target's high bound; negative KDL ints (and negative bigints)
+  ## fail decoding. For uint64 targets, KDL values in
+  ## `(int64.high, uint64.high]` arrive as kvBigInt and are accepted.
   case v.kind
   of kvInt:
     if v.intVal < 0: return false
     when T.sizeof < uint64.sizeof:
       if uint64(v.intVal) > uint64(T.high): return false
     target = T(v.intVal); true
+  of kvBigInt:
+    if v.bigNegative: return false
+    when T.sizeof < uint64.sizeof:
+      return false  # any bigint magnitude exceeds sub-64-bit targets
+    else:
+      if v.bigHi != 0: return false  # exceeds uint64
+      target = T(v.bigLo); true
   else:
     false
 

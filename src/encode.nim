@@ -117,6 +117,39 @@ func emitFloat(f: float): string =
 func emitInt(i: int64): string =
   $i
 
+func divMod128by10(hi, lo: var uint64): uint64 =
+  ## In-place `(hi:lo) := (hi:lo) div 10`; returns the remainder 0..9.
+  ## Schoolbook long division split into 32-bit chunks to keep each
+  ## intermediate within uint64.
+  let qHi = hi div 10
+  let rHi = hi mod 10  # 0..9
+  let loHi32 = lo shr 32
+  let loLo32 = lo and 0xFFFFFFFF'u64
+  let part1 = (rHi shl 32) or loHi32        # 36-bit number
+  let qLoHi = part1 div 10
+  let r1 = part1 mod 10
+  let part2 = (r1 shl 32) or loLo32         # 36-bit number
+  let qLoLo = part2 div 10
+  let r2 = part2 mod 10
+  hi = qHi
+  lo = (qLoHi shl 32) or qLoLo
+  r2
+
+func emitBigInt(hi, lo: uint64, negative: bool): string =
+  ## Render a 128-bit unsigned magnitude (plus sign) as decimal.
+  if hi == 0 and lo == 0: return "0"
+  var h = hi
+  var l = lo
+  var digits: seq[char] = @[]
+  while not (h == 0 and l == 0):
+    let r = divMod128by10(h, l)
+    digits.add(char(ord('0') + int(r)))
+  var output = ""
+  if negative: output.add('-')
+  for i in countdown(digits.high, 0):
+    output.add(digits[i])
+  output
+
 # ---------------------------------------------------------------------------
 # Value emission
 # ---------------------------------------------------------------------------
@@ -134,6 +167,7 @@ func emitValue(v: KdlValue, interner: Interner): string =
   case v.kind
   of kvString: prefix & emitStringValue(v.strVal)
   of kvInt:    prefix & emitInt(v.intVal)
+  of kvBigInt: prefix & emitBigInt(v.bigHi, v.bigLo, v.bigNegative)
   of kvFloat:  prefix & emitFloat(v.floatVal)
   of kvBool:   prefix & (if v.boolVal: "#true" else: "#false")
   of kvNull:   prefix & "#null"

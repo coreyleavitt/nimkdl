@@ -52,11 +52,13 @@ suite "KdlValue equality":
   test "exhaustive case over KdlValueKind":
     # Forcing-function: if a new variant is added, this case must be
     # updated. No else branch — Nim warns on non-exhaustive case.
-    for v in [newStringValue("x"), newIntValue(1), newFloatValue(1.0),
-              newBoolValue(true), newNullValue()]:
+    for v in [newStringValue("x"), newIntValue(1),
+              newBigIntValue(0, 7, false),
+              newFloatValue(1.0), newBoolValue(true), newNullValue()]:
       case v.kind
       of kvString: check v.strVal.len >= 0
       of kvInt:    check v.intVal == 1
+      of kvBigInt: check v.bigLo == 7
       of kvFloat:  check v.floatVal == 1.0
       of kvBool:   check v.boolVal
       of kvNull:   check v.kind == kvNull

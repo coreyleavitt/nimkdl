@@ -209,3 +209,22 @@ suite "encode: edge cases":
   test "empty children block round-trips":
     roundTrip("rule {\n}"):
       discard
+
+suite "encode: big integers (slice-6, kvBigInt)":
+  test "hex literal exceeding int64.high but fitting uint64":
+    # Spec corpus hex.kdl: 0xabcdef1234567890 = 12379813812177893520
+    parseGet("node 0xabcdef1234567890", doc):
+      let output = encode(doc)
+      check output == "node 12379813812177893520\n"
+
+  test "hex literal exceeding uint64.high (true 128-bit value)":
+    # Spec corpus hex_int.kdl: 0xABCDEF0123456789abcdef
+    #                                = 207698809136909011942886895
+    parseGet("node 0xABCDEF0123456789abcdef", doc):
+      let output = encode(doc)
+      check output == "node 207698809136909011942886895\n"
+
+  test "decimal that overflows int64 promotes to kvBigInt":
+    parseGet("node 12379813812177893520", doc):
+      let output = encode(doc)
+      check output == "node 12379813812177893520\n"

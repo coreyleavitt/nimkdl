@@ -300,14 +300,33 @@ suite "parser: number literal edges (C1, C2)":
       # accumulated in int64. Now correct via uint64 accumulator.
       check doc.nodes[0].entries[0].argValue.intVal == int64.low
 
-  test "one past int64.high is rejected":
-    parseErrCheck("v 9223372036854775808", peLexInvalidNumber)
+  test "one past int64.high promotes to kvBigInt":
+    parseOk("v 9223372036854775808"):
+      let av = doc.nodes[0].entries[0].argValue
+      check av.kind == kvBigInt
+      check av.bigHi == 0
+      check av.bigLo == uint64(int64.high) + 1'u64
+      check not av.bigNegative
 
-  test "one below int64.low is rejected":
-    parseErrCheck("v -9223372036854775809", peLexInvalidNumber)
+  test "one below int64.low promotes to kvBigInt (negative)":
+    parseOk("v -9223372036854775809"):
+      let av = doc.nodes[0].entries[0].argValue
+      check av.kind == kvBigInt
+      check av.bigHi == 0
+      check av.bigLo == uint64(int64.high) + 2'u64
+      check av.bigNegative
 
-  test "huge hex literal is rejected":
-    parseErrCheck("v 0xFFFFFFFFFFFFFFFF", peLexInvalidNumber)
+  test "huge hex literal (uint64.max) promotes to kvBigInt":
+    parseOk("v 0xFFFFFFFFFFFFFFFF"):
+      let av = doc.nodes[0].entries[0].argValue
+      check av.kind == kvBigInt
+      check av.bigHi == 0
+      check av.bigLo == high(uint64)
+      check not av.bigNegative
+
+  test "literal exceeding 128 bits is rejected":
+    parseErrCheck("v 0x10000000000000000_00000000000000000",
+                  peLexInvalidNumber)
 
   test "malformed float (exponent without digits) is rejected":
     parseErrCheck("v 1.5e", peLexInvalidNumber)

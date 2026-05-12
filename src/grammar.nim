@@ -619,12 +619,14 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc,
       else:
         result = newFloatValue(floatRes.get, v.span)
     else:
-      let intRes = decodeIntFromToken(v)
+      let intRes = decodeIntPromoting(v)
       if intRes.isErr:
         errs.add(intRes.getErr)
         result = newNullValue(v.span)
       else:
-        result = newIntValue(intRes.get, v.span)
+        let d = intRes.get
+        result = if d.fits64: newIntValue(d.intVal, v.span)
+                 else: newBigIntValue(d.bigHi, d.bigLo, d.negative, v.span)
   of tkKeyword:
     case v.keyword
     of kwTrue:   result = newBoolValue(true, v.span)

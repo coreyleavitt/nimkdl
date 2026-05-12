@@ -195,11 +195,14 @@ suite "Reference interpreter: number literal parity (C1, C2)":
   test "int64.high matches":
     same("v 9223372036854775807")
 
-  test "int overflow: both reject (was: ref saturated to int64.high)":
-    bothReject("v 9223372036854775808")
+  test "int past int64 promotes to kvBigInt in both interpreters":
+    same("v 9223372036854775808")
 
-  test "huge hex overflow: both reject":
-    bothReject("v 0xFFFFFFFFFFFFFFFF")
+  test "uint64.max promotes to kvBigInt in both interpreters":
+    same("v 0xFFFFFFFFFFFFFFFF")
+
+  test "literal exceeding 128 bits: both reject":
+    bothReject("v 0x10000000000000000_00000000000000000")
 
   test "malformed float: both reject (was: ref raised ValueError)":
     bothReject("v 1.5e")

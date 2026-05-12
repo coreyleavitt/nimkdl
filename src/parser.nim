@@ -157,9 +157,11 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
       var v = newFloatValue(floatRes.get, tok.span)
       v.typeAnnotation = anno
       return ok[KdlValue, ParseError](v)
-    let intRes = decodeIntFromToken(tok)
+    let intRes = decodeIntPromoting(tok)
     if intRes.isErr: return err[KdlValue, ParseError](intRes.getErr)
-    var v = newIntValue(intRes.get, tok.span)
+    let d = intRes.get
+    var v = if d.fits64: newIntValue(d.intVal, tok.span)
+            else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
     v.typeAnnotation = anno
     return ok[KdlValue, ParseError](v)
   of tkKeyword:

@@ -37,8 +37,6 @@ vertical_tab_whitespace.kdl       | A-unicode-whitespace — v2 spec includes VT
 # ===========================================================================
 # Real amoxtli configs never approach int64 bounds. Filed as kvBigInt
 # variant in ast.nim.
-hex.kdl                           | D-bigint — v0.2 (i128 work)
-hex_int.kdl                       | D-bigint — v0.2 (i128 work)
 
 # ===========================================================================
 # Category E: Slashdash with intervening newlines — CLOSED by H12

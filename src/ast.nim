@@ -40,7 +40,7 @@ const
 
 type
   KdlValueKind* = enum
-    kvString, kvInt, kvFloat, kvBool, kvNull
+    kvString, kvInt, kvBigInt, kvFloat, kvBool, kvNull
 
   KdlValue* = object
     ## Atomic value carried by an entry. `typeAnnotation` is the v2
@@ -50,6 +50,16 @@ type
     case kind*: KdlValueKind
     of kvString: strVal*: string
     of kvInt:    intVal*: int64
+    of kvBigInt:
+      ## Integer value whose magnitude exceeds int64. Used for hex/bin/
+      ## decimal literals in the (int64.high, ~2^128] range — see corpus
+      ## `hex.kdl` and `hex_int.kdl`. Magnitude is `(bigHi shl 64) or
+      ## bigLo`; `bigNegative` carries the sign. v0.2 caps at 128 bits;
+      ## true arbitrary precision is filed for v0.3 if a real consumer
+      ## needs it.
+      bigHi*: uint64
+      bigLo*: uint64
+      bigNegative*: bool
     of kvFloat:  floatVal*: float
     of kvBool:   boolVal*: bool
     of kvNull:   discard
@@ -108,6 +118,11 @@ func newIntValue*(i: int64, span = pointSpan(StartPosition)): KdlValue =
   KdlValue(kind: kvInt, intVal: i, span: span,
            typeAnnotation: InvalidInterned)
 
+func newBigIntValue*(hi, lo: uint64, negative: bool,
+                     span = pointSpan(StartPosition)): KdlValue =
+  KdlValue(kind: kvBigInt, bigHi: hi, bigLo: lo, bigNegative: negative,
+           span: span, typeAnnotation: InvalidInterned)
+
 func newFloatValue*(f: float, span = pointSpan(StartPosition)): KdlValue =
   KdlValue(kind: kvFloat, floatVal: f, span: span,
            typeAnnotation: InvalidInterned)
@@ -159,6 +174,8 @@ func valueEqual*(aDoc, bDoc: KdlDoc, a, b: KdlValue): bool =
   case a.kind
   of kvString: a.strVal == b.strVal
   of kvInt:    a.intVal == b.intVal
+  of kvBigInt: a.bigHi == b.bigHi and a.bigLo == b.bigLo and
+               a.bigNegative == b.bigNegative
   of kvFloat:  floatStructEq(a.floatVal, b.floatVal)
   of kvBool:   a.boolVal == b.boolVal
   of kvNull:   true
@@ -171,6 +188,8 @@ func `==`*(a, b: KdlValue): bool =
   case a.kind
   of kvString: a.strVal == b.strVal
   of kvInt:    a.intVal == b.intVal
+  of kvBigInt: a.bigHi == b.bigHi and a.bigLo == b.bigLo and
+               a.bigNegative == b.bigNegative
   of kvFloat:  floatStructEq(a.floatVal, b.floatVal)
   of kvBool:   a.boolVal == b.boolVal
   of kvNull:   true
@@ -247,6 +266,8 @@ proc reprValue(v: KdlValue, doc: KdlDoc): string =
   case v.kind
   of kvString: annotated & "\"" & v.strVal & "\""
   of kvInt:    annotated & $v.intVal
+  of kvBigInt: annotated & "<bigint hi=" & $v.bigHi & " lo=" & $v.bigLo &
+               (if v.bigNegative: " neg>" else: ">")
   of kvFloat:  annotated & $v.floatVal
   of kvBool:   annotated & (if v.boolVal: "#true" else: "#false")
   of kvNull:   annotated & "#null"

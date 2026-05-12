@@ -97,6 +97,95 @@ func decodeIntFromToken*(tok: Token): Result[int64, ParseError] =
     ok[int64, ParseError](int64(acc))
 
 # ---------------------------------------------------------------------------
+# 128-bit integer decode (kvBigInt promotion)
+# ---------------------------------------------------------------------------
+
+type
+  IntDecode* = object
+    ## Result of decoding a `tkNumber` integer when overflow past int64
+    ## should produce a kvBigInt rather than an error. Callers inspect
+    ## `fits64` to decide whether to emit kvInt or kvBigInt.
+    fits64*: bool
+    intVal*: int64    ## valid iff fits64
+    bigHi*: uint64    ## valid iff not fits64
+    bigLo*: uint64
+    negative*: bool
+
+func mulAdd128(hi, lo: var uint64, mul: uint64, add: uint64): bool =
+  ## (hi:lo) := (hi:lo) * mul + add. Returns true on 128-bit overflow.
+  ## Requires `mul < 2^32` and `add < 2^32` so intermediate products
+  ## fit in uint64 — true for all radix ≤ 16 and digit ≤ 15.
+  let l0 = lo and 0xFFFFFFFF'u64
+  let l1 = lo shr 32
+  let h0 = hi and 0xFFFFFFFF'u64
+  let h1 = hi shr 32
+  var c: uint64 = add
+  let p0 = l0 * mul + c
+  let r0 = p0 and 0xFFFFFFFF'u64
+  c = p0 shr 32
+  let p1 = l1 * mul + c
+  let r1 = p1 and 0xFFFFFFFF'u64
+  c = p1 shr 32
+  let p2 = h0 * mul + c
+  let r2 = p2 and 0xFFFFFFFF'u64
+  c = p2 shr 32
+  let p3 = h1 * mul + c
+  let r3 = p3 and 0xFFFFFFFF'u64
+  c = p3 shr 32
+  if c != 0: return true
+  lo = (r1 shl 32) or r0
+  hi = (r3 shl 32) or r2
+  false
+
+func decodeIntPromoting*(tok: Token): Result[IntDecode, ParseError] =
+  ## Decode an integer literal that may exceed int64.high. Produces
+  ## `fits64 = true` when the value fits int64 (with int64.low special-
+  ## cased like `decodeIntFromToken`); otherwise produces a 128-bit
+  ## magnitude in (bigHi, bigLo) with sign in `negative`. 128-bit
+  ## overflow still errors with `peLexInvalidNumber`.
+  assert tok.kind == tkNumber
+  var s = tok.numText
+  if s.len > 0 and (s[0] == '+' or s[0] == '-'):
+    s = s[1 .. ^1]
+  if tok.numBase != nbDecimal and s.len >= 2:
+    s = s[2 .. ^1]
+  let radix = uint64(radixOf(tok.numBase))
+  var hi: uint64 = 0
+  var lo: uint64 = 0
+  for c in s:
+    if c == '_': continue
+    let d =
+      case c
+      of '0'..'9': uint64(ord(c) - ord('0'))
+      of 'a'..'f': uint64(ord(c) - ord('a') + 10)
+      of 'A'..'F': uint64(ord(c) - ord('A') + 10)
+      else: high(uint64)
+    if d >= radix:
+      return err[IntDecode, ParseError](
+        initError(peLexInvalidNumber, tok.span, "invalid digit for base"))
+    if mulAdd128(hi, lo, radix, d):
+      return err[IntDecode, ParseError](
+        initError(peLexInvalidNumber, tok.span,
+                  "integer literal exceeds 128 bits"))
+  # Now (hi, lo) holds the unsigned magnitude.
+  let neg = tok.numNegative
+  if hi == 0:
+    if not neg:
+      if lo <= Int64HighU:
+        return ok[IntDecode, ParseError](IntDecode(
+          fits64: true, intVal: int64(lo), negative: false))
+    else:
+      if lo <= Int64HighU:
+        return ok[IntDecode, ParseError](IntDecode(
+          fits64: true, intVal: -int64(lo), negative: true))
+      if lo == Int64LowMagU:
+        return ok[IntDecode, ParseError](IntDecode(
+          fits64: true, intVal: low(int64), negative: true))
+  # Doesn't fit int64 — emit as kvBigInt.
+  ok[IntDecode, ParseError](IntDecode(
+    fits64: false, bigHi: hi, bigLo: lo, negative: neg))
+
+# ---------------------------------------------------------------------------
 # Float decode
 # ---------------------------------------------------------------------------
 
