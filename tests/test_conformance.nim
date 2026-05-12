@@ -161,3 +161,46 @@ suite "KDL v2 conformance corpus":
       echo "  FAIL ", r.name, " — ", r.reason
 
     check fail == 0
+
+  test "byte-equivalence: encode(parse(x), emPreserve) == x":
+    # Phase D of the trivia-preservation work. For every positive
+    # corpus case (one with an `expected_kdl` companion), assert that
+    # parsing the input and re-encoding it in `emPreserve` mode
+    # produces the SAME bytes. This is a strict-superset property
+    # over kdl-rs's preservation: every escape style, raw-string
+    # `#`-count, dedent layout, number base, and bare-vs-quoted
+    # choice survives.
+    let skips = loadSkips()
+    var inputs: seq[string] = @[]
+    for path in walkDir(CorpusRoot / "input"):
+      if path.path.endsWith(".kdl"):
+        inputs.add(path.path.extractFilename)
+    inputs.sort()
+
+    var pass, fail, skip = 0
+    var firstFailures: seq[string] = @[]
+    for name in inputs:
+      if name in skips:
+        inc skip; continue
+      let inPath  = CorpusRoot / "input" / name
+      let expPath = CorpusRoot / "expected_kdl" / name
+      if not fileExists(expPath):
+        # Negative cases (input must reject) — no preservation to test.
+        inc skip; continue
+      let inputText = readFile(inPath)
+      let r = parse(inputText)
+      if r.isErr:
+        inc fail
+        firstFailures.add(name & " | parse failed: " & r.getErr.hint)
+        continue
+      let preserved = encode(r.get, emPreserve)
+      if preserved == inputText:
+        inc pass
+      else:
+        inc fail
+        firstFailures.add(name & " | byte-equivalence failed")
+    echo "byte-equivalence: ", pass, " preserve, ", fail, " fail, ",
+         skip, " skip (of ", inputs.len, " cases)"
+    for r in firstFailures[0 ..< min(5, firstFailures.len)]:
+      echo "  FAIL ", r
+    check fail == 0
