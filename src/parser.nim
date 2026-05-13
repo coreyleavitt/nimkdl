@@ -37,6 +37,7 @@
 ## possible without escape hatches.
 
 import ./ast
+import ./encode  # hashNodeContent (parser seeds n.parseHash for emPreserve)
 import ./intern
 import ./lexer
 import ./numlit
@@ -409,6 +410,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
       p.peek.span, "expected newline, ';', or end of node"))
 
   node.span = initSpan(startSpan.start, p.peek.span.start)
+  node.parseHash = hashNodeContent(node, p.doc.interner)
   ok[KdlNode, ParseError](node)
 
 proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffect.} =

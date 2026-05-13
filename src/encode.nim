@@ -32,6 +32,7 @@
 import std/strutils
 
 import ./ast
+import ./fnv
 import ./intern
 import ./lexer  # ReservedBarewords (centralized v2 keyword denylist)
 
@@ -217,12 +218,69 @@ func emitNode(n: KdlNode, interner: Interner,
 # Document emission
 # ---------------------------------------------------------------------------
 
+func hashNodeContent*(n: KdlNode, interner: Interner): Hash128 =
+  ## Canonical-content fingerprint of `n` (recursively over children).
+  ## Same function called at parse time (to seed `n.parseHash`) and at
+  ## encode time (to compare against `n.parseHash`). Equal hashes ⇒
+  ## subtree unmodified ⇒ emit source bytes in `emPreserve`.
+  result = fnv128Init()
+  if n.typeAnnotation != InvalidInterned:
+    fnv128Mix(result, "(" & interner.lookup(n.typeAnnotation) & ")")
+  fnv128Mix(result, interner.lookup(n.name))
+  for e in n.entries:
+    # `\x1f` (US — unit separator) framing keeps adjacent entries from
+    # collision-aliasing (e.g. `a=1 b` vs `a=1b` produce different bytes).
+    fnv128Update(result, 0x1f'u8)
+    fnv128Mix(result, emitEntry(e, interner))
+  for c in n.children:
+    fnv128Update(result, 0x1e'u8)  # RS — record separator
+    fnv128Mix(result, hashNodeContent(c, interner))
+
+func emitNamePart(n: KdlNode, interner: Interner): string =
+  ## The "head" of a node — type annotation + name + entries — without
+  ## the children block or trailing newline. Shared between canonical
+  ## emit and the preserving emit's mismatched-subtree case.
+  let annoPrefix =
+    if n.typeAnnotation == InvalidInterned: ""
+    else: "(" & emitIdent(interner.lookup(n.typeAnnotation)) & ")"
+  var parts = @[annoPrefix & emitIdent(interner.lookup(n.name))]
+  for e in n.entries:
+    parts.add(emitEntry(e, interner))
+  parts.join(" ")
+
+func emitNodePreserve(n: KdlNode, doc: KdlDoc, indent: int): string =
+  ## Recursive per-node freshness decision: if `n`'s hash matches the
+  ## one recorded at parse time, the whole subtree is unmodified —
+  ## emit source bytes verbatim, preserving comments / whitespace /
+  ## number-base choices. Otherwise emit canonical name+entries and
+  ## recurse into children so untouched sibling subtrees still come
+  ## through verbatim.
+  let validSpan = doc.sourceText.len > 0 and
+                  n.span.start.offset >= 0 and
+                  n.span.finish.offset <= doc.sourceText.len and
+                  n.span.start.offset < n.span.finish.offset
+  if validSpan and hashNodeContent(n, doc.interner) == n.parseHash:
+    return doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
+  # Subtree was modified. Emit canonical head + recursive children.
+  let pad = PrettyIndent.repeat(indent)
+  result = pad & emitNamePart(n, doc.interner)
+  if n.children.len > 0:
+    result.add(" {\n")
+    for c in n.children:
+      result.add(emitNodePreserve(c, doc, indent + 1))
+      result.add("\n")
+    result.add(pad & "}")
+
 func encode*(doc: KdlDoc, mode = emPreserve): string =
   ## Render `doc` to KDL v2 text.
   ##
   ## `emPreserve` (default): byte-lossless for parsed docs that haven't
-  ## been mutated. Returns `doc.sourceText` verbatim. Falls back to
-  ## `emPretty` when the doc was built from scratch or has been edited.
+  ## been mutated. Returns `doc.sourceText` verbatim for fast-path
+  ## unmodified docs; falls back to per-node freshness checking when
+  ## `doc.mutated` is set. The freshness check uses an FNV-1a 128-bit
+  ## hash recorded by the parser; subtree-level mismatches emit
+  ## canonical, matches emit source bytes — so editing one deep entry
+  ## still preserves sibling subtrees verbatim.
   ##
   ## `emPretty` / `emCompact`: canonical output. `emPretty` is multi-
   ## line + indented; `emCompact` is single-line with `;` separators.
@@ -230,10 +288,9 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
   of emPreserve:
     if doc.sourceText.len > 0 and not doc.mutated:
       return doc.sourceText
-    # Fallback: canonical pretty form.
     var parts: seq[string] = @[]
     for n in doc.nodes:
-      parts.add(emitNode(n, doc.interner, emPretty, 0))
+      parts.add(emitNodePreserve(n, doc, 0))
     result = parts.join("\n")
     if result.len > 0:
       result.add("\n")

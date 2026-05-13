@@ -29,8 +29,11 @@
 
 import std/[math, strutils]
 
+import ./fnv
 import ./intern
 import ./spans
+
+export fnv.Hash128, fnv.`==`
 
 const
   KdlReprMaxDepth* = 32
@@ -81,11 +84,21 @@ type
     ## A KDL node: name + optional type annotation + entries (args + props,
     ## in source order) + nested children. Span covers the entire node
     ## including children.
+    ##
+    ## `parseHash` is set by the parser at construction time — an FNV-1a
+    ## 128-bit fingerprint of the node's canonical content (recursively
+    ## including children). The encoder's `emPreserve` mode recomputes
+    ## the hash at encode time and compares: match → emit source bytes
+    ## (preserving comments, exact whitespace, original number bases);
+    ## mismatch → subtree was mutated, emit canonical. Newly-constructed
+    ## nodes leave parseHash at its default zero, which will never match
+    ## a freshly-computed hash, so they always emit canonical.
     name*: InternedStr
     typeAnnotation*: InternedStr
     entries*: seq[KdlEntry]
     children*: seq[KdlNode]
     span*: Span
+    parseHash*: Hash128
 
   KdlDoc* = object
     ## A parsed KDL document. The interner is owned by the doc; all

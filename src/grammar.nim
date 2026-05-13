@@ -58,6 +58,7 @@
 import std/[strutils, tables]
 
 import ./ast
+import ./encode  # hashNodeContent
 import ./intern
 import ./lexer
 import ./numlit
@@ -764,6 +765,10 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
       continue
     result.children = buildChildrenBlock(childBlock, doc, tokens, errs)
     realChildrenSeen = true
+  # Seed the parse-time content hash so `encode(doc, emPreserve)` can
+  # detect unmodified subtrees after this doc round-trips through the
+  # reference interpreter too.
+  result.parseHash = hashNodeContent(result, doc.interner)
 
 proc buildDoc(root: ParseNode, doc: var KdlDoc,
               tokens: seq[Token],
