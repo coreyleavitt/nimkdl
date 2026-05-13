@@ -34,6 +34,8 @@
 
 import std/[hashes, tables]
 
+import ./fnv
+
 const
   InlineCapacity* = 22
     ## Bytes available for inline storage. Picked so the case-object
@@ -164,6 +166,25 @@ func entryByteAt(e: Entry, i: int): char {.inline.} =
   case e.kind
   of ekInline: e.data[i]
   of ekHeap:   e.payload[i]
+
+func feedHash*(interner: Interner, handle: InternedStr,
+               h: var Hash128) =
+  ## Fold an interned string's bytes into `h` (FNV-1a 128) without
+  ## allocating an intermediate `string`. Use in hot paths where
+  ## `fnv128Mix(h, lookup(handle))` would build and discard a temp.
+  ## InvalidInterned (and any out-of-range handle) is a no-op — same
+  ## semantics as `equals(handle, "")`.
+  let idx = int(uint32(handle))
+  if handle == InvalidInterned or idx >= interner.entries.len:
+    return
+  let e = interner.entries[idx]
+  case e.kind
+  of ekInline:
+    for i in 0 ..< int(e.length):
+      fnv128Update(h, uint8(e.data[i]))
+  of ekHeap:
+    for c in e.payload:
+      fnv128Update(h, uint8(c))
 
 func equals*(interner: Interner, handle: InternedStr,
              s: openArray[char]): bool =

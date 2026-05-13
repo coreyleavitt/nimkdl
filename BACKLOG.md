@@ -296,45 +296,39 @@ File: `src/codegen.nim:267-269`.
 
 ## Performance
 
-### `[ ]` `High` — hashNodeContent allocates a string per entry it hashes
+### `[x]` `High` — hashNodeContent allocates a string per entry it hashes
 
-`hashNodeContent` calls `emitEntry` to produce a throwaway string,
-then hashes its bytes. For a node with 10 entries this is 10 heap
-allocations per call. The hash is called once per node at parse and
-again per node inside `emitNodePreserve` on every mutated-doc encode.
+Resolved by redesigning the hash to feed AST structure directly
+(kind discriminant + raw payload bytes) instead of routing through
+`emitEntry`. Net: zero allocation per entry, and `emitEntry`'s
+output format can now evolve without invalidating cached hashes.
 
-**Fix:** add a `hashEntryDirect` proc that feeds interner bytes and
-entry bytes directly via `fnv128Update` without the intermediate
-string.
+Implementation: `Interner.feedHash(handle, h)` folds interned bytes
+through `fnv128Update` without materialising a `string`. New
+internal helper `feedValue` hashes a `KdlValue` from its variant
+fields directly (string length-prefix + bytes; int/float/bool/bigint
+as raw byte patterns; null as nothing). `hashEntry` /
+`hashNodeContent` are rewritten on top.
 
-File: `src/encode.nim:234`.
+### `[x]` `High` — String-keyed accessors call `lookup()` instead of `equals()`
 
-### `[ ]` `High` — String-keyed accessors call `lookup()` (heap-allocating) instead of `equals()` (zero-alloc)
+Resolved by mechanical replacement throughout `ast.nim`. The 11
+string-comparison sites in `prop`, `hasProp`, `child`, `children`,
+`findNode`, `findNodes`, `removeProp`, `removeChild`,
+`replaceChild`, `remove`, and `replace` now use
+`interner.equals(handle, name)` (zero-alloc) instead of
+`interner.lookup(handle) == name` (heap-allocated temp).
 
-`prop`, `hasProp`, `child`, `children`, `findNode`, `findNodes`,
-`remove`, `replace`, `removeProp`, `removeChild`, `replaceChild` all
-call `doc.interner.lookup(handle) == name`. `lookup` allocates a
-fresh string per call. The interner exposes `equals(handle,
-openArray[char])` which compares without allocating; none of the
-string-keyed APIs use it.
+### `[x]` `High` — emPreserve re-hashed every subtree on every mutated-doc encode
 
-**Fix:** mechanical replacement throughout `ast.nim`.
+Resolved by threading the hash through the encode recursion. The
+preserving encoder now returns `(text, hash)` per node and computes
+each node's hash bottom-up from its children's already-computed
+hashes (new helper `hashNodeFromChildHashes`). Each node is hashed
+exactly once per encode pass — linear, not quadratic.
 
-Files: `src/ast.nim:390-422`, `src/ast.nim:514-602`.
-
-### `[ ]` `High` — emPreserve re-hashes every subtree on every mutated-doc encode
-
-`emitNodePreserve` calls `hashNodeContent` unconditionally per node.
-Recursive: a node with 5 children × 5 entries hashes all 25 entries
-on every encode. In an edit-encode loop, every untouched sibling gets
-re-hashed to confirm it didn't change.
-
-**Fix:** add a per-node dirty bit (or reuse `parseHash == zeroHash`
-as the sentinel for freshly-constructed nodes) and skip the hash
-recompute when the bit indicates clean. The path-API alternative was
-considered and rejected (see Design choices below).
-
-File: `src/encode.nim:262`.
+Regression guard: `tests/test_preserve.nim` has a test (gated on
+`-d:kdlHashStats`) that asserts hash-call count ≤ node count.
 
 ### `[ ]` `Medium` — Multi-line string lexer allocates three intermediate buffers
 

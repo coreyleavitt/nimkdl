@@ -33,6 +33,15 @@ import std/strutils
 
 import ./ast
 import ./fnv
+
+when defined(kdlHashStats):
+  # Test-only instrumentation. Counts how many full node-content
+  # fingerprints are computed across the lifetime of the process. Used
+  # by `tests/test_preserve.nim` to assert the preserving encoder is
+  # linear (one hash per node) rather than quadratic (one full subtree
+  # hash per ancestor it sits under). Behind a `define` so production
+  # builds carry no overhead.
+  var kdlHashCallCount* {.threadvar.}: int
 import ./intern
 import ./lexer  # ReservedBarewords (centralized v2 keyword denylist)
 import ./spans
@@ -219,32 +228,89 @@ func emitNode(n: KdlNode, interner: Interner,
 # Document emission
 # ---------------------------------------------------------------------------
 
+func feedValue(h: var Hash128, v: KdlValue, interner: Interner) =
+  ## Zero-alloc fingerprint of a KdlValue. Hashes AST structure directly
+  ## (kind discriminant + raw payload bytes) rather than rendering to a
+  ## canonical string and hashing that. Two consequences:
+  ##  • No heap allocation in the hot path.
+  ##  • `emitEntry`'s output format can evolve (e.g. number-base or
+  ##    escape-style tweaks) without invalidating cached parseHashes.
+  ## Stability is intrinsic: both parse-time and encode-time hashing
+  ## go through this proc.
+  fnv128Update(h, 0x10'u8 + uint8(ord(v.kind)))  # kind discriminant
+  if v.typeAnnotation != InvalidInterned:
+    fnv128Update(h, 0x02'u8)                     # marker: typed
+    interner.feedHash(v.typeAnnotation, h)
+    fnv128Update(h, 0x03'u8)                     # marker: end-of-tag
+  case v.kind
+  of kvString:
+    # Length-prefix so adjacent strings can't alias ("ab"+"c" vs "a"+"bc").
+    let n = uint64(v.strVal.len)
+    for i in 0 ..< 8:
+      fnv128Update(h, uint8((n shr (i * 8)) and 0xff'u64))
+    for c in v.strVal: fnv128Update(h, uint8(c))
+  of kvInt:
+    let u = cast[uint64](v.intVal)
+    for i in 0 ..< 8: fnv128Update(h, uint8((u shr (i * 8)) and 0xff'u64))
+  of kvBigInt:
+    for i in 0 ..< 8: fnv128Update(h, uint8((v.bigHi shr (i * 8)) and 0xff'u64))
+    for i in 0 ..< 8: fnv128Update(h, uint8((v.bigLo shr (i * 8)) and 0xff'u64))
+    fnv128Update(h, if v.bigNegative: 1'u8 else: 0'u8)
+  of kvFloat:
+    # Hash the IEEE 754 bit pattern so distinct NaN payloads / ±0
+    # produce distinct hashes (both correctly reflect the AST).
+    let u = cast[uint64](v.floatVal)
+    for i in 0 ..< 8: fnv128Update(h, uint8((u shr (i * 8)) and 0xff'u64))
+  of kvBool:
+    fnv128Update(h, if v.boolVal: 1'u8 else: 0'u8)
+  of kvNull:
+    discard
+
 func hashEntry*(e: KdlEntry, interner: Interner): Hash128 =
   ## Canonical-content fingerprint of `e`. Parser stores this; encoder's
   ## surgical-splice path re-hashes at encode time to detect per-entry
-  ## edits. The framing byte `0x1f` (US — unit separator) keeps adjacent
-  ## entries' hashes from collision-aliasing when they're folded into
-  ## a parent's hash.
+  ## edits. Hashes structure directly — see `feedValue`.
   result = fnv128Init()
-  fnv128Update(result, 0x1f'u8)
-  fnv128Mix(result, emitEntry(e, interner))
+  fnv128Update(result, 0x1f'u8)               # US — entry framing
+  case e.kind
+  of keArgument:
+    fnv128Update(result, 0x00'u8)             # marker: positional
+    feedValue(result, e.argValue, interner)
+  of keProperty:
+    fnv128Update(result, 0x01'u8)             # marker: property
+    interner.feedHash(e.propName, result)
+    fnv128Update(result, 0x3d'u8)             # '=' — name/value separator
+    feedValue(result, e.propValue, interner)
 
 func hashNodeContent*(n: KdlNode, interner: Interner): Hash128 =
   ## Canonical-content fingerprint of `n` (recursively over children).
   ## Same function called at parse time (to seed `n.parseHash`) and at
   ## encode time (to compare against `n.parseHash`). Equal hashes ⇒
   ## subtree unmodified ⇒ emit source bytes in `emPreserve`.
+  when defined(kdlHashStats):
+    {.cast(noSideEffect).}:
+      kdlHashCallCount.inc
   result = fnv128Init()
   if n.typeAnnotation != InvalidInterned:
-    fnv128Mix(result, "(" & interner.lookup(n.typeAnnotation) & ")")
-  fnv128Mix(result, interner.lookup(n.name))
+    fnv128Update(result, 0x02'u8)
+    interner.feedHash(n.typeAnnotation, result)
+    fnv128Update(result, 0x03'u8)
+  interner.feedHash(n.name, result)
   for e in n.entries:
     # `\x1f` (US — unit separator) framing keeps adjacent entries from
     # collision-aliasing (e.g. `a=1 b` vs `a=1b` produce different bytes).
     fnv128Update(result, 0x1f'u8)
-    fnv128Mix(result, emitEntry(e, interner))
+    case e.kind
+    of keArgument:
+      fnv128Update(result, 0x00'u8)
+      feedValue(result, e.argValue, interner)
+    of keProperty:
+      fnv128Update(result, 0x01'u8)
+      interner.feedHash(e.propName, result)
+      fnv128Update(result, 0x3d'u8)
+      feedValue(result, e.propValue, interner)
   for c in n.children:
-    fnv128Update(result, 0x1e'u8)  # RS — record separator
+    fnv128Update(result, 0x1e'u8)             # RS — record separator
     fnv128Mix(result, hashNodeContent(c, interner))
 
 func emitNamePart(n: KdlNode, interner: Interner): string =
@@ -264,57 +330,106 @@ func validSpanInto(span: Span, source: string): bool {.inline.} =
   span.finish.offset <= source.len and
   span.start.offset < span.finish.offset
 
-func emitNodePreserve(n: KdlNode, doc: KdlDoc, indent: int): string =
-  ## Preservation strategy:
+func feedEntryInto(h: var Hash128, e: KdlEntry, interner: Interner) =
+  ## Fold an entry's content into a running hash. Extracted so
+  ## `hashNodeContent` and `emitNodePreserveAndHash` share one
+  ## implementation; refactor of the inline block previously duplicated
+  ## across both.
+  fnv128Update(h, 0x1f'u8)                       # US — entry framing
+  case e.kind
+  of keArgument:
+    fnv128Update(h, 0x00'u8)
+    feedValue(h, e.argValue, interner)
+  of keProperty:
+    fnv128Update(h, 0x01'u8)
+    interner.feedHash(e.propName, h)
+    fnv128Update(h, 0x3d'u8)
+    feedValue(h, e.propValue, interner)
+
+func hashNodeFromChildHashes(n: KdlNode, interner: Interner,
+                             childHashes: openArray[Hash128]): Hash128 =
+  ## Bottom-up sibling of `hashNodeContent`. Computes `n`'s fingerprint
+  ## using already-computed `childHashes` instead of recursing into the
+  ## children subtree. Lets the preserving encoder hash each node
+  ## exactly once across an entire encode pass (linear, not quadratic).
+  when defined(kdlHashStats):
+    {.cast(noSideEffect).}:
+      kdlHashCallCount.inc
+  result = fnv128Init()
+  if n.typeAnnotation != InvalidInterned:
+    fnv128Update(result, 0x02'u8)
+    interner.feedHash(n.typeAnnotation, result)
+    fnv128Update(result, 0x03'u8)
+  interner.feedHash(n.name, result)
+  for e in n.entries:
+    feedEntryInto(result, e, interner)
+  for ch in childHashes:
+    fnv128Update(result, 0x1e'u8)
+    fnv128Mix(result, ch)
+
+func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
+                             tuple[text: string, hash: Hash128]
+
+func emitNodePreserve(n: KdlNode, doc: KdlDoc, indent: int): string {.inline.} =
+  emitNodePreserveAndHash(n, doc, indent).text
+
+func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
+                             tuple[text: string, hash: Hash128] =
+  ## Preservation strategy — bottom-up. Each call recurses into children
+  ## first, collects `(childText, childHash)` pairs, then computes `n`'s
+  ## own hash from those pre-computed child hashes via
+  ## `hashNodeFromChildHashes`. Net effect: every node in the subtree is
+  ## hashed exactly once per encode pass, regardless of how deep the
+  ## tree is. (Previous implementation called `hashNodeContent(n)` at
+  ## each level, which recursed through the full subtree — O(N²)
+  ## total hashing per encode.)
   ##
-  ## 1. If `n`'s hash matches its parse-time fingerprint, the whole
-  ##    subtree is unmodified — emit source bytes verbatim.
+  ## Branch logic mirrors the original five cases:
   ##
-  ## 2. If `n` is modified BUT the modification is in-place (entries
-  ##    and children counts unchanged from parse), do **surgical
-  ##    textual splicing**: start with `n`'s source bytes, replace
-  ##    each dirty entry's span with its canonical re-emit, and
-  ##    recurse for each dirty child subtree. Untouched bytes around
-  ##    the edits — comments, alignment, trailing newlines, anything
-  ##    — survive byte-for-byte.
-  ##
-  ## 3. If the entry / child count changed (insertion or removal),
-  ##    fall back to canonical for THIS node only. Sibling top-level
-  ##    nodes still preserve.
-  ##
-  ## 4. If `n` has no valid span (built from scratch via newNode),
-  ##    canonical emit.
+  ## 1. No valid span → canonical emit (built-from-scratch node).
+  ## 2. Hash matches parseHash → emit source bytes verbatim.
+  ## 3. Shape change (entry/child count diverged) → canonical for this
+  ##    node only (siblings still preserve via their own results).
+  ## 4. In-place changes → surgical textual splice into source bytes.
+  ## 5. No element-level splice fired but hash mismatched → the change
+  ##    is in name or type annotation; canonical fallback for this node.
   let pad = PrettyIndent.repeat(indent)
 
-  if not validSpanInto(n.span, doc.sourceText):
-    result = pad & emitNamePart(n, doc.interner)
+  # Recurse to children first. This is the linchpin of the linear-hash
+  # property: each child computes its own hash bottom-up exactly once.
+  var childResults: seq[tuple[text: string, hash: Hash128]]
+  childResults.setLen(n.children.len)
+  var childHashes = newSeq[Hash128](n.children.len)
+  for i in 0 ..< n.children.len:
+    childResults[i] = emitNodePreserveAndHash(n.children[i], doc, indent + 1)
+    childHashes[i] = childResults[i].hash
+
+  let myHash = hashNodeFromChildHashes(n, doc.interner, childHashes)
+  result.hash = myHash
+
+  template canonicalEmit() =
+    result.text = pad & emitNamePart(n, doc.interner)
     if n.children.len > 0:
-      result.add(" {\n")
-      for c in n.children:
-        result.add(emitNodePreserve(c, doc, indent + 1))
-        result.add("\n")
-      result.add(pad & "}")
-    return result
+      result.text.add(" {\n")
+      for cr in childResults:
+        result.text.add(cr.text)
+        result.text.add("\n")
+      result.text.add(pad & "}")
 
-  if hashNodeContent(n, doc.interner) == n.parseHash:
-    return doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
+  if not validSpanInto(n.span, doc.sourceText):
+    canonicalEmit()
+    return
 
-  # Subtree changed. Determine whether the change is in-place
-  # (suitable for surgical splice) or structural (canonical fallback).
+  if myHash == n.parseHash:
+    result.text = doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
+    return
+
   let entriesShape = n.entries.len == int(n.parseEntryCount)
   let childrenShape = n.children.len == int(n.parseChildCount)
 
   if not (entriesShape and childrenShape):
-    # Structural change — canonical for this node. (Other top-level
-    # nodes still preserve via their own emitNodePreserve calls.)
-    result = pad & emitNamePart(n, doc.interner)
-    if n.children.len > 0:
-      result.add(" {\n")
-      for c in n.children:
-        result.add(emitNodePreserve(c, doc, indent + 1))
-        result.add("\n")
-      result.add(pad & "}")
-    return result
+    canonicalEmit()
+    return
 
   # In-place edits only. Take source bytes, splice modified pieces.
   # Walk children + entries by DESCENDING source span so each splice
@@ -328,13 +443,12 @@ func emitNodePreserve(n: KdlNode, doc: KdlDoc, indent: int): string =
   for i in countdown(n.children.high, 0):
     let c = n.children[i]
     if not validSpanInto(c.span, doc.sourceText): continue
-    let childOut = emitNodePreserve(c, doc, indent + 1)
-    let childSource = doc.sourceText[c.span.start.offset ..< c.span.finish.offset]
-    if childOut != childSource:
-      let s = c.span.start.offset - base
-      let e = c.span.finish.offset - base
-      output = output[0 ..< s] & childOut & output[e ..< output.len]
-      anySpliced = true
+    # Skip clean children via hash compare — zero-alloc, no string compare.
+    if childResults[i].hash == c.parseHash: continue
+    let s = c.span.start.offset - base
+    let e = c.span.finish.offset - base
+    output = output[0 ..< s] & childResults[i].text & output[e ..< output.len]
+    anySpliced = true
 
   for i in countdown(n.entries.high, 0):
     let entry = n.entries[i]
@@ -351,16 +465,10 @@ func emitNodePreserve(n: KdlNode, doc: KdlDoc, indent: int): string =
     # the change must be in the node's name or type annotation. We
     # don't store a separate localHash for that; fall back to
     # canonical for this node. (Siblings still preserve.)
-    result = pad & emitNamePart(n, doc.interner)
-    if n.children.len > 0:
-      result.add(" {\n")
-      for c in n.children:
-        result.add(emitNodePreserve(c, doc, indent + 1))
-        result.add("\n")
-      result.add(pad & "}")
-    return result
+    canonicalEmit()
+    return
 
-  output
+  result.text = output
 
 func encode*(doc: KdlDoc, mode = emPreserve): string =
   ## Render `doc` to KDL v2 text.

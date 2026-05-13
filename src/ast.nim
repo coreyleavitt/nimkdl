@@ -414,14 +414,14 @@ func prop*(n: KdlNode, doc: KdlDoc, name: string): KdlValue =
   ## Return property `name`, or a `kvNull` value if absent.
   for e in n.entries:
     if e.kind == keProperty and
-       doc.interner.lookup(e.propName) == name:
+       doc.interner.equals(e.propName, name):
       return e.propValue
   newNullValue()
 
 func hasProp*(n: KdlNode, doc: KdlDoc, name: string): bool =
   for e in n.entries:
     if e.kind == keProperty and
-       doc.interner.lookup(e.propName) == name:
+       doc.interner.equals(e.propName, name):
       return true
   false
 
@@ -429,24 +429,24 @@ func child*(n: KdlNode, doc: KdlDoc, name: string): KdlNode =
   ## Return the first child whose name matches `name`, or a sentinel
   ## node with `name == InvalidInterned` when absent.
   for c in n.children:
-    if doc.interner.lookup(c.name) == name: return c
+    if doc.interner.equals(c.name, name): return c
   KdlNode(name: InvalidInterned)
 
 func children*(n: KdlNode, doc: KdlDoc, name: string): seq[KdlNode] =
   for c in n.children:
-    if doc.interner.lookup(c.name) == name:
+    if doc.interner.equals(c.name, name):
       result.add(c)
 
 func findNode*(doc: KdlDoc, name: string): KdlNode =
   ## Return the first top-level node with the given name, or a sentinel
   ## with `name == InvalidInterned`.
   for n in doc.nodes:
-    if doc.interner.lookup(n.name) == name: return n
+    if doc.interner.equals(n.name, name): return n
   KdlNode(name: InvalidInterned)
 
 func findNodes*(doc: KdlDoc, name: string): seq[KdlNode] =
   for n in doc.nodes:
-    if doc.interner.lookup(n.name) == name:
+    if doc.interner.equals(n.name, name):
       result.add(n)
 
 # ---------------------------------------------------------------------------
@@ -554,7 +554,7 @@ proc removeProp*(n: var KdlNode, doc: var KdlDoc, name: string): bool =
   var i = 0
   while i < n.entries.len:
     if n.entries[i].kind == keProperty and
-       doc.interner.lookup(n.entries[i].propName) == name:
+       doc.interner.equals(n.entries[i].propName, name):
       n.entries.delete(i)
       doc.mutated = true
       return true
@@ -565,7 +565,7 @@ proc removeChild*(n: var KdlNode, doc: var KdlDoc, name: string): int =
   ## Remove every child whose name matches. Returns the number removed.
   var i = 0
   while i < n.children.len:
-    if doc.interner.lookup(n.children[i].name) == name:
+    if doc.interner.equals(n.children[i].name, name):
       n.children.delete(i)
       inc result
     else:
@@ -577,7 +577,7 @@ proc replaceChild*(n: var KdlNode, doc: var KdlDoc, name: string,
   ## Replace the first child with the given name. Returns true iff a
   ## match was found and replaced.
   for i in 0 ..< n.children.len:
-    if doc.interner.lookup(n.children[i].name) == name:
+    if doc.interner.equals(n.children[i].name, name):
       n.children[i] = replacement
       doc.mutated = true
       return true
@@ -610,7 +610,7 @@ proc remove*(doc: var KdlDoc, name: string): int =
   ## Remove every top-level node with the given name. Returns count.
   var i = 0
   while i < doc.nodes.len:
-    if doc.interner.lookup(doc.nodes[i].name) == name:
+    if doc.interner.equals(doc.nodes[i].name, name):
       doc.nodes.delete(i)
       inc result
     else:
@@ -622,7 +622,7 @@ proc replace*(doc: var KdlDoc, name: string,
   ## Replace the first top-level node with the given name. Returns true
   ## iff a match was found and replaced.
   for i in 0 ..< doc.nodes.len:
-    if doc.interner.lookup(doc.nodes[i].name) == name:
+    if doc.interner.equals(doc.nodes[i].name, name):
       doc.nodes[i] = replacement
       doc.mutated = true
       return true

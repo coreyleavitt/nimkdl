@@ -221,3 +221,39 @@ suite "trivia preservation — surgical splice (B2: shape-change fallback)":
       let text = encode(doc, emPreserve)
       check "// keep this comment" in text
       check "other thing" in text       # sibling preserved
+
+when defined(kdlHashStats):
+  suite "trivia preservation — encoder hashes each node at most once":
+    # Quadratic-hashing regression guard. The natural recursive
+    # implementation calls hashNodeContent(n) at every level — which
+    # itself recurses through the subtree — so an N-deep tree gets
+    # hashed O(N²) bytes per encode. Threading the hash through the
+    # recursion makes it O(N).
+    test "hash-call count is bounded by node count":
+      let src = """
+        rule "a" {
+          action "x" enabled=#true
+          action "y" {
+            nested "z" k=1
+          }
+        }
+        rule "b" key="v"
+        rule "c"
+      """
+      let r = parse(src)
+      check r.isOk
+      var doc = r.get
+      # Force a mutation so the encoder takes the per-node freshness
+      # path (the no-mutation path is a fast-return of doc.sourceText
+      # with zero hash calls and isn't what we're measuring).
+      doc.nodes[0].setProp(doc, "touched", newBoolValue(true))
+      # Count nodes — including all descendants. We expect at most
+      # one hash computation per node.
+      proc countNodes(ns: seq[KdlNode]): int =
+        for n in ns:
+          result.inc
+          result.inc countNodes(n.children)
+      let nodeCount = countNodes(doc.nodes)
+      kdlHashCallCount = 0
+      discard encode(doc, emPreserve)
+      check kdlHashCallCount <= nodeCount

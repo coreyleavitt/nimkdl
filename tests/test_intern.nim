@@ -4,6 +4,7 @@
 import std/[strutils, unittest]
 
 import ../src/intern
+import ../src/fnv
 
 suite "Interner: storage classification":
   test "short string is stored inline":
@@ -120,3 +121,36 @@ suite "Interner: realistic identifier pool":
     # All ten words are inline (each ≤ 22 bytes)
     for w in words:
       check i.isInline(i.intern(w))
+
+suite "Interner: zero-alloc byte feed for hashing":
+  # `feedHash(handle, h)` must produce the same hash as calling
+  # `fnv128Mix(h, lookup(handle))` — the latter allocates a temporary
+  # string per call. The former is the hot-path replacement for the
+  # encode-time freshness fingerprint.
+
+  test "feedHash matches lookup+mix for inline entries":
+    var i = initInterner()
+    let h = i.intern("rule")  # inline — 4 bytes
+    var a = fnv128Init()
+    i.feedHash(h, a)
+    var b = fnv128Init()
+    fnv128Mix(b, i.lookup(h))
+    check a == b
+
+  test "feedHash matches lookup+mix for heap entries":
+    var i = initInterner()
+    let s = "a".repeat(InlineCapacity + 10)  # heap — beyond SBO
+    let h = i.intern(s)
+    check not i.isInline(h)
+    var a = fnv128Init()
+    i.feedHash(h, a)
+    var b = fnv128Init()
+    fnv128Mix(b, i.lookup(h))
+    check a == b
+
+  test "feedHash on InvalidInterned is a no-op":
+    var i = initInterner()
+    let zero = fnv128Init()
+    var a = zero
+    i.feedHash(InvalidInterned, a)
+    check a == zero
