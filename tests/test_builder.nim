@@ -102,6 +102,62 @@ suite "builder — mutation on parsed docs":
       check matches.len == 2
       check matches[0].entries[0].argValue.strVal == "replaced"
 
+suite "builder — positional insert":
+  test "doc.insert places a node at a given index":
+    parseGet("a\nc", doc):
+      var b = newNode(doc, "b")
+      doc.insert(1, b)
+      let names: seq[string] =
+        block:
+          var s: seq[string] = @[]
+          for n in doc.nodes:
+            s.add(doc.resolveName(n))
+          s
+      check names == @["a", "b", "c"]
+
+  test "node.insertChild places a child at a given index":
+    parseGet("p { a; c }", doc):
+      var b = newNode(doc, "b")
+      doc.nodes[0].insertChild(doc, 1, b)
+      let names: seq[string] =
+        block:
+          var s: seq[string] = @[]
+          for c in doc.nodes[0].children:
+            s.add(doc.resolveName(c))
+          s
+      check names == @["a", "b", "c"]
+
+  test "doc.insert at len-equivalent index appends":
+    parseGet("a", doc):
+      var b = newNode(doc, "b")
+      doc.insert(1, b)  # idx == len → append
+      check doc.nodes.len == 2
+
+suite "builder — arg ops":
+  test "setArg replaces the indexed positional argument":
+    parseGet("n \"a\" \"b\" \"c\"", doc):
+      check doc.nodes[0].setArg(doc, 1, newStringValue("X"))
+      var argTexts: seq[string] = @[]
+      for v in doc.nodes[0].arguments:
+        argTexts.add(v.strVal)
+      check argTexts == @["a", "X", "c"]
+
+  test "setArg returns false when index is out of range":
+    parseGet("n \"only\"", doc):
+      check not doc.nodes[0].setArg(doc, 5, newStringValue("nope"))
+
+  test "removeArg drops the indexed positional argument":
+    parseGet("n \"a\" \"b\" \"c\"", doc):
+      check doc.nodes[0].removeArg(doc, 1)
+      var argTexts: seq[string] = @[]
+      for v in doc.nodes[0].arguments:
+        argTexts.add(v.strVal)
+      check argTexts == @["a", "c"]
+
+  test "removeArg returns false when index is out of range":
+    parseGet("n \"only\"", doc):
+      check not doc.nodes[0].removeArg(doc, 5)
+
 suite "builder — round-trip after edits":
   test "edit a parsed doc and reparse yields the edited shape":
     parseGet("rule \"foo\"\nrule \"bar\"", doc):

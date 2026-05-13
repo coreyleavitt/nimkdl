@@ -445,14 +445,57 @@ proc add*(doc: var KdlDoc, n: sink KdlNode) {.inline.} =
   doc.nodes.add(n)
   doc.mutated = true
 
+proc insert*(doc: var KdlDoc, idx: int, n: sink KdlNode) =
+  ## Insert a top-level node at `idx`. `idx == doc.nodes.len` appends;
+  ## values outside `[0, doc.nodes.len]` clamp to the nearest end.
+  let i = max(0, min(idx, doc.nodes.len))
+  doc.nodes.insert(n, i)
+  doc.mutated = true
+
 proc addArg*(n: var KdlNode, doc: var KdlDoc, v: KdlValue) {.inline.} =
   ## Append a positional argument entry.
   n.entries.add(KdlEntry(kind: keArgument, argValue: v, span: n.span))
   doc.mutated = true
 
+proc setArg*(n: var KdlNode, doc: var KdlDoc, idx: int,
+             v: KdlValue): bool =
+  ## Replace the `idx`-th positional argument's value. Index is among
+  ## arguments only (properties skipped). Returns false when out of
+  ## range.
+  var argSeen = 0
+  for i in 0 ..< n.entries.len:
+    if n.entries[i].kind == keArgument:
+      if argSeen == idx:
+        n.entries[i] = KdlEntry(kind: keArgument, argValue: v,
+                                span: n.entries[i].span)
+        doc.mutated = true
+        return true
+      inc argSeen
+  false
+
+proc removeArg*(n: var KdlNode, doc: var KdlDoc, idx: int): bool =
+  ## Remove the `idx`-th positional argument. Returns false when out of
+  ## range.
+  var argSeen = 0
+  for i in 0 ..< n.entries.len:
+    if n.entries[i].kind == keArgument:
+      if argSeen == idx:
+        n.entries.delete(i)
+        doc.mutated = true
+        return true
+      inc argSeen
+  false
+
 proc addChild*(n: var KdlNode, doc: var KdlDoc, c: sink KdlNode) {.inline.} =
   ## Append a child node.
   n.children.add(c)
+  doc.mutated = true
+
+proc insertChild*(n: var KdlNode, doc: var KdlDoc, idx: int,
+                  c: sink KdlNode) =
+  ## Insert a child node at `idx`. Clamps to the seq's bounds.
+  let i = max(0, min(idx, n.children.len))
+  n.children.insert(c, i)
   doc.mutated = true
 
 proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
