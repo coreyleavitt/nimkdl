@@ -469,8 +469,16 @@ func children*(n: KdlNode, doc: KdlDoc, name: string): seq[KdlNode] =
     if doc.interner.equals(c.name, name):
       result.add(c)
 
-func findNode*(doc: KdlDoc, name: string): Option[KdlNode] =
+func node*(doc: KdlDoc, name: string): Option[KdlNode] =
   ## First top-level node with `name`, or `none(KdlNode)` if absent.
+  ## Bare-noun verb form matches the node-level accessor family
+  ## (`child` / `prop` / `arg`) — same operation, same vocabulary,
+  ## same return-shape pattern.
+  ##
+  ## `doc.nodes` (no parens) remains the field accessor for "every
+  ## top-level node"; `doc.nodes(name)` is the filter proc below.
+  ## The field-vs-proc coexistence mirrors `KdlNode.children` (field)
+  ## vs `n.children(doc, name)` (proc) and works the same way.
   for n in doc.nodes:
     if doc.interner.equals(n.name, name): return some(n)
   none(KdlNode)
@@ -481,7 +489,10 @@ func hasNode*(doc: KdlDoc, name: string): bool =
     if doc.interner.equals(n.name, name): return true
   false
 
-func findNodes*(doc: KdlDoc, name: string): seq[KdlNode] =
+func nodes*(doc: KdlDoc, name: string): seq[KdlNode] =
+  ## All top-level nodes matching `name`, in source order. Companion
+  ## to `doc.node(name)` (returns just the first). The `nodes` field
+  ## on `KdlDoc` (no parens) gives every top-level node unfiltered.
   for n in doc.nodes:
     if doc.interner.equals(n.name, name):
       result.add(n)

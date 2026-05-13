@@ -248,7 +248,7 @@ func kdlEncodeValue*[E: enum](e: E): KdlValue =
 ## handles and so are independent of the doc's interner — used inside
 ## generated decoders where the field-name handle is interned once and
 ## reused for every iteration. The string-keyed counterparts live in
-## `ast.nim` (`prop` / `child` / `findNode` / `arg` / etc.) and are the
+## `ast.nim` (`prop` / `child` / `node` / `arg` / etc.) and are the
 ## right thing for user code.
 ##
 ## The `Interned` suffix is load-bearing: without it, codegen's

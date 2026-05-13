@@ -18,19 +18,19 @@ template parseOk(src: string, body: untyped) =
     body
 
 suite "string-keyed accessors":
-  test "doc.findNode(name) returns Some(first top-level) by name":
+  test "doc.node(name) returns Some(first top-level) by name":
     parseOk("a x=1\nb y=2\na z=3"):
-      let n = doc.findNode("a")
+      let n = doc.node("a")
       check n.isSome
       check doc.resolveName(n.get) == "a"
 
-  test "doc.findNode(name) returns None when missing":
+  test "doc.node(name) returns None when missing":
     parseOk("a x=1"):
-      check doc.findNode("missing").isNone
+      check doc.node("missing").isNone
 
-  test "doc.findNodes(name) returns all top-level matches in source order":
+  test "doc.nodes(name) returns all top-level matches in source order":
     parseOk("rule \"first\"\nother\nrule \"second\""):
-      let rules = doc.findNodes("rule")
+      let rules = doc.nodes("rule")
       check rules.len == 2
 
   test "node.prop(doc, name) returns Some(value) for present property":
@@ -110,3 +110,28 @@ suite "positional argument accessors (arg / hasArg)":
       check n.hasArg(2)
       check n.arg(2).strVal == "third"
       check not n.hasArg(3)
+
+suite "doc-level node/nodes (M4 — bare-noun renames)":
+  test "doc.node(name) finds first matching top-level node":
+    parseOk("a 1\nb\na 2"):
+      let n = doc.node("a")
+      check n.isSome
+      check doc.resolveName(n.get) == "a"
+
+  test "doc.node(missing) returns None":
+    parseOk("a"):
+      check doc.node("missing").isNone
+
+  test "doc.nodes(name) returns all matches in source order":
+    parseOk("rule \"x\"\nother\nrule \"y\""):
+      let rules = doc.nodes("rule")
+      check rules.len == 2
+
+  test "field doc.nodes and proc doc.nodes(name) coexist":
+    parseOk("a 1\nb 2\na 3"):
+      # `doc.nodes` (no args) is the field — every top-level node.
+      check doc.nodes.len == 3
+      # `doc.nodes(name)` is the filter proc — only matching ones.
+      check doc.nodes("a").len == 2
+      check doc.nodes("b").len == 1
+      check doc.nodes("missing").len == 0

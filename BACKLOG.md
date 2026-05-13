@@ -210,15 +210,20 @@ level.
 Resolved by renaming `{.kdlAttr.}` → `{.kdlProp.}` throughout codegen,
 tests, and README. No alias; per `no_pre_1_aliases` policy.
 
-### `[ ]` `Medium` — Find-vs-bare verb inconsistency between node-level and doc-level accessors
+### `[x]` `Medium` — Find-vs-bare verb inconsistency between node-level and doc-level accessors
 
-Node-level: `child(n, doc, name)` / `children(n, doc, name)`.
-Doc-level: `findNode(doc, name)` / `findNodes(doc, name)`. Same
-semantic, different verb family.
+Resolved by aligning doc-level to bare nouns (option 2 in the
+original fix sketch):
 
-**Fix:** rename to one of two options:
-- `findChild` / `findChildren` at the node level
-- `node` / `nodes` at the doc level
+- `findNode(doc, name)` → `node(doc, name): Option[KdlNode]`
+- `findNodes(doc, name)` → `nodes(doc, name): seq[KdlNode]`
+
+Matches the existing node-level convention (`child`, `prop`, `arg`)
+and the broader bare-noun accessor family. The `doc.nodes` field
+(unfiltered) coexists with `doc.nodes(name)` proc (filtered) the
+same way `KdlNode.children` (field) coexists with
+`n.children(doc, name)` (proc) — established Nim pattern;
+arity disambiguates.
 
 ### `[x]` `Medium` — Missing `getArg` / `arg(n, idx)` reader
 

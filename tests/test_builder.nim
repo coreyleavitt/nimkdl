@@ -89,7 +89,7 @@ suite "builder — mutation on parsed docs":
     parseGet("a 1\nb\na 2\nc", doc):
       let removed = doc.removeNode("a")
       check removed == 2
-      check doc.findNode("a").isNone
+      check doc.node("a").isNone
 
   test "doc.replaceNode swaps the first matching top-level node":
     parseGet("a 1\nb\na 2", doc):
@@ -97,7 +97,7 @@ suite "builder — mutation on parsed docs":
       newer.addArg(doc, newStringValue("replaced"))
       check doc.replaceNode("a", newer)
       # First `a` was replaced; second `a` still present.
-      let matches = doc.findNodes("a")
+      let matches = doc.nodes("a")
       check matches.len == 2
       check matches[0].entries[0].argValue.strVal == "replaced"
 
@@ -180,4 +180,4 @@ suite "builder — round-trip after edits":
       let reparsed = parse(text)
       check reparsed.isOk
       if reparsed.isOk:
-        check reparsed.get.findNodes("rule").len == 3
+        check reparsed.get.nodes("rule").len == 3
