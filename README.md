@@ -47,25 +47,21 @@ Every other config-language query system (JSON Path, jq, CUE, KQL, …) silently
 
 ### KDL v2 (kdl.dev/spec)
 
-**Full**, modulo the explicitly-deferred items below:
+**Full** v2 spec coverage:
 
-- Lexer: all v2 token forms — identifiers (bare + quoted + raw-string), strings (regular / raw with arbitrary `#` count / multi-line with indentation strip / raw multi-line), numbers (decimal / hex / octal / binary with underscore separators, sign, fractional, exponent), keywords (`#true`/`#false`/`#null`/`#inf`/`#-inf`/`#nan`), punctuation, slashdash `/-`, line + nested-block comments, line continuations (with optional inline comments), whitespace-escape `\<ws>`, `\u{XXXX}` escape with surrogate rejection, BOM at input start.
-- Parser: documents, nodes (incl. quoted/raw-string names), entries (positional args + properties with last-write-wins on repeats), nested children, type annotations on nodes/values/property-values, slashdash on nodes/entries/children-blocks.
-- Encoder: canonical form — bare-emit identifiers when safe (with reserved-bareword quoting), hex/oct/bin → decimal, underscore-stripping, `#inf`/`#-inf`/`#nan` keyword form, minimal-escape strings, type-annotation preservation. Pretty (4-space indent) + compact modes.
+- Lexer: all v2 token forms — identifiers (bare + quoted + raw-string), strings (regular / raw with arbitrary `#` count / multi-line with indentation strip / raw multi-line), numbers (decimal / hex / octal / binary with underscore separators, sign, fractional, exponent), keywords (`#true`/`#false`/`#null`/`#inf`/`#-inf`/`#nan`), punctuation, slashdash `/-`, line + nested-block comments, line continuations (with optional inline comments), whitespace-escape `\<ws>`, `\u{XXXX}` escape with surrogate rejection, BOM at input start, full Unicode whitespace + newline tables, bidi-control codepoint rejection, bare-ident-as-string with reserved-keyword rejection.
+- Parser: documents, nodes (incl. quoted/raw-string names), entries (positional args + properties with last-write-wins on repeats), nested children, type annotations on nodes/values/property-values, slashdash on nodes/entries/children-blocks, token-adjacency enforcement.
+- Encoder: canonical form (`emPretty` / `emCompact`) + byte-lossless `emPreserve` (default) that reproduces the original source bytes when possible and surgically splices canonical output only into the byte ranges that diverge from the parse-time fingerprint.
+- Reserved-type interpretation (spec §3 "Reserved Type Annotations") — all ~30 spec-defined tags validated at parse time (numeric range checks for `i8`..`u128`/`f32`/`f64`/`isize`/`usize`, RFC/ISO format validation for `uuid`/`ipv4`/`ipv6`/`date`/`time`/`date-time`/`duration`/`email`/`url`/etc., ISO registry membership for `country-2`/`country-3`/`currency`, IEEE 754-2008 format checks for `decimal`/`decimal64`/`decimal128`).
+- Multi-error reporting — `parseAll(source)` collects every lex + parse error at three levels (doc / node / entry) and returns a partial doc.
 
-Conformance: **314 / 338** of the [kdl-org/kdl test corpus](https://github.com/kdl-org/kdl/tree/main/tests/test_cases) passes (vendored at `tests/conformance/`). 24 cases skipped with documented v0.2 reasons in `tests/conformance/skips.txt`:
-
-- Full Unicode bare-ident charset
-- Tighter number-lexer rejection of malformed forms (`1e`, `.0`, `1_`, etc.)
-- Hex literals that exceed int64 (deferred until kvBigInt variant)
-- Multi-line string corner cases (escape interactions with closing-line indent)
-- Specific spec corners (BOM-mid-file rejection, v1 legacy raw-string rejection, etc.)
+Conformance: **338 / 338** of the [kdl-org/kdl test corpus](https://github.com/kdl-org/kdl/tree/main/tests/test_cases) passes (vendored at `tests/conformance/`). No skipped cases. Additionally, `tests/conformance` includes a **byte-equivalence harness** asserting `encode(parse(x), emPreserve) == x` for every positive corpus case (243 cases).
 
 The harness runs in `./dev test` (tier 2). The reference interpreter (a table-driven independent recognizer from `grammar.nim`) differential-tests every case against the hand parser; agreement is the strongest validity signal we have.
 
 ### KDL Schema Language (KSL) — **NOT implemented**
 
-KSL targets KDL v1 and has no working reference implementation. We replace it with **Nim-types-are-the-schema** via the `parse[T]` macro (#528). A pragma-annotated Nim object is the canonical schema; the macro reflects on it at compile time via `getImpl` and generates the KDL-to-field decoder directly. No separate `.ksl` file format.
+KSL targets KDL v1 and has no working reference implementation. We replace it with **Nim-types-are-the-schema** via `deriveDecode[T]` + `decode[T]` (and the symmetric `deriveEncode[T]` + `encode[T]`). A pragma-annotated Nim object is the canonical schema; the macros reflect on it at compile time via `getImpl` and generate the KDL-to-field decoder / encoder directly. No separate `.ksl` file format. Combined with the `kdlReserved` pragma (field-level OR type-level), the resulting feature set is a **strict superset** of KDL Schema's portable-schema-file capability — at the cost of being Nim-only.
 
 ### KDL Query Language (KQL) — **NOT implemented**
 
