@@ -1220,23 +1220,57 @@ macro deriveEncode*(typ: typedesc): untyped =
     echo result.repr
     echo "==="
 
-proc encode*[T: object](v: T): Result[string, ParseError] =
-  ## Render a typed value `v` as canonical KDL text.
+proc encodeNode*[T: object](v: T, doc: var KdlDoc):
+                            Result[KdlNode, ParseError] =
+  ## Render a typed value as a single `KdlNode`, ready to insert into
+  ## `doc`'s top level (or as a child of an existing node). The
+  ## low-level primitive: callers compose multi-node docs, mix typed
+  ## values with manually-built nodes, or assemble fragments.
   ##
-  ## Returns `Err(peReservedTypeInvalid, ...)` when a field carrying a
-  ## `kdlReserved` pragma holds content that doesn't match the
-  ## declared tag's RFC/ISO interpretation — symmetric Layer 1
-  ## validation on the encode side. For non-reserved typed values
-  ## (or values whose content does match their tag), succeeds.
+  ## `doc` is `var` because any string-typed entries (names, prop
+  ## names, type annotations) need to be interned into it.
+  ##
+  ## Subject to Layer 1 `kdlReserved` validation: a typed value with a
+  ## kdlReserved pragma whose content doesn't match its tag returns
+  ## `Err(peReservedTypeInvalid, ...)`.
+  ##
+  ## Requires `deriveEncode(T)` to have been called.
+  mixin kdlEncodeImpl
+  kdlEncodeImpl(v, doc)
+
+proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
+  ## Render a typed value as KDL text. Default `mode` is `emPretty`
+  ## (multi-line, indented) — the right default for the typical call
+  ## site, which is constructing a value from scratch in Nim and
+  ## emitting it. `emCompact` produces single-line, `;`-separated
+  ## output. `emPreserve` falls through to canonical here because a
+  ## freshly-constructed value has no sourceText to preserve.
+  ##
+  ## Subject to Layer 1 `kdlReserved` validation — see `encodeNode`.
   ##
   ## Requires `deriveEncode(T)` to have been called.
   mixin kdlEncodeImpl
   var doc = newDoc()
-  let nRes = kdlEncodeImpl(v, doc)
+  let nRes = encodeNode(v, doc)
   if nRes.isErr:
     return err[string, ParseError](nRes.getErr)
   doc.nodes.add(nRes.get)
-  ok[string, ParseError](kdlEncode.encode(doc))
+  ok[string, ParseError](kdlEncode.encode(doc, mode))
+
+proc encode*[T](vs: seq[T], mode = emPretty): Result[string, ParseError] =
+  ## Render a sequence of typed values as KDL text: each element
+  ## becomes one top-level node. Symmetric with `decode[seq[T]]`.
+  ## Stops at the first `kdlReserved` validation failure.
+  ##
+  ## Requires `deriveEncode(T)` to have been called.
+  mixin kdlEncodeImpl
+  var doc = newDoc()
+  for v in vs:
+    let nRes = encodeNode(v, doc)
+    if nRes.isErr:
+      return err[string, ParseError](nRes.getErr)
+    doc.nodes.add(nRes.get)
+  ok[string, ParseError](kdlEncode.encode(doc, mode))
 
 # ---------------------------------------------------------------------------
 # parse[T]

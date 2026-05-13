@@ -176,16 +176,27 @@ Tests live in `tests/test_decode_all.nim` covering: clean input,
 parse-error-doesn't-stop-siblings, decode-error-doesn't-stop-siblings,
 single-T missing-node, and combined parse+decode error aggregation.
 
-### `[ ]` `Medium` — encode[T] has no EncodeMode parameter
+### `[x]` `Medium` — encode[T] has no EncodeMode parameter
 
-Typed `encode[T](v)` always produces canonical (emPretty) output.
-There is no way to compact-encode a typed value.
+Resolved as a layered API per the BACKLOG sketch (we did both
+options):
 
-**Fix:** add optional `mode = emPretty` parameter — OR expose
-`encodeNode[T](v): Result[KdlNode, ParseError]` so callers can
-assemble the doc and choose mode.
+- **New primitive**: `encodeNode*[T: object](v, doc: var KdlDoc):
+  Result[KdlNode, ParseError]` — typed-value → single AST node.
+  Composable for multi-node docs, manual-node mixing, and
+  fragment assembly.
+- **`encode[T](v, mode = emPretty)`**: thin wrapper that calls
+  `encodeNode` → wraps in a fresh doc → renders at the requested
+  mode. Default `emPretty` (vs `encode(doc)`'s `emPreserve`)
+  because a freshly-constructed typed value has no source bytes
+  to preserve.
+- **`encode[seq[T]](vs, mode = emPretty)`**: each element becomes
+  one top-level node. Symmetric with `decode[seq[T]]`. Layer 1
+  kdlReserved validation stops at the first failure.
 
-File: `src/codegen.nim:1225`.
+Mirrors the parse/decode layering: `parse` (text→AST) +
+`decode[T]` (AST→T) ↔ `encodeNode[T]` (T→AST) + `encode[T]`
+(T→text).
 
 ### `[x]` `Medium` — Doc-level `remove` / `replace` drop the qualifier
 

@@ -146,3 +146,72 @@ suite "deriveEncode — children":
       if back.isOk:
         check back.get.name == "top"
         check back.get.inner.label == "bottom"
+
+# ---------------------------------------------------------------------------
+# M2: encode mode + encodeNode primitive
+# ---------------------------------------------------------------------------
+
+suite "encodeNode[T] — typed value to KdlNode primitive":
+  test "encodeNode produces a node with the right name and entries":
+    let v = Simple(name: "x", count: 3)
+    var doc = newDoc()
+    let r = encodeNode(v, doc)
+    check r.isOk
+    if r.isOk:
+      let n = r.get
+      check doc.resolveName(n) == "simple"
+      check n.hasProp(doc, "name")
+      check n.prop(doc, "name").get.strVal == "x"
+      check n.prop(doc, "count").get.intVal == 3
+
+suite "encode[T] — mode parameter":
+  test "default mode is emPretty (multi-line children block)":
+    let o = Outer(name: "top", inner: Inner(label: "bottom"))
+    let r = encode(o)  # no explicit mode
+    check r.isOk
+    if r.isOk:
+      # Pretty mode wraps the child block over multiple lines.
+      check r.get.contains("{\n")
+      check r.get.contains("\n}")
+
+  test "emCompact produces single-line output":
+    let o = Outer(name: "top", inner: Inner(label: "bottom"))
+    let r = encode(o, mode = emCompact)
+    check r.isOk
+    if r.isOk:
+      # Compact mode: no newlines, single `{ ... }` inline.
+      check "\n" notin r.get
+      check "outer" in r.get
+      check "inner" in r.get
+
+  test "encode[seq[T]] emits one top-level node per element":
+    let vs = @[
+      Simple(name: "a", count: 1),
+      Simple(name: "b", count: 2),
+      Simple(name: "c", count: 3),
+    ]
+    let r = encode(vs)
+    check r.isOk
+    if r.isOk:
+      # Three nodes, each named "simple".
+      let occurrences = r.get.count("simple ")
+      check occurrences == 3
+      # Round-trip: parse back to seq[Simple].
+      let back = decode[seq[Simple]](r.get)
+      check back.isOk
+      if back.isOk:
+        check back.get.len == 3
+        check back.get[1].count == 2
+
+  test "kdlReserved validation fires regardless of mode":
+    # Tagged.bindAddr has {.kdlReserved: "ipv4".} — a non-IPv4 value
+    # must surface as an Err whether we asked for emPretty, emCompact,
+    # or the default. Mode is orthogonal to validity.
+    let bad = Tagged(bindAddr: "not-an-ip")
+    check encode(bad).isErr
+    check encode(bad, mode = emCompact).isErr
+    check encode(bad, mode = emPretty).isErr
+    # And a valid one succeeds across all modes.
+    let good = Tagged(bindAddr: "127.0.0.1")
+    check encode(good).isOk
+    check encode(good, mode = emCompact).isOk
