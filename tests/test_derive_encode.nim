@@ -215,3 +215,16 @@ suite "encode[T] — mode parameter":
     let good = Tagged(bindAddr: "127.0.0.1")
     check encode(good).isOk
     check encode(good, mode = emCompact).isOk
+
+suite "encode[T] — error diagnostics":
+  test "kdlReserved failure hint includes Type.field path":
+    # Tagged.bindAddr is kdlReserved=ipv4; a non-IPv4 value should
+    # produce an error whose hint identifies the field. Span info is
+    # synthetic on the encode side (we have no source file).
+    let bad = Tagged(bindAddr: "not-an-ip")
+    let r = encode(bad)
+    check r.isErr
+    if r.isErr:
+      let h = r.getErr.hint
+      check "Tagged" in h
+      check "bindAddr" in h

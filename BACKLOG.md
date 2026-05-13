@@ -238,43 +238,48 @@ for the always-valid-after-init use case, and clarify the docstring.
 
 File: `src/codegen.nim:1293`.
 
-### `[ ]` `Low` — Encode error spans on typed encode are synthetic placeholders
+### `[x]` `Low` — Encode error spans on typed encode are synthetic placeholders
 
-`encode[T]` errors carry `pointSpan(StartPosition)` — line 1:1 with
-no useful location info. Decode errors carry real spans. Not wrong
-(the encode error is about a Nim value, not a source file) but the
-asymmetry is undocumented.
+Resolved with a real diagnostic improvement: encode-side
+`kdlReserved` failures now carry `TypeName.fieldName` as the hint
+prefix (via `prefixEncodeHint` in `codegen.nim`). The span stays
+synthetic — there's no source file to anchor to — and that's now
+explicitly documented on `encode[T]`. The hint field carries the
+useful diagnostic.
 
-**Fix:** document on `encode[T]` that span info is synthetic; the
-`hint` field is the useful diagnostic.
+### `[—]` `Low` — Pragma vocabulary mixes grammatical forms
 
-### `[ ]` `Low` — Pragma vocabulary mixes grammatical forms
+Deliberate non-goal. `kdlNode/kdlArg/kdlProp/kdlChild` (nouns)
+describe the *shape* the field maps to; `kdlSkip/kdlRename`
+(verbs) describe an *action*; `kdlReserved` (adjective) describes
+a *property*. These are different grammatical categories because
+they're doing different jobs. The spec itself mixes "property"
+(noun) and "slashdash" (verb-y); forcing one form is bikeshedding.
 
-`kdlNode/kdlArg/kdlAttr/kdlChild` (nouns), `kdlSkip/kdlRename`
-(verbs), `kdlReserved` (adjective). Align to one form (nouns or
-adjectives — `kdlOmit`/`kdlIgnore` for skip, `kdlName` for rename).
+### `[x]` `Low` — Internal symbols leaking via `*` export
 
-### `[ ]` `Low` — Internal symbols leaking via `*` export
+Resolved by dropping `*` from the macro-reflection internals
+that are used only at compile time inside `codegen.nim` itself:
+`collectShape`, `VariantBranch`, `VariantSpec`, `TypeShape`.
+The decoder error constructors (`mismatchErrAt`, `missingErrAt`,
+`enumMismatchErrAt`, `discriminatorErrAt`) stay exported because
+the macros emit bare-ident calls into user-scope decoder bodies;
+the user's compiled code resolves them by name. `embedAux` stays
+exported for the same reason (template `embed*` expands at the
+caller, references embedAux in caller scope).
 
-These should not be in the public surface:
-- `embedAux` (template plumbing — `codegen.nim:1270`)
-- `collectShape`, `VariantBranch`, `VariantSpec`, `TypeShape`
-  (macro-reflection internals — `codegen.nim:501-515`)
-- `mismatchErrAt`, `missingErrAt`, `enumMismatchErrAt`,
-  `discriminatorErrAt` (decoder helper constructors —
-  `codegen.nim:108-125`)
+### `[x]` `Low` — Module docstring default mode is stale
 
-**Fix:** drop `*` from each. If any are needed for `-d:dumpKdlGen`
-debugging, surface that conditionally.
+`src/encode.nim:4` updated to list emPreserve (default), emPretty,
+and emCompact instead of claiming emPretty was the default.
 
-### `[ ]` `Low` — Module docstring default mode is stale
+### `[x]` `Low` — codegen.nim's `hasProp` overload lacks a docstring
 
-`src/encode.nim:4` says `emPretty (default)` but the actual default is
-`emPreserve`. One-line fix.
-
-### `[ ]` `Low` — codegen.nim's `hasProp` overload lacks a docstring
-
-File: `src/codegen.nim:267-269`.
+Resolved as part of Batch C Slice 2 (InternedStr-keyed
+disambiguation). The renamed `hasPropInterned` and sibling
+`*Interned` helpers now sit under a module-level docstring block
+explaining the layer boundary and why the `Interned` suffix is
+load-bearing.
 
 ---
 

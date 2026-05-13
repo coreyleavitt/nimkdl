@@ -497,20 +497,20 @@ proc parseIdentDefs(identDefs: NimNode, argCursor: var int):
     result.add(spec)
 
 type
-  VariantBranch* = object
+  VariantBranch = object
     discValue*: NimNode        ## the enum-member identifier (e.g. `akInject`)
     fields*: seq[FieldSpec]    ## fields under this branch
 
-  VariantSpec* = object
+  VariantSpec = object
     disc*: FieldSpec           ## the discriminator field
     branches*: seq[VariantBranch]
 
-  TypeShape* = object
+  TypeShape = object
     shared*: seq[FieldSpec]    ## fields appearing before any case block
     hasVariant*: bool
     variant*: VariantSpec
 
-proc collectShape*(recList: NimNode): TypeShape =
+proc collectShape(recList: NimNode): TypeShape =
   ## Walk the `nnkRecList` of a type's `nnkObjectTy` and split into
   ## (shared regular fields, optional variant spec). Detects `nnkRecCase`
   ## as the trigger for variant decoding.
@@ -1007,24 +1007,44 @@ macro deriveDecode*(typ: typedesc): untyped =
 # deriveEncode — symmetric counterpart to deriveDecode
 # ---------------------------------------------------------------------------
 
-proc emitReservedTagValidate(f: FieldSpec, valIdent: NimNode): NimNode =
+proc prefixEncodeHint*(err: var ParseError, path: string) {.inline.} =
+  ## Mutate `err` in place so its `hint` begins with `path: ...`.
+  ## Used by macro-emitted encode validators to surface
+  ## `TypeName.fieldName` context, since the encode side has no real
+  ## source-file span (the value came from Nim, not from a parse).
+  if err.hint.len > 0:
+    err.hint = path & ": " & err.hint
+  else:
+    err.hint = path
+
+proc emitReservedTagValidate(f: FieldSpec, valIdent: NimNode,
+                             pathLit: NimNode): NimNode =
   ## Emit a runtime check that `valIdent`'s tagged content matches the
   ## tag's spec interpretation. Symmetric Layer 1: parse-time validates
   ## inputs; encode-time validates outputs so we never silently produce
   ## malformed KDL. Empty when no `kdlReserved` is declared.
+  ##
+  ## `pathLit` is a string literal of the form `TypeName.fieldName` that
+  ## gets prefixed onto the error's `hint` on failure — see L1 in
+  ## BACKLOG.md. The encode span stays synthetic; the hint carries the
+  ## useful diagnostic.
   if f.expectedReserved.len == 0:
     return newEmptyNode()
   let tagLit = newLit(f.expectedReserved)
   quote do:
     let vcheck = validateReserved(`tagLit`, `valIdent`)
     if vcheck.isErr:
-      return err[KdlNode, ParseError](vcheck.getErr)
+      var e = vcheck.getErr
+      prefixEncodeHint(e, `pathLit`)
+      return err[KdlNode, ParseError](e)
 
-proc encodeValueCore(f: FieldSpec, sourceAccess, valSym, docIdent: NimNode):
-    NimNode =
+proc encodeValueCore(f: FieldSpec, sourceAccess, valSym, docIdent,
+                     pathLit: NimNode): NimNode =
   ## Shared body: build a KdlValue from `sourceAccess`, optionally tag
   ## with kdlReserved, validate, into `valSym`. Used by both arg and
   ## attr emitters; the Option case calls this on `sourceAccess.get`.
+  ## `pathLit` is the string literal for `TypeName.fieldName` used by
+  ## the reserved-tag validator on failure.
   let inner =
     if f.isOption: newDotExpr(sourceAccess, ident("get"))
     else: sourceAccess
@@ -1035,15 +1055,15 @@ proc encodeValueCore(f: FieldSpec, sourceAccess, valSym, docIdent: NimNode):
     let tagLit = newLit(f.expectedReserved)
     result.add quote do:
       `valSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
-  result.add(emitReservedTagValidate(f, valSym))
+  result.add(emitReservedTagValidate(f, valSym, pathLit))
 
-proc emitArgEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
-    NimNode =
+proc emitArgEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent,
+                   pathLit: NimNode): NimNode =
   ## Emit code that appends `v.fieldName` as a positional argument on
   ## the generated node. For Option fields, `none` skips the entry
   ## entirely; `some(v)` emits `v` normally (with kdlReserved checks).
   let valSym = genSym(nskVar, "argVal_" & f.nimName)
-  let core = encodeValueCore(f, sourceAccess, valSym, docIdent)
+  let core = encodeValueCore(f, sourceAccess, valSym, docIdent, pathLit)
   let appendStmt = quote do:
     `nodeIdent`.entries.add(KdlEntry(
       kind: keArgument,
@@ -1057,13 +1077,13 @@ proc emitArgEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
   else:
     newStmtList(core, appendStmt)
 
-proc emitAttrEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
-    NimNode =
+proc emitAttrEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent,
+                    pathLit: NimNode): NimNode =
   ## Emit code that appends `v.fieldName` as a `name=value` property.
   ## For Option fields, `none` skips the entry entirely.
   let valSym = genSym(nskVar, "attrVal_" & f.nimName)
   let kdlNameLit = newLit(f.kdlName)
-  let core = encodeValueCore(f, sourceAccess, valSym, docIdent)
+  let core = encodeValueCore(f, sourceAccess, valSym, docIdent, pathLit)
   let appendStmt = quote do:
     `nodeIdent`.entries.add(KdlEntry(
       kind: keProperty,
@@ -1128,12 +1148,13 @@ proc emitChildEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
       `setTagStmts`
       `nodeIdent`.children.add(`childNodeSym`)
 
-proc emitFieldEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
-    NimNode =
+proc emitFieldEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode,
+                     typeName: string): NimNode =
+  let pathLit = newLit(typeName & "." & f.nimName)
   case f.kind
   of fkSkip:  newStmtList()
-  of fkArg:   emitArgEncode(f, sourceAccess, docIdent, nodeIdent)
-  of fkAttr:  emitAttrEncode(f, sourceAccess, docIdent, nodeIdent)
+  of fkArg:   emitArgEncode(f, sourceAccess, docIdent, nodeIdent, pathLit)
+  of fkAttr:  emitAttrEncode(f, sourceAccess, docIdent, nodeIdent, pathLit)
   of fkChild: emitChildEncode(f, sourceAccess, docIdent, nodeIdent)
 
 macro deriveEncode*(typ: typedesc): untyped =
@@ -1163,6 +1184,7 @@ macro deriveEncode*(typ: typedesc): untyped =
 
   let vIdent = ident("v")
   let docIdent = ident("doc")
+  let typeNameStr = $typSym       # Nim type name for error hint paths
   let nodeNameLit = newLit(extractNodeName(typSym))
   let typeReserved = extractTypeReserved(typSym)
 
@@ -1184,22 +1206,26 @@ macro deriveEncode*(typ: typedesc): untyped =
   if not shape.hasVariant:
     for f in shape.shared:
       let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
-      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent))
+      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent,
+                                   typeNameStr))
   else:
     # Variant types: shared fields always encode; branch fields only
     # encode for the active discriminator.
     for f in shape.shared:
       let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
-      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent))
+      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent,
+                                   typeNameStr))
     let disc = shape.variant.disc
     let discAccess = newDotExpr(vIdent, ident(disc.nimName))
-    procBody.add(emitFieldEncode(disc, discAccess, docIdent, nodeIdent))
+    procBody.add(emitFieldEncode(disc, discAccess, docIdent, nodeIdent,
+                                 typeNameStr))
     let caseStmt = nnkCaseStmt.newTree(discAccess)
     for branch in shape.variant.branches:
       var bb = newStmtList()
       for f in branch.fields:
         let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
-        bb.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent))
+        bb.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent,
+                               typeNameStr))
       if bb.len == 0:
         bb.add(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
       caseStmt.add(nnkOfBranch.newTree(branch.discValue, bb))
@@ -1247,6 +1273,12 @@ proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
   ## freshly-constructed value has no sourceText to preserve.
   ##
   ## Subject to Layer 1 `kdlReserved` validation — see `encodeNode`.
+  ##
+  ## **Error diagnostics:** the returned ParseError's `span` is
+  ## synthetic (`pointSpan(StartPosition)`) — there's no source file
+  ## to anchor it to. The useful diagnostic lives in `hint`, which
+  ## is prefixed with `TypeName.fieldName` so callers can point
+  ## directly at the offending field.
   ##
   ## Requires `deriveEncode(T)` to have been called.
   mixin kdlEncodeImpl

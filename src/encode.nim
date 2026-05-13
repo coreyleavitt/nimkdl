@@ -1,9 +1,12 @@
 ## encode — KdlDoc → text (canonical KDL v2 output).
 ##
-## Two modes:
+## Three modes:
 ##
-##   emPretty  (default) — multi-line, indented children blocks
-##   emCompact           — single-line, `;` between sibling nodes
+##   emPreserve (default) — byte-lossless for parsed, unmodified docs;
+##                          surgical splice for mutated docs (preserves
+##                          comments and exact whitespace where it can)
+##   emPretty             — multi-line, indented children blocks
+##   emCompact            — single-line, `;` between sibling nodes
 ##
 ## ## Canonical normalization
 ##
