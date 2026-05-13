@@ -310,6 +310,12 @@ type
     expectedReserved: string  ## non-empty ⇒ source value must carry
                               ## this reserved-type annotation (set
                               ## by the `{.kdlReserved: "tag".}` pragma)
+    isOption: bool            ## true ⇒ field type is `Option[T]`;
+                              ## absent input maps to `none(T)`,
+                              ## present input wraps in `some(T)`,
+                              ## and encode emits only when `some`
+    innerType: NimNode        ## valid when isOption: the `T` of
+                              ## `Option[T]`. Otherwise nil.
 
 proc fieldKindFromPragmas(prag: NimNode): FieldKind =
   ## Walk a field's pragma list and return its FieldKind from explicit
@@ -354,6 +360,16 @@ proc typeNodeIsSeq(t: NimNode): bool =
   ## True if `t` is `seq[T]` for some T. Detected at the syntactic level
   ## because `seq` is the only generic we special-case for fkChild default.
   t.kind == nnkBracketExpr and t.len >= 1 and (($t[0]) == "seq")
+
+proc typeNodeIsOption(t: NimNode): bool =
+  ## True if `t` is `Option[T]` for some T. Detected at the syntactic
+  ## level — the macro doesn't need (or want) to resolve through Nim's
+  ## type system since `Option` is a stable stdlib name.
+  t.kind == nnkBracketExpr and t.len >= 1 and (($t[0]) == "Option")
+
+proc optionInnerType(t: NimNode): NimNode =
+  ## Unwrap `Option[T]` → `T`. Caller verifies `typeNodeIsOption(t)`.
+  t[1]
 
 proc typeNodeIsEnum(t: NimNode): bool =
   ## True if `t` resolves to an `nnkEnumTy`. Routes decode failures
@@ -405,11 +421,16 @@ proc typeNodeIsObject(t: NimNode): bool =
   else:
     false
 
+proc extractNodeName(typeSym: NimNode): string  # forward decl
+
 proc parseIdentDefs(identDefs: NimNode, argCursor: var int):
     seq[FieldSpec] =
   ## Walk one `nnkIdentDefs` (a single declaration line like `a, b: int = 0`)
   ## and emit a FieldSpec per name. Mutates `argCursor` for each fkArg
   ## field encountered.
+  ##
+  ## (forward-decl shim: `extractNodeName` is defined later in this file
+  ## but reflectField needs it for kdlChild kdlName resolution.)
   expectKind(identDefs, nnkIdentDefs)
   let typeNode = identDefs[identDefs.len - 2]
   let defaultExpr = identDefs[identDefs.len - 1]
@@ -432,18 +453,46 @@ proc parseIdentDefs(identDefs: NimNode, argCursor: var int):
       prag = nameNode[1]
     else:
       nimName = ""
+    # Detect `Option[T]`. We "unwrap" for the purposes of computing
+    # type-driven defaults (fkChild for objects, fkAttr for primitives)
+    # but keep the original Option-ness on the FieldSpec so the emit
+    # path can wrap the decoded value in `some(...)` / handle `none`.
+    let optWrap = typeNodeIsOption(typeNode)
+    let unwrappedType =
+      if optWrap: optionInnerType(typeNode)
+      else: typeNode
+    if optWrap and typeNodeIsSeq(unwrappedType):
+      error("deriveDecode: Option[seq[T]] is not supported — `seq[T]` " &
+            "already represents the optional-list semantic. Use seq[T] " &
+            "directly.", typeNode)
     let kind =
       if prag.len == 0:
-        (if typeNodeIsObject(typeNode) or typeNodeIsSeq(typeNode):
+        (if typeNodeIsObject(unwrappedType) or typeNodeIsSeq(unwrappedType):
            fkChild
          else: fkAttr)
       else: fieldKindFromPragmas(prag)
-    let kdlName = kdlNameFromPragmas(prag, nimName.toLowerAscii)
+    # For kdlChild fields, the KDL node name comes from the CHILD
+    # TYPE's `{.kdlNode.}` pragma (not the Nim field name). Explicit
+    # `{.kdlRename.}` wins over both. For seq[T] / Option[T] children,
+    # unwrap to the element type before looking up.
+    let renamePragma = kdlNameFromPragmas(prag, "")
+    let kdlName =
+      if renamePragma.len > 0:
+        renamePragma
+      elif kind == fkChild:
+        let childTypeForName =
+          if typeNodeIsSeq(typeNode): typeNode[1]
+          else: unwrappedType
+        extractNodeName(childTypeForName)
+      else:
+        nimName.toLowerAscii
     var spec = FieldSpec(nimName: nimName, kdlName: kdlName,
                          kind: kind, typeNode: typeNode,
                          defaultExpr: defaultExpr,
-                         typeIsEnum: typeNodeIsEnum(typeNode),
-                         expectedReserved: reservedFromPragmas(prag))
+                         typeIsEnum: typeNodeIsEnum(unwrappedType),
+                         expectedReserved: reservedFromPragmas(prag),
+                         isOption: optWrap,
+                         innerType: (if optWrap: unwrappedType else: nil))
     if kind == fkArg:
       spec.argIndex = argCursor
       inc argCursor
@@ -555,6 +604,22 @@ proc extractNodeName(typeSym: NimNode): string =
   else:
     return ($typeSym).toLowerAscii
 
+proc extractTypeReserved(typeSym: NimNode): string =
+  ## Read the `{.kdlReserved: "tag".}` pragma from `typeSym`'s typedef,
+  ## or "" if absent. When set, the generated decoder asserts the
+  ## top-level node carries this tag, and the encoder emits it.
+  let impl = typeSym.getImpl
+  if impl.kind != nnkTypeDef: return ""
+  let nameNode = impl[0]
+  if nameNode.kind != nnkPragmaExpr: return ""
+  let prag = nameNode[1]
+  for p in prag:
+    if p.kind in {nnkExprColonExpr, nnkCall} and p.len >= 2:
+      if $p[0] == "kdlReserved":
+        let lit = p[1]
+        if lit.kind == nnkStrLit: return lit.strVal
+  ""
+
 # ---------------------------------------------------------------------------
 # deriveDecode: the macro that emits `kdlDecodeImpl(target: var T, node, doc)`
 # ---------------------------------------------------------------------------
@@ -611,22 +676,36 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     " ('" & f.kdlName & "')")
   let span = quote do: `nodeIdent`.span
   let mEmit = mismatchEmitter(f)
-  let absentBranch =
-    if f.defaultExpr.kind == nnkEmpty:
-      quote do:
-        return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
-    else:
-      newEmptyNode()  # absent + has default → already set; skip
   let valSym = genSym(nskLet, "kdlArgVal")
   let reservedCheck = emitReservedTagCheck(f, valSym, docIdent)
-  quote do:
-    if `nodeIdent`.hasArg(`idxLit`):
-      let `valSym` = `nodeIdent`.findArg(`idxLit`)
-      `reservedCheck`
-      if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
-        return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
-    else:
-      `absentBranch`
+  if f.isOption:
+    let innerT = f.innerType
+    let localSym = genSym(nskVar, "optLocal_" & f.nimName)
+    quote do:
+      if `nodeIdent`.hasArg(`idxLit`):
+        let `valSym` = `nodeIdent`.findArg(`idxLit`)
+        `reservedCheck`
+        var `localSym`: `innerT`
+        if not kdlDecodeValue(`localSym`, `valSym`, `docIdent`):
+          return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
+        `targetAccess` = some(`localSym`)
+      else:
+        `targetAccess` = none(`innerT`)
+  else:
+    let absentBranch =
+      if f.defaultExpr.kind == nnkEmpty:
+        quote do:
+          return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
+      else:
+        newEmptyNode()  # absent + has default → already set; skip
+    quote do:
+      if `nodeIdent`.hasArg(`idxLit`):
+        let `valSym` = `nodeIdent`.findArg(`idxLit`)
+        `reservedCheck`
+        if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
+          return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
+      else:
+        `absentBranch`
 
 proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     NimNode =
@@ -636,23 +715,60 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
   let missingMsg = newLit("missing required property '" & f.kdlName & "'")
   let span = quote do: `nodeIdent`.span
   let mEmit = mismatchEmitter(f)
-  let absentBranch =
-    if f.defaultExpr.kind == nnkEmpty:
-      quote do:
-        return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
-    else:
-      newEmptyNode()
   let valSym = genSym(nskLet, "kdlAttrVal")
   let reservedCheck = emitReservedTagCheck(f, valSym, docIdent)
+  if f.isOption:
+    let innerT = f.innerType
+    let localSym = genSym(nskVar, "optLocal_" & f.nimName)
+    quote do:
+      let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
+      if `nodeIdent`.hasProp(`keyIdent`):
+        let `valSym` = `nodeIdent`.findProp(`keyIdent`)
+        `reservedCheck`
+        var `localSym`: `innerT`
+        if not kdlDecodeValue(`localSym`, `valSym`, `docIdent`):
+          return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
+        `targetAccess` = some(`localSym`)
+      else:
+        `targetAccess` = none(`innerT`)
+  else:
+    let absentBranch =
+      if f.defaultExpr.kind == nnkEmpty:
+        quote do:
+          return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
+      else:
+        newEmptyNode()
+    quote do:
+      let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
+      if `nodeIdent`.hasProp(`keyIdent`):
+        let `valSym` = `nodeIdent`.findProp(`keyIdent`)
+        `reservedCheck`
+        if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
+          return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
+      else:
+        `absentBranch`
+
+proc emitChildTagCheck(f: FieldSpec, childIdent, docIdent: NimNode): NimNode =
+  ## Layer-3 tag-presence check on a kdlChild's source node. Symmetric
+  ## with emitReservedTagCheck for values but operates on KdlNode's
+  ## typeAnnotation (the `(tag)nodename` annotation rather than
+  ## `(tag)value`). Empty when no constraint is declared.
+  if f.expectedReserved.len == 0:
+    return newEmptyNode()
+  let expectedLit = newLit(f.expectedReserved)
+  let fieldNameLit = newLit(f.kdlName)
   quote do:
-    let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-    if `nodeIdent`.hasProp(`keyIdent`):
-      let `valSym` = `nodeIdent`.findProp(`keyIdent`)
-      `reservedCheck`
-      if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
-        return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
-    else:
-      `absentBranch`
+    if `childIdent`.typeAnnotation == InvalidInterned:
+      return err[void, ParseError](initError(peTypeReservedMismatch,
+        `childIdent`.span,
+        "child '" & `fieldNameLit` & "' expects (" & `expectedLit` &
+        ") tag but source node has no annotation"))
+    let actualTag = `docIdent`.interner.lookup(`childIdent`.typeAnnotation)
+    if actualTag != `expectedLit`:
+      return err[void, ParseError](initError(peTypeReservedMismatch,
+        `childIdent`.span,
+        "child '" & `fieldNameLit` & "' expects (" & `expectedLit` &
+        ") tag but source has (" & actualTag & ")"))
 
 proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     NimNode =
@@ -663,14 +779,34 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let elemSym = genSym(nskVar, "elem")
     let childSym = genSym(nskForVar, "child")
     let recurseRes = genSym(nskLet, "recurseRes")
+    let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
       let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
       for `childSym` in `nodeIdent`.childrenNamed(`nameIdent`):
+        `childTagCheck`
         var `elemSym`: `elemType`
         let `recurseRes` = kdlDecodeImpl(`elemSym`, `childSym`, `docIdent`)
         if `recurseRes`.isErr:
           return err[void, ParseError](`recurseRes`.getErr)
         `targetAccess`.add(`elemSym`)
+  elif f.isOption:
+    let innerT = f.innerType
+    let localSym = genSym(nskVar, "optChild_" & f.nimName)
+    let childSym = genSym(nskLet, "kdlChild")
+    let recurseRes = genSym(nskLet, "recurseRes")
+    let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
+    quote do:
+      let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
+      let `childSym` = `nodeIdent`.findChild(`nameIdent`)
+      if not (`childSym`.name == InvalidInterned):
+        `childTagCheck`
+        var `localSym`: `innerT`
+        let `recurseRes` = kdlDecodeImpl(`localSym`, `childSym`, `docIdent`)
+        if `recurseRes`.isErr:
+          return err[void, ParseError](`recurseRes`.getErr)
+        `targetAccess` = some(`localSym`)
+      else:
+        `targetAccess` = none(`innerT`)
   else:
     # Scalar kdlChild. Required-vs-optional follows the same rule as
     # fkArg / fkAttr: a field with no default value (and no kdlSkip)
@@ -687,10 +823,12 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
       else:
         newEmptyNode()
     let childSym = genSym(nskLet, "kdlChild")
+    let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
       let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
       let `childSym` = `nodeIdent`.findChild(`nameIdent`)
       if not (`childSym`.name == InvalidInterned):
+        `childTagCheck`
         let `recurseRes` = kdlDecodeImpl(`targetAccess`, `childSym`, `docIdent`)
         if `recurseRes`.isErr:
           return err[void, ParseError](`recurseRes`.getErr)
@@ -741,6 +879,26 @@ macro deriveDecode*(typ: typedesc): untyped =
   let docIdent  = ident("doc")
   let tgtIdent  = ident("target")
   var stmts = newStmtList()
+
+  # Type-level `{.kdlReserved: "tag".}` — assert the top-level node
+  # carries the declared tag before decoding any fields. Symmetric with
+  # the field-level pragma; this is the "node has a specific kdlNode
+  # name AND a specific tag" case.
+  let typeReserved = extractTypeReserved(typSym)
+  if typeReserved.len > 0:
+    let tagLit = newLit(typeReserved)
+    stmts.add quote do:
+      if `nodeIdent`.typeAnnotation == InvalidInterned:
+        return err[void, ParseError](initError(peTypeReservedMismatch,
+          `nodeIdent`.span,
+          "type expects (" & `tagLit` & ") tag on its node but " &
+          "source has no annotation"))
+      let actualTag = `docIdent`.interner.lookup(`nodeIdent`.typeAnnotation)
+      if actualTag != `tagLit`:
+        return err[void, ParseError](initError(peTypeReservedMismatch,
+          `nodeIdent`.span,
+          "type expects (" & `tagLit` & ") tag on its node but " &
+          "source has (" & actualTag & ")"))
 
   if not shape.hasVariant:
     # Non-variant path: decode directly into target's fields.
@@ -864,51 +1022,82 @@ proc emitReservedTagValidate(f: FieldSpec, valIdent: NimNode): NimNode =
     if vcheck.isErr:
       return err[KdlNode, ParseError](vcheck.getErr)
 
-proc emitArgEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
+proc encodeValueCore(f: FieldSpec, sourceAccess, valSym, docIdent: NimNode):
     NimNode =
-  ## Emit code that appends `v.fieldName` as a positional argument on
-  ## the generated node. Applies the `kdlReserved` tag to the value's
-  ## `typeAnnotation` when declared, then validates its content.
-  let valSym = genSym(nskVar, "argVal_" & f.nimName)
+  ## Shared body: build a KdlValue from `sourceAccess`, optionally tag
+  ## with kdlReserved, validate, into `valSym`. Used by both arg and
+  ## attr emitters; the Option case calls this on `sourceAccess.get`.
+  let inner =
+    if f.isOption: newDotExpr(sourceAccess, ident("get"))
+    else: sourceAccess
   result = newStmtList()
   result.add quote do:
-    var `valSym` = kdlEncodeValue(`sourceAccess`)
+    var `valSym` = kdlEncodeValue(`inner`)
   if f.expectedReserved.len > 0:
     let tagLit = newLit(f.expectedReserved)
     result.add quote do:
       `valSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
   result.add(emitReservedTagValidate(f, valSym))
-  result.add quote do:
+
+proc emitArgEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
+    NimNode =
+  ## Emit code that appends `v.fieldName` as a positional argument on
+  ## the generated node. For Option fields, `none` skips the entry
+  ## entirely; `some(v)` emits `v` normally (with kdlReserved checks).
+  let valSym = genSym(nskVar, "argVal_" & f.nimName)
+  let core = encodeValueCore(f, sourceAccess, valSym, docIdent)
+  let appendStmt = quote do:
     `nodeIdent`.entries.add(KdlEntry(
       kind: keArgument,
       argValue: `valSym`,
       span: `nodeIdent`.span))
+  if f.isOption:
+    quote do:
+      if `sourceAccess`.isSome:
+        `core`
+        `appendStmt`
+  else:
+    newStmtList(core, appendStmt)
 
 proc emitAttrEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
     NimNode =
   ## Emit code that appends `v.fieldName` as a `name=value` property.
+  ## For Option fields, `none` skips the entry entirely.
   let valSym = genSym(nskVar, "attrVal_" & f.nimName)
   let kdlNameLit = newLit(f.kdlName)
-  result = newStmtList()
-  result.add quote do:
-    var `valSym` = kdlEncodeValue(`sourceAccess`)
-  if f.expectedReserved.len > 0:
-    let tagLit = newLit(f.expectedReserved)
-    result.add quote do:
-      `valSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
-  result.add(emitReservedTagValidate(f, valSym))
-  result.add quote do:
+  let core = encodeValueCore(f, sourceAccess, valSym, docIdent)
+  let appendStmt = quote do:
     `nodeIdent`.entries.add(KdlEntry(
       kind: keProperty,
       propName: `docIdent`.interner.intern(`kdlNameLit`),
       propValue: `valSym`,
       span: `nodeIdent`.span))
+  if f.isOption:
+    quote do:
+      if `sourceAccess`.isSome:
+        `core`
+        `appendStmt`
+  else:
+    newStmtList(core, appendStmt)
 
 proc emitChildEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
     NimNode =
-  ## Emit code that recursively encodes a child object (or seq of
-  ## objects) and appends as a nested node. The recursive call returns
-  ## `Result[KdlNode, ParseError]`; propagate Err.
+  ## Emit code that recursively encodes a child object (or seq, or
+  ## Option[Object]) and appends as a nested node. The recursive call
+  ## returns `Result[KdlNode, ParseError]`; propagate Err.
+  ##
+  ## When the field has `kdlReserved`, the produced child node's
+  ## typeAnnotation is set to the declared tag before appending —
+  ## symmetric with the decode-side child-tag assertion.
+  let childNodeSym = genSym(nskVar, "childNode_" & f.nimName)
+  let setTagStmts =
+    if f.expectedReserved.len > 0:
+      let tagLit = newLit(f.expectedReserved)
+      quote do:
+        `childNodeSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
+    else:
+      newEmptyNode()
+
   if typeNodeIsSeq(f.typeNode):
     let elemSym = genSym(nskForVar, "childElem_" & f.nimName)
     let recSym  = genSym(nskLet, "childRes_" & f.nimName)
@@ -917,14 +1106,29 @@ proc emitChildEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
         let `recSym` = kdlEncodeImpl(`elemSym`, `docIdent`)
         if `recSym`.isErr:
           return err[KdlNode, ParseError](`recSym`.getErr)
-        `nodeIdent`.children.add(`recSym`.get)
+        var `childNodeSym` = `recSym`.get
+        `setTagStmts`
+        `nodeIdent`.children.add(`childNodeSym`)
+  elif f.isOption:
+    let recSym = genSym(nskLet, "childRes_" & f.nimName)
+    let innerAccess = newDotExpr(sourceAccess, ident("get"))
+    quote do:
+      if `sourceAccess`.isSome:
+        let `recSym` = kdlEncodeImpl(`innerAccess`, `docIdent`)
+        if `recSym`.isErr:
+          return err[KdlNode, ParseError](`recSym`.getErr)
+        var `childNodeSym` = `recSym`.get
+        `setTagStmts`
+        `nodeIdent`.children.add(`childNodeSym`)
   else:
     let recSym = genSym(nskLet, "childRes_" & f.nimName)
     quote do:
       let `recSym` = kdlEncodeImpl(`sourceAccess`, `docIdent`)
       if `recSym`.isErr:
         return err[KdlNode, ParseError](`recSym`.getErr)
-      `nodeIdent`.children.add(`recSym`.get)
+      var `childNodeSym` = `recSym`.get
+      `setTagStmts`
+      `nodeIdent`.children.add(`childNodeSym`)
 
 proc emitFieldEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
     NimNode =
@@ -962,6 +1166,7 @@ macro deriveEncode*(typ: typedesc): untyped =
   let vIdent = ident("v")
   let docIdent = ident("doc")
   let nodeNameLit = newLit(extractNodeName(typSym))
+  let typeReserved = extractTypeReserved(typSym)
 
   var procBody = newStmtList()
   let nodeSym = genSym(nskVar, "encNode")
@@ -972,6 +1177,10 @@ macro deriveEncode*(typ: typedesc): untyped =
       entries: @[],
       children: @[],
       span: pointSpan(StartPosition))
+  if typeReserved.len > 0:
+    let tagLit = newLit(typeReserved)
+    procBody.add quote do:
+      `nodeSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
 
   let nodeIdent = nodeSym
   if not shape.hasVariant:
