@@ -24,49 +24,26 @@ Severity is the column right after the title.
 
 ## Correctness
 
-### `[ ]` `High` — emPreserve: preserved children inside a modified parent lose indentation
+### `[x]` `High` — emPreserve: preserved children in a modified parent lose indentation
 
-When `emitNodePreserve` recurses into children of a dirty parent, an
-unmodified child returns its source bytes verbatim. The source span
-starts at the child's first token (no leading whitespace), so the
-reconstructed parent block shows children flush-left.
+Resolved by c3e6d16. Encoder now does textual-splice at byte
+granularity — starts from the node's source bytes and replaces only
+the elements that diverge from their parse-time fingerprint. No
+canonical reconstruction means no flush-left seam can appear.
 
-**Fix:** prepend `PrettyIndent.repeat(indent + 1)` before each
-preserved-child's source bytes, OR fall back to canonical for all
-children whenever the parent itself is dirty (simpler, less code).
+### `[x]` `High` — emPreserve: preserved nodes produce spurious blank lines
 
-File: `src/encode.nim:262-275`.
+Resolved by c3e6d16. Parser now ends `KdlNode.span` at the last
+consumed token's finish (not at the next token's start), so trailing
+newlines / terminators live at the doc level where the splice can
+preserve them correctly.
 
-### `[ ]` `High` — emPreserve: preserved nodes produce spurious blank lines
+### `[x]` `Medium` — parseAll: node-level error inside a children block inflates error count
 
-`KdlNode.span.finish.offset` is set to `p.peek.span.start` after the
-node's terminator is consumed (parser.nim:450), so the span already
-includes the trailing newline. `encode()` then calls
-`parts.join("\n")` and inserts a SECOND newline between siblings.
-Output stays syntactically valid but is no longer byte-stable.
-
-**Fix:** strip trailing newline from preserved source bytes before
-appending, OR record `span.finish.offset` at the position just before
-the terminator.
-
-Files: `src/encode.nim:289-296`, `src/parser.nim:450`.
-
-### `[ ]` `Medium` — parseAll: node-level error inside a children block inflates error count
-
-When a node-level error fires inside `{ ... }`, `parseChildren`
-propagates Err up. `skipToRecovery` stops at `tkRBrace` without
-consuming it; the forward-progress guard then force-advances past `}`,
-treating the closing brace as a stolen separator. For nested children
-blocks this generates one spurious "expected node name" error per
-nesting depth, and the partial doc loses all well-formed siblings of
-the failed node within the same block.
-
-**Fix:** teach `skipToRecovery` to consume balanced `{...}` pairs
-(brace-depth counter; advance past `}` only when depth reaches zero),
-OR give `parseChildren` its own accumulating loop matching
-`parseDocumentAccumulating`.
-
-Files: `src/parser.nim:454-473`, `src/parser.nim:497-508`.
+Resolved by c3e6d16. `parseChildren` is now accumulating-aware
+(mirror of `parseDocumentAccumulating`); inner parseNode failures
+push to the error buffer and call the new `skipToBlockBoundary`
+helper (balanced-brace-aware) instead of propagating up.
 
 ### `[ ]` `Medium` — Raw field mutation bypasses emPreserve silently
 
