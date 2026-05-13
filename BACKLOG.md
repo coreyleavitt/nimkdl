@@ -159,18 +159,22 @@ all exist for alloc-free presence checks. The Option-vs-sentinel
 distinction also lets callers tell missing properties apart from
 properties whose value is `#null`.
 
-### `[ ]` `High` — decode[T] has no decodeAll[T] equivalent for typed multi-error
+### `[x]` `High` — decode[T] has no decodeAll[T] equivalent for typed multi-error
 
-`parseAll` exists for the untyped layer; `decode[T]` doesn't have a
-matching multi-error variant. The typed layer therefore stops at the
-first error. Inline comment in `codegen.nim` (line 106-107)
-acknowledges this gap explicitly.
+Resolved by adding `decodeAll[T](source, sourcePath) →
+tuple[value, errors]` in `codegen.nim`. Aggregates parse-time errors
+(via `parseAll`) AND decode-time errors at the **node** boundary:
+each top-level node either decodes fully or contributes exactly one
+error; siblings continue independently.
 
-**Fix:** add `decodeAll[T](source, sourcePath): tuple[value: T,
-errors: seq[ParseError]]` matching `parseAll`'s contract at the
-typed level.
+Granularity is at the node, not the field — a deliberate scope choice
+to avoid reworking every primitive decoder for per-field
+accumulation. If finer granularity becomes necessary, it'll arrive
+as an additive `granularity` parameter, not a contract break.
 
-File: `src/codegen.nim:106`.
+Tests live in `tests/test_decode_all.nim` covering: clean input,
+parse-error-doesn't-stop-siblings, decode-error-doesn't-stop-siblings,
+single-T missing-node, and combined parse+decode error aggregation.
 
 ### `[ ]` `Medium` — encode[T] has no EncodeMode parameter
 

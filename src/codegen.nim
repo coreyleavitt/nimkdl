@@ -1363,3 +1363,69 @@ proc decode*[T](source: string,
         "expected node '" & wantName & "' at top level"))
     else:
       ok[T, ParseError](outValue)
+
+proc decodeAll*[T](source: string,
+                   sourcePath: string = "<input>"):
+                   tuple[value: T, errors: seq[ParseError]] {.noSideEffect.} =
+  ## Multi-error variant of `decode[T]`. Aggregates parse-time errors
+  ## (via `parser.parseAll`) AND decode-time errors at the **node**
+  ## boundary: each top-level node either decodes fully or contributes
+  ## exactly one error; siblings keep going. Mirrors `parseAll`'s
+  ## tuple-shaped contract at the typed layer.
+  ##
+  ## Caller contract:
+  ##   - `errors.len == 0`              → `value` is fully valid.
+  ##   - `errors.len > 0`, seq[T] case  → `value` holds the elements
+  ##                                       whose nodes decoded; failed
+  ##                                       nodes are skipped.
+  ##   - `errors.len > 0`, single T     → `value` is left default-init
+  ##                                       (caller should not rely on it).
+  ##
+  ## Granularity is deliberately at the node, not the field: rebuilding
+  ## every primitive decoder to accumulate per-field errors is a much
+  ## larger surface change for marginal user value (a mis-shaped node
+  ## is typically re-edited then re-checked). If per-field becomes
+  ## necessary, it'll arrive as an additive `granularity = gField`
+  ## parameter — not a contract break.
+  mixin kdlDecodeImpl, kdlNodeNameImpl
+  let parsed = parser.parseAll(source, sourcePath)
+  var doc = parsed.doc
+  result.errors = parsed.errors
+  when T is seq:
+    type Elem = typeof(default(T)[0])
+    let wantName = kdlNodeNameImpl(typeof(Elem))
+    let nameKey = doc.interner.intern(wantName)
+    for i in 0 ..< doc.nodes.len:
+      if doc.nodes[i].name == nameKey:
+        var elem: Elem
+        let r = kdlDecodeImpl(elem, doc.nodes[i], doc)
+        if r.isErr:
+          result.errors.add(r.getErr)
+        else:
+          result.value.add(elem)
+  else:
+    let wantName = kdlNodeNameImpl(typeof(T))
+    let nameKey = doc.interner.intern(wantName)
+    var found = false
+    for i in 0 ..< doc.nodes.len:
+      if doc.nodes[i].name == nameKey:
+        let r = kdlDecodeImpl(result.value, doc.nodes[i], doc)
+        if r.isErr:
+          result.errors.add(r.getErr)
+          # Decode failed; reset value so a partial half-fill isn't
+          # observable to callers who check `errors.len > 0` first.
+          result.value = default(T)
+        else:
+          found = true
+        break  # single-T: only the first matching node is decoded
+    if not found and result.errors.len == 0:
+      # No parse errors AND no matching node AND no decode error —
+      # we owe the caller a structural "missing required" report so
+      # `errors.len == 0` remains the "fully valid" signal.
+      result.errors.add(initError(peTypeMissingRequired,
+        pointSpan(StartPosition),
+        "expected node '" & wantName & "' at top level"))
+    elif not found:
+      # Matching node existed but decode failed — already added the
+      # error above. Nothing to do.
+      discard
