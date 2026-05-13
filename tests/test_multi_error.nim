@@ -89,3 +89,37 @@ suite "parseAll — entry-level recovery":
     let r = parseAll(src)
     check r.errors.len == 2
     check r.doc.nodes.len == 2
+
+suite "parseAll — children-block recovery":
+  test "name-resolution error inside children block doesn't escape":
+    # `=` isn't a valid node-name token. parseNode fails inside the
+    # children block before consuming any tokens; previously this
+    # propagated to the doc level and caused skipToRecovery to chew
+    # past the closing `}`, generating phantom "expected node name"
+    # errors at every nesting depth.
+    let src = "parent {\n  ok-child\n  = bad\n  good-child\n}\n"
+    let r = parseAll(src)
+    # Exactly one error: the `=` violation. No phantom errors from
+    # the closing `}` or beyond.
+    check r.errors.len == 1
+    # The parent node survives in the partial doc.
+    check r.doc.nodes.len == 1
+    check r.doc.resolveName(r.doc.nodes[0]) == "parent"
+
+  test "siblings of failed node inside children block still parse":
+    let src = "parent {\n  ok-child\n  = bad\n  good-child\n}\n"
+    let r = parseAll(src)
+    check r.errors.len == 1
+    check r.doc.nodes.len == 1
+    let parent = r.doc.nodes[0]
+    var names: seq[string] = @[]
+    for c in parent.children:
+      names.add(r.doc.resolveName(c))
+    check "good-child" in names
+
+  test "error inside nested children block doesn't compound":
+    # Three levels of nesting; error at the innermost level should
+    # produce exactly one error, not three (one per level).
+    let src = "outer {\n  middle {\n    = bad\n  }\n}\n"
+    let r = parseAll(src)
+    check r.errors.len == 1

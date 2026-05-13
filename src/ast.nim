@@ -72,7 +72,15 @@ type
     keProperty   ## key=value pair (e.g. `enabled=#true`)
 
   KdlEntry* = object
+    ## `parseHash` is set by the parser to a fingerprint of the
+    ## entry's canonical content. The encoder's `emPreserve` mode
+    ## uses it to detect whether THIS specific entry was modified
+    ## (vs the whole subtree). When `span` is valid AND
+    ## `hash(current) == parseHash`, the encoder leaves the entry's
+    ## source bytes alone — preserving exact spacing, alignment, and
+    ## any trailing comments anchored to the entry's line.
     span*: Span
+    parseHash*: Hash128
     case kind*: KdlEntryKind
     of keArgument:
       argValue*: KdlValue
@@ -99,6 +107,14 @@ type
     children*: seq[KdlNode]
     span*: Span
     parseHash*: Hash128
+    parseEntryCount*: int32
+      ## Count of entries at parse time. The encoder's surgical-splice
+      ## path uses `entries.len == parseEntryCount` to decide whether
+      ## edits were purely in-place (splice individual entries) or
+      ## structural (fall back to canonical for this node only —
+      ## siblings still preserved).
+    parseChildCount*: int32
+      ## Same role for children.
 
   KdlDoc* = object
     ## A parsed KDL document. The interner is owned by the doc; all
@@ -122,6 +138,13 @@ type
     sourcePath*: string
     sourceText*: string
     mutated*: bool
+    parseTopLevelCount*: int32
+      ## Count of top-level nodes at parse time. The encoder's doc-level
+      ## surgical-splice path uses `nodes.len == parseTopLevelCount` to
+      ## decide whether changes were purely in-place (splice each
+      ## modified node back into sourceText, preserving comments and
+      ## blank lines between siblings) or structural (fall back to a
+      ## per-node loop with newline joins).
     interner*: Interner
     nodes*: seq[KdlNode]
 

@@ -35,6 +35,7 @@ import ./ast
 import ./fnv
 import ./intern
 import ./lexer  # ReservedBarewords (centralized v2 keyword denylist)
+import ./spans
 
 type
   EncodeMode* = enum
@@ -218,6 +219,16 @@ func emitNode(n: KdlNode, interner: Interner,
 # Document emission
 # ---------------------------------------------------------------------------
 
+func hashEntry*(e: KdlEntry, interner: Interner): Hash128 =
+  ## Canonical-content fingerprint of `e`. Parser stores this; encoder's
+  ## surgical-splice path re-hashes at encode time to detect per-entry
+  ## edits. The framing byte `0x1f` (US — unit separator) keeps adjacent
+  ## entries' hashes from collision-aliasing when they're folded into
+  ## a parent's hash.
+  result = fnv128Init()
+  fnv128Update(result, 0x1f'u8)
+  fnv128Mix(result, emitEntry(e, interner))
+
 func hashNodeContent*(n: KdlNode, interner: Interner): Hash128 =
   ## Canonical-content fingerprint of `n` (recursively over children).
   ## Same function called at parse time (to seed `n.parseHash`) and at
@@ -248,28 +259,108 @@ func emitNamePart(n: KdlNode, interner: Interner): string =
     parts.add(emitEntry(e, interner))
   parts.join(" ")
 
+func validSpanInto(span: Span, source: string): bool {.inline.} =
+  source.len > 0 and span.start.offset >= 0 and
+  span.finish.offset <= source.len and
+  span.start.offset < span.finish.offset
+
 func emitNodePreserve(n: KdlNode, doc: KdlDoc, indent: int): string =
-  ## Recursive per-node freshness decision: if `n`'s hash matches the
-  ## one recorded at parse time, the whole subtree is unmodified —
-  ## emit source bytes verbatim, preserving comments / whitespace /
-  ## number-base choices. Otherwise emit canonical name+entries and
-  ## recurse into children so untouched sibling subtrees still come
-  ## through verbatim.
-  let validSpan = doc.sourceText.len > 0 and
-                  n.span.start.offset >= 0 and
-                  n.span.finish.offset <= doc.sourceText.len and
-                  n.span.start.offset < n.span.finish.offset
-  if validSpan and hashNodeContent(n, doc.interner) == n.parseHash:
-    return doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
-  # Subtree was modified. Emit canonical head + recursive children.
+  ## Preservation strategy:
+  ##
+  ## 1. If `n`'s hash matches its parse-time fingerprint, the whole
+  ##    subtree is unmodified — emit source bytes verbatim.
+  ##
+  ## 2. If `n` is modified BUT the modification is in-place (entries
+  ##    and children counts unchanged from parse), do **surgical
+  ##    textual splicing**: start with `n`'s source bytes, replace
+  ##    each dirty entry's span with its canonical re-emit, and
+  ##    recurse for each dirty child subtree. Untouched bytes around
+  ##    the edits — comments, alignment, trailing newlines, anything
+  ##    — survive byte-for-byte.
+  ##
+  ## 3. If the entry / child count changed (insertion or removal),
+  ##    fall back to canonical for THIS node only. Sibling top-level
+  ##    nodes still preserve.
+  ##
+  ## 4. If `n` has no valid span (built from scratch via newNode),
+  ##    canonical emit.
   let pad = PrettyIndent.repeat(indent)
-  result = pad & emitNamePart(n, doc.interner)
-  if n.children.len > 0:
-    result.add(" {\n")
-    for c in n.children:
-      result.add(emitNodePreserve(c, doc, indent + 1))
-      result.add("\n")
-    result.add(pad & "}")
+
+  if not validSpanInto(n.span, doc.sourceText):
+    result = pad & emitNamePart(n, doc.interner)
+    if n.children.len > 0:
+      result.add(" {\n")
+      for c in n.children:
+        result.add(emitNodePreserve(c, doc, indent + 1))
+        result.add("\n")
+      result.add(pad & "}")
+    return result
+
+  if hashNodeContent(n, doc.interner) == n.parseHash:
+    return doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
+
+  # Subtree changed. Determine whether the change is in-place
+  # (suitable for surgical splice) or structural (canonical fallback).
+  let entriesShape = n.entries.len == int(n.parseEntryCount)
+  let childrenShape = n.children.len == int(n.parseChildCount)
+
+  if not (entriesShape and childrenShape):
+    # Structural change — canonical for this node. (Other top-level
+    # nodes still preserve via their own emitNodePreserve calls.)
+    result = pad & emitNamePart(n, doc.interner)
+    if n.children.len > 0:
+      result.add(" {\n")
+      for c in n.children:
+        result.add(emitNodePreserve(c, doc, indent + 1))
+        result.add("\n")
+      result.add(pad & "}")
+    return result
+
+  # In-place edits only. Take source bytes, splice modified pieces.
+  # Walk children + entries by DESCENDING source span so each splice
+  # leaves earlier offsets unchanged. Children all live AFTER entries
+  # in source order (entries are inline before `{`; children are
+  # inside `{ ... }`), so children come first in the reverse walk.
+  var output = doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
+  let base = n.span.start.offset
+  var anySpliced = false
+
+  for i in countdown(n.children.high, 0):
+    let c = n.children[i]
+    if not validSpanInto(c.span, doc.sourceText): continue
+    let childOut = emitNodePreserve(c, doc, indent + 1)
+    let childSource = doc.sourceText[c.span.start.offset ..< c.span.finish.offset]
+    if childOut != childSource:
+      let s = c.span.start.offset - base
+      let e = c.span.finish.offset - base
+      output = output[0 ..< s] & childOut & output[e ..< output.len]
+      anySpliced = true
+
+  for i in countdown(n.entries.high, 0):
+    let entry = n.entries[i]
+    if not validSpanInto(entry.span, doc.sourceText): continue
+    if hashEntry(entry, doc.interner) == entry.parseHash: continue
+    let s = entry.span.start.offset - base
+    let e = entry.span.finish.offset - base
+    output = output[0 ..< s] & emitEntry(entry, doc.interner) &
+             output[e ..< output.len]
+    anySpliced = true
+
+  if not anySpliced:
+    # Node-level hash mismatched but no per-element splice fired —
+    # the change must be in the node's name or type annotation. We
+    # don't store a separate localHash for that; fall back to
+    # canonical for this node. (Siblings still preserve.)
+    result = pad & emitNamePart(n, doc.interner)
+    if n.children.len > 0:
+      result.add(" {\n")
+      for c in n.children:
+        result.add(emitNodePreserve(c, doc, indent + 1))
+        result.add("\n")
+      result.add(pad & "}")
+    return result
+
+  output
 
 func encode*(doc: KdlDoc, mode = emPreserve): string =
   ## Render `doc` to KDL v2 text.
@@ -288,6 +379,25 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
   of emPreserve:
     if doc.sourceText.len > 0 and not doc.mutated:
       return doc.sourceText
+    # Doc-level splice: when sourceText is present and the top-level
+    # node count hasn't changed, walk nodes in reverse and replace
+    # each one's bytes with `emitNodePreserve` output. This preserves
+    # inter-node trivia — header comments, blank lines between
+    # siblings, the trailing newline of the file — for free.
+    let topShape = int(doc.parseTopLevelCount) == doc.nodes.len
+    if doc.sourceText.len > 0 and topShape:
+      result = doc.sourceText
+      for i in countdown(doc.nodes.high, 0):
+        let n = doc.nodes[i]
+        if not validSpanInto(n.span, doc.sourceText): continue
+        let nodeOut = emitNodePreserve(n, doc, 0)
+        let nodeSource = doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
+        if nodeOut != nodeSource:
+          result = result[0 ..< n.span.start.offset] & nodeOut &
+                   result[n.span.finish.offset ..< result.len]
+      return result
+    # Structural change at the top level OR no sourceText to splice
+    # into. Fall back to per-node emit joined by newlines.
     var parts: seq[string] = @[]
     for n in doc.nodes:
       parts.add(emitNodePreserve(n, doc, 0))

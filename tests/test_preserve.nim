@@ -143,3 +143,81 @@ suite "trivia preservation — per-node freshness (FNV-1a 128)":
       # 'a' subtree re-emitted (canonical); 'c' subtree preserved.
       check "x=99" in text
       check "c { d 2 }" in text
+
+suite "trivia preservation — surgical splice (B1: in-place entry edit)":
+  test "in-place entry edit preserves all sibling entries' source bytes":
+    # Parse a node with several entries spanning unusual whitespace.
+    # Edit just one entry; the rest must survive byte-for-byte
+    # including any non-canonical spacing.
+    let src = "n  a=1   b=2     c=3\n"
+    let r = parse(src)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].setProp(doc, "b", newIntValue(99))
+      let text = encode(doc, emPreserve)
+      # `a=1` and `c=3` preserved with their exact original spacing
+      # (3+ spaces between b and c, etc.)
+      check "  a=1   " in text      # original 2 + 3 spaces around a=1
+      check "     c=3" in text      # original 5 spaces before c=3
+      check "b=99" in text          # only this changed
+
+  test "in-place edit preserves trailing comment on the same line":
+    # Trailing comments after the last entry live in the node's
+    # source bytes (between the last entry's end and the node
+    # terminator). Surgical splice must not touch them.
+    let src = "n a=1 b=2 // important context here\nother"
+    let r = parse(src)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].setProp(doc, "a", newIntValue(99))
+      let text = encode(doc, emPreserve)
+      check "a=99" in text
+      check "// important context here" in text
+
+  test "deep edit preserves outer-level formatting and comments":
+    # Parse a doc with comments at outer level + custom indentation
+    # in a children block. Edit one deep entry. Outer-level comments
+    # and the rule's source-bytes around the edited entry must
+    # survive verbatim.
+    let src = "// top-level header\nrule \"compaction\" {\n  // inner note\n  enabled #true\n  threshold 0.7\n}\n"
+    let r = parse(src)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].children[0].setProp(doc, "threshold",
+                                       newFloatValue(0.8))
+      let text = encode(doc, emPreserve)
+      check "// top-level header" in text
+      check "// inner note" in text
+      check "threshold=0.8" in text     # edited
+      check "enabled #true" in text     # sibling entry preserved
+
+suite "trivia preservation — surgical splice (B2: shape-change fallback)":
+  test "adding a new entry falls back to canonical for that node only":
+    # New entry → shape change → that node goes canonical. Siblings
+    # of THAT NODE (other top-level nodes) preserve verbatim.
+    let src = "// header\nrule \"a\" enabled=#true\nrule \"b\" enabled=#false\n"
+    let r = parse(src)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].setProp(doc, "newkey", newIntValue(42))
+      let text = encode(doc, emPreserve)
+      # Sibling rule "b" still verbatim, including its exact source bytes.
+      check "rule \"b\" enabled=#false" in text
+      check "// header" in text
+      # rule "a" canonical, contains the new key.
+      check "newkey=42" in text
+
+  test "removing an entry falls back to canonical for that node only":
+    let src = "// keep this comment\nrule a=1 b=2 c=3\nother thing\n"
+    let r = parse(src)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      check doc.nodes[0].removeProp(doc, "b")
+      let text = encode(doc, emPreserve)
+      check "// keep this comment" in text
+      check "other thing" in text       # sibling preserved

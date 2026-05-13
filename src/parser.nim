@@ -244,13 +244,25 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
     discard p.advance()  # consume `=`
     let vRes = p.parseValue()
     if vRes.isErr: return err[KdlEntry, ParseError](vRes.getErr)
+    # Span ends at the value's last byte, NOT at the next token. The
+    # emPreserve splice path uses entry.span to extract source bytes,
+    # and including trailing whitespace would shadow the spacing the
+    # user authored between this entry and the next.
+    let lastTokEnd = p.tokens[p.cursor - 1].span.finish
     return ok[KdlEntry, ParseError](KdlEntry(
       kind: keProperty, propName: key, propValue: vRes.get,
-      span: initSpan(startSpan.start, p.peek.span.start)))
-  # Argument path
+      span: initSpan(startSpan.start, lastTokEnd)))
+  # Argument path. Capture start before parseValue so the entry's
+  # span includes any preceding `(typeAnno)` bytes too, and end at
+  # the last consumed token (not the next, to keep trailing whitespace
+  # out of the span — see property-branch comment above).
+  let argStart = p.peek.span.start
   let vRes = p.parseValue()
   if vRes.isErr: return err[KdlEntry, ParseError](vRes.getErr)
-  ok[KdlEntry, ParseError](newArgument(vRes.get, vRes.get.span))
+  let lastTokEnd = p.tokens[p.cursor - 1].span.finish
+  ok[KdlEntry, ParseError](KdlEntry(
+    kind: keArgument, argValue: vRes.get,
+    span: initSpan(argStart, lastTokEnd)))
 
 # ---------------------------------------------------------------------------
 # Node parsing
@@ -424,7 +436,8 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
     if not skip:
       # KDL v2: when a property key repeats, the later assignment wins.
       # Replace any earlier entry with the same key before appending.
-      let newEntry = eRes.get
+      var newEntry = eRes.get
+      newEntry.parseHash = hashEntry(newEntry, p.doc.interner)
       if newEntry.kind == keProperty:
         var i = 0
         while i < node.entries.len:
@@ -447,12 +460,46 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
     return err[KdlNode, ParseError](initError(peParseUnexpected,
       p.peek.span, "expected newline, ';', or end of node"))
 
-  node.span = initSpan(startSpan.start, p.peek.span.start)
+  # Span ends at the LAST consumed token, not at the next token's
+  # start. The terminator (newline / `;`) and any leading whitespace
+  # before the next node belong to the inter-node gap, not to this
+  # node — keeping them out of node.span means encode's emPreserve
+  # splice path doesn't drag in the spacing the user authored
+  # between sibling nodes.
+  let lastTokEnd =
+    if p.cursor > 0: p.tokens[p.cursor - 1].span.finish
+    else: startSpan.start
+  node.span = initSpan(startSpan.start, lastTokEnd)
+  node.parseEntryCount = int32(node.entries.len)
+  node.parseChildCount = int32(node.children.len)
   node.parseHash = hashNodeContent(node, p.doc.interner)
   ok[KdlNode, ParseError](node)
 
+proc skipToBlockBoundary(p: var Parser) {.noSideEffect.} =
+  ## Accumulating-mode children-block recovery. Like skipToRecovery
+  ## but balanced-brace-aware: a `{` opens an inner block that the
+  ## walk skips over (tracking depth) so we don't accidentally
+  ## resume at the WRONG `}` mid-tree. Stops at a newline / `;`
+  ## or at the current scope's closing `}` / EOF without consuming
+  ## the `}`.
+  var depth = 0
+  while not p.atEnd:
+    let k = p.peek.kind
+    if k == tkEof: return
+    if depth == 0 and k == tkRBrace: return
+    if depth == 0 and (k == tkNewline or k == tkSemicolon):
+      discard p.advance()
+      return
+    if k == tkLBrace: inc depth
+    elif k == tkRBrace: dec depth
+    discard p.advance()
+
 proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffect.} =
-  ## Parse `{ node* }`. Caller has confirmed the opening `{`.
+  ## Parse `{ node* }`. Caller has confirmed the opening `{`. In
+  ## accumulating mode (p.errorBuf non-nil), inner parseNode errors
+  ## are pushed to the buffer and the loop continues with the next
+  ## sibling rather than propagating the error up; the parent node
+  ## still gets a partial children list.
   discard p.advance()  # consume `{`
   var nodes: seq[KdlNode] = @[]
   p.skipNewlines()
@@ -461,8 +508,16 @@ proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffe
     if p.check(tkSlashDash):
       discard p.advance()
       skipNode = true
+    let savedCursor = p.cursor
     let nRes = p.parseNode()
-    if nRes.isErr: return err[seq[KdlNode], ParseError](nRes.getErr)
+    if nRes.isErr:
+      if not p.errorBuf.isNil:
+        p.errorBuf[].add(nRes.getErr)
+        if p.cursor == savedCursor: discard p.advance()
+        p.skipToBlockBoundary()
+        p.skipNewlines()
+        continue
+      return err[seq[KdlNode], ParseError](nRes.getErr)
     if not skipNode:
       nodes.add(nRes.get)
     p.skipNewlines()
@@ -557,6 +612,7 @@ proc parse*(source: string, sourcePath = "<input>"):
   # are preserved.
   p.doc.nodes = dRes.get
   p.doc.sourceText = source
+  p.doc.parseTopLevelCount = int32(p.doc.nodes.len)
   ok[KdlDoc, ParseError](p.doc)
 
 proc parseAll*(source: string, sourcePath = "<input>"):
@@ -584,4 +640,5 @@ proc parseAll*(source: string, sourcePath = "<input>"):
   let nodes = parseDocumentAccumulating(p, result.errors)
   p.doc.nodes = nodes
   p.doc.sourceText = source
+  p.doc.parseTopLevelCount = int32(p.doc.nodes.len)
   result.doc = p.doc

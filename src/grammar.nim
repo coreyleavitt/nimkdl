@@ -731,7 +731,8 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
     let etoks = collectTokens(entryMatch)
     if etoks.len > 0 and etoks[0].kind == tkSlashDash:
       continue  # slashdashed entry
-    let newEntry = buildEntry(entryMatch, doc, tokens, errs)
+    var newEntry = buildEntry(entryMatch, doc, tokens, errs)
+    newEntry.parseHash = hashEntry(newEntry, doc.interner)
     if newEntry.kind == keProperty:
       # KDL v2: repeated property keys → last-write-wins. Drop any
       # earlier entry with the same key before appending.
@@ -767,7 +768,10 @@ proc buildNode(node: ParseNode, doc: var KdlDoc,
     realChildrenSeen = true
   # Seed the parse-time content hash so `encode(doc, emPreserve)` can
   # detect unmodified subtrees after this doc round-trips through the
-  # reference interpreter too.
+  # reference interpreter too. Counts feed the surgical-splice path
+  # in the encoder.
+  result.parseEntryCount = int32(result.entries.len)
+  result.parseChildCount = int32(result.children.len)
   result.parseHash = hashNodeContent(result, doc.interner)
 
 proc buildDoc(root: ParseNode, doc: var KdlDoc,
