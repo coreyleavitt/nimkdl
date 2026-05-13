@@ -53,3 +53,39 @@ suite "parseAll — multi-error":
     if viaParse.isErr:
       # parse()'s error equals the first one parseAll collected.
       check viaParse.getErr.code == viaAll.errors[0].code
+
+suite "parseAll — entry-level recovery":
+  test "two malformed entries within one node both get reported":
+    # Both entries violate the Layer-1 (ipv4) content rule. With
+    # entry-level recovery, both errors land in the accumulator instead
+    # of the first one aborting the node.
+    let src = "node (ipv4)\"banana\" (ipv4)\"apple\""
+    let r = parseAll(src)
+    check r.errors.len >= 2
+    check r.errors[0].code == peReservedTypeInvalid
+    check r.errors[1].code == peReservedTypeInvalid
+
+  test "good entry between two malformed ones survives":
+    # `a=1` is valid; the two `(ipv4)` entries fail Layer 1.
+    let src = "n (ipv4)\"banana\" a=1 (ipv4)\"apple\""
+    let r = parseAll(src)
+    check r.errors.len >= 2
+    check r.doc.nodes.len == 1
+    check r.doc.nodes[0].hasProp(r.doc, "a")
+    check r.doc.nodes[0].prop(r.doc, "a").intVal == 1
+
+  test "entry-level errors don't drop the whole node":
+    # Before this slice, a node with any bad entry was dropped entirely.
+    # Now the node survives with the entries that DID parse.
+    let src = "node (ipv4)\"banana\" ok=#true"
+    let r = parseAll(src)
+    check r.doc.nodes.len == 1
+    check r.doc.nodes[0].hasProp(r.doc, "ok")
+    check r.errors.len == 1
+    check r.errors[0].code == peReservedTypeInvalid
+
+  test "errors from multiple nodes still accumulate":
+    let src = "first (ipv4)\"banana\"\nsecond (ipv4)\"apple\""
+    let r = parseAll(src)
+    check r.errors.len == 2
+    check r.doc.nodes.len == 2

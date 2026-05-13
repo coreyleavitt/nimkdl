@@ -54,6 +54,10 @@ type
     cursor: int
     depth: int
     doc: KdlDoc
+    errorBuf: ptr seq[ParseError]
+      ## When non-nil, parseNode and parseEntry log errors here and
+      ## skip to the next safe re-sync point instead of aborting. Set
+      ## by parseAll; nil for the single-error `parse()` entry point.
 
 # ---------------------------------------------------------------------------
 # Token-stream helpers
@@ -326,6 +330,25 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   var node = KdlNode(name: nameHandle, typeAnnotation: anno,
                      entries: @[], children: @[], span: startSpan)
 
+  # Helpers for accumulating-mode (parseAll) entry-level recovery.
+  template accumulating(): bool = not p.errorBuf.isNil
+  template pushEntryErr(e: ParseError) =
+    p.errorBuf[].add(e)
+  template skipToEntryBoundary() =
+    ## Advance until the next "safe to resume" position: a node
+    ## terminator, the start of a children block, or a fresh entry-
+    ## start token preceded by whitespace. No unconditional advance —
+    ## parseValue/parseEntry typically already left the cursor past
+    ## the failed entry. Forward progress is guarded by the caller via
+    ## the savedCursor pattern below.
+    while not p.atEnd:
+      let k = p.peek.kind
+      if k == tkNewline or k == tkSemicolon or
+         k == tkLBrace or k == tkRBrace or k == tkEof:
+        break
+      if p.peek.precededByWs and p.canStartEntry: break
+      discard p.advance()
+
   # Parse zero or more entries, then zero or more children blocks.
   # Spec rule (from corpus slashdash_multiple_child_blocks and the paired
   # _fail case): once *any* children block (real or slashdashed) has been
@@ -351,9 +374,11 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
       # Slashdash consumed but the next token cannot begin an entry or
       # children-block — give a targeted diagnostic instead of letting
       # parseEntry fall through to a generic "expected a value" error.
-      return err[KdlNode, ParseError](initError(peParseExpected,
-        p.peek.span,
-        "'/-' must be followed by an entry or '{' children block"))
+      let e = initError(peParseExpected, p.peek.span,
+        "'/-' must be followed by an entry or '{' children block")
+      if accumulating():
+        pushEntryErr(e); skipToEntryBoundary(); continue
+      return err[KdlNode, ParseError](e)
     # Could be a children block instead of an entry — check
     if p.check(tkLBrace):
       inc p.depth
@@ -371,18 +396,31 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
     # An entry. Spec disallows entries after any children block has been
     # consumed (real or slashdashed).
     if seenChildrenBlock:
-      return err[KdlNode, ParseError](initError(peParseUnexpected,
-        p.peek.span,
-        "entries are not permitted after a children block"))
+      let e = initError(peParseUnexpected, p.peek.span,
+        "entries are not permitted after a children block")
+      if accumulating():
+        pushEntryErr(e); skipToEntryBoundary(); continue
+      return err[KdlNode, ParseError](e)
     # Token-adjacency: spec corpus `zero_space_before_*_fail` requires
     # whitespace (or a newline / `;` / `/-`) before every entry-start
     # token. The lexer stamps `precededByWs` for us.
     if not skip and not p.peek.precededByWs:
-      return err[KdlNode, ParseError](initError(peParseExpected,
-        p.peek.span,
-        "whitespace required before this entry"))
+      let e = initError(peParseExpected, p.peek.span,
+        "whitespace required before this entry")
+      if accumulating():
+        pushEntryErr(e); skipToEntryBoundary(); continue
+      return err[KdlNode, ParseError](e)
+    let savedCursor = p.cursor
     let eRes = p.parseEntry()
-    if eRes.isErr: return err[KdlNode, ParseError](eRes.getErr)
+    if eRes.isErr:
+      if accumulating():
+        pushEntryErr(eRes.getErr)
+        # Forward-progress guard: if parseEntry left the cursor in
+        # place (failed before advancing), we must move it manually
+        # or skipToEntryBoundary will see "safe right here" and loop.
+        if p.cursor == savedCursor: discard p.advance()
+        skipToEntryBoundary(); continue
+      return err[KdlNode, ParseError](eRes.getErr)
     if not skip:
       # KDL v2: when a property key repeats, the later assignment wins.
       # Replace any earlier entry with the same key before appending.
@@ -541,7 +579,8 @@ proc parseAll*(source: string, sourcePath = "<input>"):
   for t in tokens:
     if t.kind == tkError:
       result.errors.add(t.error)
-  var p = Parser(tokens: tokens, cursor: 0, depth: 0, doc: result.doc)
+  var p = Parser(tokens: tokens, cursor: 0, depth: 0, doc: result.doc,
+                 errorBuf: addr result.errors)
   let nodes = parseDocumentAccumulating(p, result.errors)
   p.doc.nodes = nodes
   p.doc.sourceText = source
