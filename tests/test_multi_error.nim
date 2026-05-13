@@ -72,7 +72,7 @@ suite "parseAll — entry-level recovery":
     check r.errors.len >= 2
     check r.doc.nodes.len == 1
     check r.doc.nodes[0].hasProp(r.doc, "a")
-    check r.doc.nodes[0].prop(r.doc, "a").intVal == 1
+    check r.doc.nodes[0].prop(r.doc, "a").get.intVal == 1
 
   test "entry-level errors don't drop the whole node":
     # Before this slice, a node with any bad entry was dropped entirely.

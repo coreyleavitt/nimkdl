@@ -107,80 +107,57 @@ File: `src/ast.nim:514-526`.
 
 ## API consistency
 
-### `[ ]` `High` — encode(doc) is infallible; encode[T](v) is fallible — same name, opposite contracts
+### `[—]` `High` — encode(doc) is infallible; encode[T](v) is fallible — same name, opposite contracts
 
-`encode(doc: KdlDoc)` returns `string`. `encode[T](v: T)` returns
-`Result[string, ParseError]` (it can fail Layer-1 reserved-type
-content validation). Overload resolution picks the right one by
-argument type, but a reader skimming the API will not see both
-signatures together — same name, opposite contracts.
+Deliberate non-goal. The pairing is `parse↔encode` (text↔doc) and
+`decode[T]↔encode[T]` (text↔T). Two `encode` overloads for two
+distinct pairings is correct; overload resolution dispatches by
+argument type. Reader confusion is a docs problem (call this out
+in README's API table), not a rename problem.
 
-**Fix:** rename the typed variant `encodeTyped[T]` or `encodeAs[T]`.
+### `[x]` `High` — Two overlapping `hasProp` overloads with incompatible key types
 
-Files: `src/encode.nim:274`, `src/codegen.nim:1225`.
+Resolved by renaming the InternedStr-keyed variant in `codegen.nim`
+to `hasPropInterned`. Similar rename for the other codegen-internal
+helpers (`findPropInterned`, `findChildInterned`, `hasChildInterned`,
+`childrenNamedInterned`). User code uses the bare string-keyed
+versions in `ast.nim`; codegen-emitted decoder bodies use the
+`*Interned` versions. Module docstring at the top of the codegen
+helper block documents the boundary.
 
-### `[ ]` `High` — Two overlapping `hasProp` overloads with incompatible key types
+### `[—]` `High` — parseAll returns a tuple; parse returns a Result — asymmetric
 
-`ast.nim:398` exports `hasProp(n, doc, name: string): bool` (string
-key, public API). `codegen.nim:267` exports `hasProp(n, key:
-InternedStr): bool` (interned key, used by generated decoders). Same
-name, same type, no docstring on the boundary.
+Deliberate non-goal. `parseAll`'s semantics are *intrinsically*
+different: it always produces a doc (possibly partial). Forcing it
+into `Result[KdlDoc, seq[ParseError]]` loses the partial doc on error.
+The tuple shape reflects the semantics; documenting the contract is
+the right fix, not reshaping the return type.
 
-**Fix:** rename the InternedStr variant `hasPropInterned` and document
-that user code should always use the string variant.
+### `[x]` `High` — `prop` / `findProp` and `child` / `findChild` are different verbs at different modules
 
-Files: `src/ast.nim:398`, `src/codegen.nim:267`.
+Resolved together with the `hasProp` disambiguation: codegen's
+internal `findProp`/`findChild` now have the `Interned` suffix.
+Public string-keyed API lives in `ast.nim` (`prop`, `child`,
+`findNode`, etc.). Same operation, different layer; the suffix
+makes the layer visible.
 
-### `[ ]` `High` — parseAll returns a tuple; parse returns a Result — asymmetric
+### `[x]` `High` — findArg is exported from codegen.nim with no ast.nim counterpart
 
-`parse → Result[KdlDoc, ParseError]` vs `parseAll → tuple[doc:
-KdlDoc, errors: seq[ParseError]]`. These cannot be pattern-matched
-uniformly; helpers that want to "parse and handle errors" must branch
-on which entry point was used. The tuple shape also has no way to
-indicate "fully successful" without checking `errors.len == 0`
-separately.
+Resolved by moving the positional-argument readers from `codegen.nim`
+to `ast.nim` and renaming. New: `arg(n, idx): KdlValue` and
+`hasArg(n, idx): bool` in `ast.nim`. Codegen-emitted decoders
+delegate to these.
 
-**Fix:** `parseAll` should return `Result[KdlDoc, seq[ParseError]]`
-or a named object type.
+### `[x]` `High` — Sentinel-node return is undocumented and asymmetric with `hasProp`
 
-File: `src/parser.nim:562`.
-
-### `[ ]` `High` — `prop` / `findProp` and `child` / `findChild` are different verbs for the same operation at different modules
-
-`ast.nim` exports `prop(n, doc, name)` (string-keyed user API).
-`codegen.nim` exports `findProp(n, key: InternedStr)` (interned-key
-internal helper). Same semantic, different name. Same story for
-`child` vs `findChild`. A new reader has no way to know which to call.
-
-**Fix:** pick one family. Recommend `find*` for both string-keyed and
-interned-keyed flavors, with the interned variant living under an
-internal namespace.
-
-Files: `src/ast.nim:390-395`, `src/codegen.nim:262-272`.
-
-### `[ ]` `High` — findArg is exported from codegen.nim with no ast.nim counterpart
-
-`findArg(n, idx): KdlValue` is publicly exported from `codegen.nim`
-but conceptually belongs to `ast.nim` next to `prop` and `child`.
-Users importing only `ast` lose access to positional-argument lookup.
-
-**Fix:** move `findArg` / `hasArg` to `ast.nim` and rename
-consistently (e.g. `arg(n, idx)` / `hasArg(n, idx)`).
-
-File: `src/codegen.nim:247`.
-
-### `[ ]` `High` — Sentinel-node return is undocumented and asymmetric with `hasProp`
-
-`child(n, doc, name)` and `findNode(doc, name)` return
-`KdlNode(name: InvalidInterned)` as the "not found" sentinel. The
-sentinel pattern isn't documented on either; only `findChild` mentions
-it. Meanwhile `hasProp` exists for properties, so the asymmetry
-across families is jarring.
-
-**Fix:** add `hasChild(n, doc, name)` and `hasNode(doc, name)` —
-OR switch all three to `Option[KdlNode]`.
-
-Files: `src/ast.nim:405-422`.
+Resolved by switching public string-keyed readers to `Option[T]`:
+`prop` now returns `Option[KdlValue]`, `child` and `findNode` return
+`Option[KdlNode]`. Sentinel pattern is retained only on the
+InternedStr-keyed codegen-internal helpers where it's a hot-path
+optimisation. Predicate companions `hasProp`/`hasChild`/`hasNode`
+all exist for alloc-free presence checks. The Option-vs-sentinel
+distinction also lets callers tell missing properties apart from
+properties whose value is `#null`.
 
 ### `[ ]` `High` — decode[T] has no decodeAll[T] equivalent for typed multi-error
 
@@ -206,21 +183,17 @@ assemble the doc and choose mode.
 
 File: `src/codegen.nim:1225`.
 
-### `[ ]` `Medium` — Doc-level `remove` / `replace` drop the qualifier
+### `[x]` `Medium` — Doc-level `remove` / `replace` drop the qualifier
 
-Node-level: `removeChild`, `removeProp`, `removeArg`. Doc-level:
-`remove`, `replace` — bare, no `Node` suffix. Should be `removeNode`,
-`replaceNode` for symmetry.
+Resolved by renaming `remove(doc, name) → removeNode(doc, name)` and
+`replace(doc, name, repl) → replaceNode(doc, name, repl)` in
+`ast.nim`. Symmetric with `removeChild`/`replaceChild` at the node
+level.
 
-File: `src/ast.nim:584-602`.
+### `[x]` `Medium` — `kdlAttr` pragma vs `prop` accessor — vocabulary mismatch
 
-### `[ ]` `Medium` — `kdlAttr` pragma vs `prop` accessor — vocabulary mismatch
-
-Pragma is `{.kdlAttr.}` (attribute) but the spec + accessors use
-"property" throughout (`prop`, `setProp`, `removeProp`, `hasProp`).
-Rename `kdlAttr` → `kdlProp`.
-
-File: `src/codegen.nim:74`.
+Resolved by renaming `{.kdlAttr.}` → `{.kdlProp.}` throughout codegen,
+tests, and README. No alias; per `no_pre_1_aliases` policy.
 
 ### `[ ]` `Medium` — Find-vs-bare verb inconsistency between node-level and doc-level accessors
 
@@ -232,14 +205,10 @@ semantic, different verb family.
 - `findChild` / `findChildren` at the node level
 - `node` / `nodes` at the doc level
 
-### `[ ]` `Medium` — Missing `getArg` / `arg(n, idx)` reader
+### `[x]` `Medium` — Missing `getArg` / `arg(n, idx)` reader
 
-Builder API has `addArg` / `setArg` / `removeArg` but no positional
-reader. Users must iterate `arguments` or reach into the codegen-only
-`findArg`.
-
-**Fix:** add `arg(n, idx)` / `hasArg(n, idx)` to `ast.nim` to match
-the `prop` / `hasProp` family.
+Resolved together with the "findArg moves to ast" item above. New:
+`arg(n, idx): KdlValue` and `hasArg(n, idx): bool` in `ast.nim`.
 
 ### `[ ]` `Medium` — embed[T] docstring overclaims
 

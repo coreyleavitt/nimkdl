@@ -15,7 +15,7 @@ import ../src/spans
 type
   Rule {.kdlNode: "rule".} = object
     id {.kdlArg.}: string
-    enabled {.kdlAttr.}: bool = false
+    enabled {.kdlProp.}: bool = false
 
 deriveDecode(Rule)
 

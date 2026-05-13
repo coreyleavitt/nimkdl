@@ -1,7 +1,7 @@
 ## Tests for `deriveEncode[T]` — typed-value-to-KDL serialization.
 ##
 ## Symmetric counterpart to `deriveDecode[T]`. Same pragma surface
-## (kdlArg / kdlAttr / kdlChild / kdlSkip / kdlRename / kdlReserved /
+## (kdlArg / kdlProp / kdlChild / kdlSkip / kdlRename / kdlReserved /
 ## kdlNode); the macro generates a `kdlEncodeImpl(v: T, doc: var KdlDoc):
 ## KdlNode` proc, and `encode[T](v: T)` wraps that in a fresh document
 ## and renders to KDL text.
@@ -16,28 +16,28 @@ import ../src/spans
 
 type
   Simple {.kdlNode: "simple".} = object
-    name {.kdlAttr.}: string
-    count {.kdlAttr.}: int
+    name {.kdlProp.}: string
+    count {.kdlProp.}: int
 
   WithArg {.kdlNode: "item".} = object
     id {.kdlArg.}: string
-    enabled {.kdlAttr.}: bool
+    enabled {.kdlProp.}: bool
 
   Tagged {.kdlNode: "config".} = object
-    bindAddr {.kdlAttr, kdlReserved: "ipv4".}: string
+    bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
 
   Color = enum
     cRed = "red"
     cBlue = "blue"
 
   WithEnum {.kdlNode: "fav".} = object
-    color {.kdlAttr.}: Color
+    color {.kdlProp.}: Color
 
   Inner {.kdlNode: "inner".} = object
-    label {.kdlAttr.}: string
+    label {.kdlProp.}: string
 
   Outer {.kdlNode: "outer".} = object
-    name {.kdlAttr.}: string
+    name {.kdlProp.}: string
     inner {.kdlChild.}: Inner
 
 deriveEncode(Simple)

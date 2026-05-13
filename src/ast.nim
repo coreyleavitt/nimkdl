@@ -27,7 +27,9 @@
 ## for malformed-but-typechecked AST (e.g. a manually-built node that
 ## somehow recurses via a custom proc).
 
-import std/[math, strutils]
+import std/[math, options, strutils]
+export options.Option, options.isSome, options.isNone, options.get,
+       options.some, options.none
 
 import ./fnv
 import ./intern
@@ -400,6 +402,26 @@ iterator namedProperties*(n: KdlNode, doc: KdlDoc):
     if e.kind == keProperty:
       yield (doc.interner.lookup(e.propName), e.propValue)
 
+func arg*(n: KdlNode, idx: int): KdlValue =
+  ## The `idx`-th positional argument on `n`, or a `kvNull` value if
+  ## out of range. Properties interleaved among arguments are skipped:
+  ## `arg(0)` is the first positional regardless of preceding `k=v`s.
+  var seen = 0
+  for e in n.entries:
+    if e.kind == keArgument:
+      if seen == idx: return e.argValue
+      inc seen
+  newNullValue()
+
+func hasArg*(n: KdlNode, idx: int): bool =
+  ## True iff `n` has at least `idx + 1` positional arguments.
+  var seen = 0
+  for e in n.entries:
+    if e.kind == keArgument:
+      if seen == idx: return true
+      inc seen
+  false
+
 # ---------------------------------------------------------------------------
 # String-keyed convenience accessors
 # ---------------------------------------------------------------------------
@@ -410,13 +432,18 @@ iterator namedProperties*(n: KdlNode, doc: KdlDoc):
 # helpers — `newNullValue()` for absent property, `KdlNode(name:
 # InvalidInterned)` for absent child / node.
 
-func prop*(n: KdlNode, doc: KdlDoc, name: string): KdlValue =
-  ## Return property `name`, or a `kvNull` value if absent.
+func prop*(n: KdlNode, doc: KdlDoc, name: string): Option[KdlValue] =
+  ## First property with `name`, or `none(KdlValue)` if absent.
+  ##
+  ## `Option` (not a `kvNull` sentinel) so callers can distinguish
+  ## "property missing" from "property present with `#null` value" —
+  ## both are legal KDL but mean different things to most consumers.
+  ## Use `hasProp` for an alloc-free presence check.
   for e in n.entries:
     if e.kind == keProperty and
        doc.interner.equals(e.propName, name):
-      return e.propValue
-  newNullValue()
+      return some(e.propValue)
+  none(KdlValue)
 
 func hasProp*(n: KdlNode, doc: KdlDoc, name: string): bool =
   for e in n.entries:
@@ -425,24 +452,34 @@ func hasProp*(n: KdlNode, doc: KdlDoc, name: string): bool =
       return true
   false
 
-func child*(n: KdlNode, doc: KdlDoc, name: string): KdlNode =
-  ## Return the first child whose name matches `name`, or a sentinel
-  ## node with `name == InvalidInterned` when absent.
+func child*(n: KdlNode, doc: KdlDoc, name: string): Option[KdlNode] =
+  ## First child with `name`, or `none(KdlNode)` if absent.
   for c in n.children:
-    if doc.interner.equals(c.name, name): return c
-  KdlNode(name: InvalidInterned)
+    if doc.interner.equals(c.name, name): return some(c)
+  none(KdlNode)
+
+func hasChild*(n: KdlNode, doc: KdlDoc, name: string): bool =
+  ## True iff `n` has at least one child with the given name.
+  for c in n.children:
+    if doc.interner.equals(c.name, name): return true
+  false
 
 func children*(n: KdlNode, doc: KdlDoc, name: string): seq[KdlNode] =
   for c in n.children:
     if doc.interner.equals(c.name, name):
       result.add(c)
 
-func findNode*(doc: KdlDoc, name: string): KdlNode =
-  ## Return the first top-level node with the given name, or a sentinel
-  ## with `name == InvalidInterned`.
+func findNode*(doc: KdlDoc, name: string): Option[KdlNode] =
+  ## First top-level node with `name`, or `none(KdlNode)` if absent.
   for n in doc.nodes:
-    if doc.interner.equals(n.name, name): return n
-  KdlNode(name: InvalidInterned)
+    if doc.interner.equals(n.name, name): return some(n)
+  none(KdlNode)
+
+func hasNode*(doc: KdlDoc, name: string): bool =
+  ## True iff `doc` has at least one top-level node with the given name.
+  for n in doc.nodes:
+    if doc.interner.equals(n.name, name): return true
+  false
 
 func findNodes*(doc: KdlDoc, name: string): seq[KdlNode] =
   for n in doc.nodes:
@@ -606,7 +643,7 @@ proc clearTypeAnnotation*(v: var KdlValue, doc: var KdlDoc) {.inline.} =
   v.typeAnnotation = InvalidInterned
   doc.mutated = true
 
-proc remove*(doc: var KdlDoc, name: string): int =
+proc removeNode*(doc: var KdlDoc, name: string): int =
   ## Remove every top-level node with the given name. Returns count.
   var i = 0
   while i < doc.nodes.len:
@@ -617,8 +654,8 @@ proc remove*(doc: var KdlDoc, name: string): int =
       inc i
   if result > 0: doc.mutated = true
 
-proc replace*(doc: var KdlDoc, name: string,
-              replacement: sink KdlNode): bool =
+proc replaceNode*(doc: var KdlDoc, name: string,
+                  replacement: sink KdlNode): bool =
   ## Replace the first top-level node with the given name. Returns true
   ## iff a match was found and replaced.
   for i in 0 ..< doc.nodes.len:

@@ -7,7 +7,6 @@ import std/[strutils, unittest]
 
 import ../src/ast
 import ../src/encode
-import ../src/intern
 import ../src/parser
 import ../src/spans
 
@@ -48,7 +47,7 @@ suite "builder — mutation on parsed docs":
   test "setProp replaces an existing property in source order":
     parseGet("n a=1 b=2 c=3", doc):
       doc.nodes[0].setProp(doc, "b", newIntValue(99))
-      check doc.nodes[0].prop(doc, "b").intVal == 99
+      check doc.nodes[0].prop(doc, "b").get.intVal == 99
       # Source order preserved (b stays where it was; not bumped to end).
       var order: seq[string] = @[]
       for k, _ in doc.nodes[0].namedProperties(doc):
@@ -59,7 +58,7 @@ suite "builder — mutation on parsed docs":
     parseGet("n a=1", doc):
       doc.nodes[0].setProp(doc, "b", newIntValue(2))
       check doc.nodes[0].hasProp(doc, "b")
-      check doc.nodes[0].prop(doc, "b").intVal == 2
+      check doc.nodes[0].prop(doc, "b").get.intVal == 2
 
   test "removeProp deletes by name and returns true on hit":
     parseGet("n a=1 b=2", doc):
@@ -75,8 +74,8 @@ suite "builder — mutation on parsed docs":
     parseGet("p { a 1; b; a 2; c }", doc):
       let removed = doc.nodes[0].removeChild(doc, "a")
       check removed == 2
-      check doc.nodes[0].child(doc, "a").name == InvalidInterned
-      check doc.nodes[0].child(doc, "b").name != InvalidInterned
+      check doc.nodes[0].child(doc, "a").isNone
+      check doc.nodes[0].child(doc, "b").isSome
 
   test "setTypeAnnotation tags a node":
     parseGet("n", doc):
@@ -86,21 +85,34 @@ suite "builder — mutation on parsed docs":
       let text = encode(doc)
       check "(version)" in text
 
-  test "doc.remove drops all top-level nodes by name":
+  test "doc.removeNode drops all top-level nodes by name":
     parseGet("a 1\nb\na 2\nc", doc):
-      let removed = doc.remove("a")
+      let removed = doc.removeNode("a")
       check removed == 2
-      check doc.findNode("a").name == InvalidInterned
+      check doc.findNode("a").isNone
 
-  test "doc.replace swaps the first matching top-level node":
+  test "doc.replaceNode swaps the first matching top-level node":
     parseGet("a 1\nb\na 2", doc):
       var newer = newNode(doc, "a")
       newer.addArg(doc, newStringValue("replaced"))
-      check doc.replace("a", newer)
+      check doc.replaceNode("a", newer)
       # First `a` was replaced; second `a` still present.
       let matches = doc.findNodes("a")
       check matches.len == 2
       check matches[0].entries[0].argValue.strVal == "replaced"
+
+  test "doc.hasNode reports top-level presence by name":
+    parseGet("a 1\nb", doc):
+      check doc.hasNode("a")
+      check doc.hasNode("b")
+      check not doc.hasNode("c")
+
+  test "node.hasChild reports child-name presence":
+    parseGet("parent { a 1; b }", doc):
+      let p = doc.nodes[0]
+      check p.hasChild(doc, "a")
+      check p.hasChild(doc, "b")
+      check not p.hasChild(doc, "missing")
 
 suite "builder — positional insert":
   test "doc.insert places a node at a given index":

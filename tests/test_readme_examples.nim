@@ -14,11 +14,11 @@ import ../src/kdl
 type
   Action {.kdlNode: "action".} = object
     kind* {.kdlArg.}: string
-    tmpl* {.kdlAttr, kdlRename: "template".}: string
+    tmpl* {.kdlProp, kdlRename: "template".}: string
 
   Rule {.kdlNode: "rule".} = object
     id* {.kdlArg.}: string
-    enabled* {.kdlAttr.}: bool = true
+    enabled* {.kdlProp.}: bool = true
     action*: Action
 
   QRule = object

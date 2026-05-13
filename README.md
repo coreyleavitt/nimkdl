@@ -24,7 +24,7 @@ import kdl
 
 type Rule {.kdlNode: "rule".} = object
   id {.kdlArg.}: string
-  enabled {.kdlAttr.}: bool = true
+  enabled {.kdlProp.}: bool = true
 
 deriveDecode(Rule)
 
@@ -94,11 +94,11 @@ echo encode(r.get)
 type
   Action {.kdlNode: "action".} = object
     kind* {.kdlArg.}: string
-    tmpl* {.kdlAttr, kdlRename: "template".}: string
+    tmpl* {.kdlProp, kdlRename: "template".}: string
 
   Rule {.kdlNode: "rule".} = object
     id*      {.kdlArg.}:  string
-    enabled* {.kdlAttr.}: bool = true
+    enabled* {.kdlProp.}: bool = true
     action*: Action
 
 deriveDecode(Action)
@@ -168,7 +168,7 @@ Type-level:
 
 Field-level:
 - `{.kdlArg.}` — positional argument
-- `{.kdlAttr.}` — property (`key=value`)
+- `{.kdlProp.}` — property (`key=value`)
 - `{.kdlChild.}` — child node (default for nested objects + `seq[T]`)
 - `{.kdlSkip.}` — never decoded; keeps Nim's default value
 - `{.kdlRename: "x".}` — KDL name differs from Nim field name

@@ -14,34 +14,34 @@ import ../src/spans
 
 type
   SimpleAttrs {.kdlNode: "simple".} = object
-    name {.kdlAttr.}: string
-    count {.kdlAttr.}: int
-    enabled {.kdlAttr.}: bool
+    name {.kdlProp.}: string
+    count {.kdlProp.}: int
+    enabled {.kdlProp.}: bool
 
   WithArg {.kdlNode: "rule".} = object
     id {.kdlArg.}: string
-    enabled {.kdlAttr.}: bool = false   # default → optional
+    enabled {.kdlProp.}: bool = false   # default → optional
 
   WithDefault {.kdlNode: "config".} = object
-    threshold {.kdlAttr.}: int = 50
-    label {.kdlAttr.}: string = "unset"
+    threshold {.kdlProp.}: int = 50
+    label {.kdlProp.}: string = "unset"
 
   WithRename {.kdlNode: "renamed".} = object
-    apiKey {.kdlAttr, kdlRename: "api-key".}: string
+    apiKey {.kdlProp, kdlRename: "api-key".}: string
 
   WithSkip {.kdlNode: "skipme".} = object
-    keep {.kdlAttr.}: string
+    keep {.kdlProp.}: string
     nope {.kdlSkip.}: int
 
   Inner {.kdlNode: "inner".} = object
-    value {.kdlAttr.}: int
+    value {.kdlProp.}: int
 
   WithChild {.kdlNode: "outer".} = object
-    label {.kdlAttr.}: string
+    label {.kdlProp.}: string
     inner: Inner
 
   WithSeqChild {.kdlNode: "container".} = object
-    label {.kdlAttr.}: string
+    label {.kdlProp.}: string
     inner: seq[Inner]
 
 deriveDecode(SimpleAttrs)
@@ -166,9 +166,9 @@ rule "c"
 type
   Natural16 = uint16
   WidePrims {.kdlNode: "wide".} = object
-    a {.kdlAttr.}: uint8
-    b {.kdlAttr.}: int16
-    c {.kdlAttr.}: Natural16   # alias
+    a {.kdlProp.}: uint8
+    b {.kdlProp.}: int16
+    c {.kdlProp.}: Natural16   # alias
 
 deriveDecode(WidePrims)
 

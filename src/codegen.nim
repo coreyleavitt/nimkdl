@@ -19,11 +19,11 @@
 ##
 ##   Action* {.kdlNode: "action".} = object
 ##     kind*:     ActionKind  {.kdlArg.}
-##     template*: string      {.kdlAttr.}
+##     template*: string      {.kdlProp.}
 ##
 ##   Rule* {.kdlNode: "rule".} = object
 ##     id*:      string                {.kdlArg.}
-##     enabled* {.kdlAttr, default: true.}: bool
+##     enabled* {.kdlProp, default: true.}: bool
 ##     action*:  Action                {.kdlChild.}
 ##
 ## deriveDecode(Action)
@@ -39,7 +39,7 @@
 ##
 ## Field-level:
 ##   - `{.kdlArg.}`           — positional argument
-##   - `{.kdlAttr.}`          — property (`key=value`)
+##   - `{.kdlProp.}`          — property (`key=value`)
 ##   - `{.kdlChild.}`         — child node (default for nested objects + seq[T])
 ##   - `{.kdlSkip.}`          — never decoded; uses Nim default value
 ##   - `{.kdlRename: "x".}`   — override the KDL name for this field
@@ -71,7 +71,7 @@ template kdlNode*(name: string) {.pragma.}
   ## Type-level: explicit KDL node name. Defaults to type-name lowercased.
 template kdlArg*() {.pragma.}
   ## Field-level: serialize/parse as a positional argument.
-template kdlAttr*() {.pragma.}
+template kdlProp*() {.pragma.}
   ## Field-level: serialize/parse as a property (key=value).
 template kdlChild*() {.pragma.}
   ## Field-level: serialize/parse as a child node (default for objects + seq).
@@ -244,42 +244,40 @@ func kdlEncodeValue*[E: enum](e: E): KdlValue =
 # Helpers used by generated decoders
 # ---------------------------------------------------------------------------
 
-proc findArg*(n: KdlNode, idx: int): KdlValue =
-  ## The `idx`-th positional argument on `n`, or null if absent.
-  var seen = 0
-  for v in n.arguments:
-    if seen == idx: return v
-    inc seen
-  return newNullValue()
+## Codegen-internal accessors over the AST. All take **InternedStr**
+## handles and so are independent of the doc's interner — used inside
+## generated decoders where the field-name handle is interned once and
+## reused for every iteration. The string-keyed counterparts live in
+## `ast.nim` (`prop` / `child` / `findNode` / `arg` / etc.) and are the
+## right thing for user code.
+##
+## The `Interned` suffix is load-bearing: without it, codegen's
+## InternedStr-keyed `hasProp` would collide with `ast.nim`'s
+## string-keyed `hasProp` on the same symbol name — same arity,
+## different key type — and Nim's overload resolution would silently
+## pick the wrong one in code that imports both modules.
 
-proc hasArg*(n: KdlNode, idx: int): bool =
-  var seen = 0
-  for _ in n.arguments:
-    if seen == idx: return true
-    inc seen
-  return false
-
-proc findProp*(n: KdlNode, key: InternedStr): KdlValue =
+proc findPropInterned*(n: KdlNode, key: InternedStr): KdlValue =
   for (k, v) in n.properties:
     if k == key: return v
   return newNullValue()
 
-proc hasProp*(n: KdlNode, key: InternedStr): bool =
+proc hasPropInterned*(n: KdlNode, key: InternedStr): bool =
   for (k, _) in n.properties:
     if k == key: return true
   return false
 
-proc findChild*(n: KdlNode, name: InternedStr): KdlNode =
+proc findChildInterned*(n: KdlNode, name: InternedStr): KdlNode =
   for c in n.children:
     if c.name == name: return c
   return KdlNode(name: InvalidInterned)
 
-proc hasChild*(n: KdlNode, name: InternedStr): bool =
+proc hasChildInterned*(n: KdlNode, name: InternedStr): bool =
   for c in n.children:
     if c.name == name: return true
   return false
 
-proc childrenNamed*(n: KdlNode, name: InternedStr): seq[KdlNode] =
+proc childrenNamedInterned*(n: KdlNode, name: InternedStr): seq[KdlNode] =
   for c in n.children:
     if c.name == name: result.add(c)
 
@@ -319,7 +317,7 @@ type
 
 proc fieldKindFromPragmas(prag: NimNode): FieldKind =
   ## Walk a field's pragma list and return its FieldKind from explicit
-  ## `{.kdlArg.}` / `{.kdlAttr.}` / `{.kdlChild.}` / `{.kdlSkip.}` pragmas.
+  ## `{.kdlArg.}` / `{.kdlProp.}` / `{.kdlChild.}` / `{.kdlSkip.}` pragmas.
   ## When no pragma is present, returns `fkAttr` as a placeholder; the
   ## caller (`reflectField`) then promotes that to `fkChild` for nested
   ## object / seq fields based on the field's type.
@@ -331,7 +329,7 @@ proc fieldKindFromPragmas(prag: NimNode): FieldKind =
       else: ""
     case name
     of "kdlArg":    return fkArg
-    of "kdlAttr":   return fkAttr
+    of "kdlProp":   return fkAttr
     of "kdlChild":  return fkChild
     of "kdlSkip":   return fkSkip
     else: discard
@@ -545,7 +543,7 @@ proc collectShape*(recList: NimNode): TypeShape =
       if discSpec.kind notin {fkArg, fkAttr}:
         error("deriveDecode: variant discriminator '" & discSpec.nimName &
               "' must declare its KDL position with an explicit " &
-              "{.kdlArg.} or {.kdlAttr.} pragma. " &
+              "{.kdlArg.} or {.kdlProp.} pragma. " &
               "(Discriminators are load-bearing; no implicit default.)",
               child)
       result.variant.disc = discSpec
@@ -683,7 +681,7 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let localSym = genSym(nskVar, "optLocal_" & f.nimName)
     quote do:
       if `nodeIdent`.hasArg(`idxLit`):
-        let `valSym` = `nodeIdent`.findArg(`idxLit`)
+        let `valSym` = `nodeIdent`.arg(`idxLit`)
         `reservedCheck`
         var `localSym`: `innerT`
         if not kdlDecodeValue(`localSym`, `valSym`, `docIdent`):
@@ -700,7 +698,7 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
         newEmptyNode()  # absent + has default → already set; skip
     quote do:
       if `nodeIdent`.hasArg(`idxLit`):
-        let `valSym` = `nodeIdent`.findArg(`idxLit`)
+        let `valSym` = `nodeIdent`.arg(`idxLit`)
         `reservedCheck`
         if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
           return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
@@ -715,15 +713,15 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
   let missingMsg = newLit("missing required property '" & f.kdlName & "'")
   let span = quote do: `nodeIdent`.span
   let mEmit = mismatchEmitter(f)
-  let valSym = genSym(nskLet, "kdlAttrVal")
+  let valSym = genSym(nskLet, "kdlPropVal")
   let reservedCheck = emitReservedTagCheck(f, valSym, docIdent)
   if f.isOption:
     let innerT = f.innerType
     let localSym = genSym(nskVar, "optLocal_" & f.nimName)
     quote do:
       let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      if `nodeIdent`.hasProp(`keyIdent`):
-        let `valSym` = `nodeIdent`.findProp(`keyIdent`)
+      if `nodeIdent`.hasPropInterned(`keyIdent`):
+        let `valSym` = `nodeIdent`.findPropInterned(`keyIdent`)
         `reservedCheck`
         var `localSym`: `innerT`
         if not kdlDecodeValue(`localSym`, `valSym`, `docIdent`):
@@ -740,8 +738,8 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
         newEmptyNode()
     quote do:
       let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      if `nodeIdent`.hasProp(`keyIdent`):
-        let `valSym` = `nodeIdent`.findProp(`keyIdent`)
+      if `nodeIdent`.hasPropInterned(`keyIdent`):
+        let `valSym` = `nodeIdent`.findPropInterned(`keyIdent`)
         `reservedCheck`
         if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
           return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
@@ -782,7 +780,7 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
       let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      for `childSym` in `nodeIdent`.childrenNamed(`nameIdent`):
+      for `childSym` in `nodeIdent`.childrenNamedInterned(`nameIdent`):
         `childTagCheck`
         var `elemSym`: `elemType`
         let `recurseRes` = kdlDecodeImpl(`elemSym`, `childSym`, `docIdent`)
@@ -797,7 +795,7 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
       let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      let `childSym` = `nodeIdent`.findChild(`nameIdent`)
+      let `childSym` = `nodeIdent`.findChildInterned(`nameIdent`)
       if not (`childSym`.name == InvalidInterned):
         `childTagCheck`
         var `localSym`: `innerT`
@@ -826,7 +824,7 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
       let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      let `childSym` = `nodeIdent`.findChild(`nameIdent`)
+      let `childSym` = `nodeIdent`.findChildInterned(`nameIdent`)
       if not (`childSym`.name == InvalidInterned):
         `childTagCheck`
         let `recurseRes` = kdlDecodeImpl(`targetAccess`, `childSym`, `docIdent`)

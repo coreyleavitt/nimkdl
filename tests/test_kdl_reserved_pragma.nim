@@ -13,14 +13,14 @@ import ../src/spans
 
 type
   Cfg {.kdlNode: "cfg".} = object
-    endpoint {.kdlAttr, kdlReserved: "url".}: string
+    endpoint {.kdlProp, kdlReserved: "url".}: string
 
   Server {.kdlNode: "server".} = object
     host {.kdlArg, kdlReserved: "ipv4".}: string
 
   Mixed {.kdlNode: "mixed".} = object
-    id {.kdlAttr, kdlReserved: "uuid".}: string
-    plain {.kdlAttr.}: string   ## no kdlReserved → any tag (or none) OK
+    id {.kdlProp, kdlReserved: "uuid".}: string
+    plain {.kdlProp.}: string   ## no kdlReserved → any tag (or none) OK
 
 deriveDecode(Cfg)
 deriveDecode(Server)

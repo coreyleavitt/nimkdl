@@ -20,29 +20,29 @@ import ../src/spans
 
 type
   OptPrim {.kdlNode: "opt".} = object
-    name {.kdlAttr.}: string
-    alias {.kdlAttr.}: Option[string]
-    port {.kdlAttr.}: Option[int]
-    flag {.kdlAttr.}: Option[bool]
+    name {.kdlProp.}: string
+    alias {.kdlProp.}: Option[string]
+    port {.kdlProp.}: Option[int]
+    flag {.kdlProp.}: Option[bool]
 
   Inner {.kdlNode: "inner".} = object
-    label {.kdlAttr.}: string
+    label {.kdlProp.}: string
 
   OptChild {.kdlNode: "wrapper".} = object
-    name {.kdlAttr.}: string
+    name {.kdlProp.}: string
     extra {.kdlChild.}: Option[Inner]
 
   TaggedInner {.kdlNode: "ti".} = object
-    note {.kdlAttr.}: string
+    note {.kdlProp.}: string
 
   WithTaggedChild {.kdlNode: "outer".} = object
     spec {.kdlChild, kdlReserved: "version".}: TaggedInner
 
   Versioned {.kdlNode: "module", kdlReserved: "v2".} = object
-    field {.kdlAttr.}: string
+    field {.kdlProp.}: string
 
   TaggedOpt {.kdlNode: "tagged".} = object
-    address {.kdlAttr, kdlReserved: "ipv4".}: Option[string]
+    address {.kdlProp, kdlReserved: "ipv4".}: Option[string]
 
 deriveDecode(OptPrim)
 deriveDecode(Inner)

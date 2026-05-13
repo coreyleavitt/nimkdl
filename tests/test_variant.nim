@@ -25,14 +25,14 @@ type
     akTransform = "transform"
 
   Action* {.kdlNode: "action".} = object
-    label* {.kdlAttr.}: string = "(unlabeled)"   # shared, optional
+    label* {.kdlProp.}: string = "(unlabeled)"   # shared, optional
     case kind* {.kdlArg.}: ActionKind            # discriminator, positional
     of akInject:
-      tmpl* {.kdlAttr, kdlRename: "template".}: string
+      tmpl* {.kdlProp, kdlRename: "template".}: string
     of akDeny:
-      reason* {.kdlAttr.}: string
+      reason* {.kdlProp.}: string
     of akTransform:
-      cel* {.kdlAttr.}: string
+      cel* {.kdlProp.}: string
 
 deriveDecode(Action)
 
