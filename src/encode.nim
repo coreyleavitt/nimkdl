@@ -489,6 +489,22 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
   case mode
   of emPreserve:
     if doc.sourceText.len > 0 and not doc.mutated:
+      when not defined(release):
+        # Catch raw-field mutation that bypassed the builder API (which
+        # would otherwise call markMutated). Without this check, the
+        # fast path would return stale source bytes silently. Every
+        # node's current hash must still match its parse-time
+        # fingerprint when `doc.mutated == false` — otherwise the
+        # caller mutated through a path that didn't flip the flag.
+        for n in doc.nodes:
+          if hashNodeContent(n, doc.interner) != n.parseHash:
+            raise newException(AssertionDefect,
+              "encode(doc, emPreserve): doc.mutated is false but a " &
+              "node's content has changed since parse. Did you assign " &
+              "to a raw AST field (e.g. doc.nodes[i].entries[j] = ...)? " &
+              "Call doc.markMutated() after raw edits, or use the " &
+              "builder API (setProp / addArg / setArg / etc.) which " &
+              "flips the flag for you.")
       return doc.sourceText
     # Doc-level splice: when sourceText is present and the top-level
     # node count hasn't changed, walk nodes in reverse and replace

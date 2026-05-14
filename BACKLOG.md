@@ -45,34 +45,35 @@ Resolved by c3e6d16. `parseChildren` is now accumulating-aware
 push to the error buffer and call the new `skipToBlockBoundary`
 helper (balanced-brace-aware) instead of propagating up.
 
-### `[ ]` `Medium` — Raw field mutation bypasses emPreserve silently
+### `[x]` `Medium` — Raw field mutation bypasses emPreserve silently
 
-`encode(doc, emPreserve)` fast-paths to `return doc.sourceText` when
-`doc.mutated == false`. A caller mutating via raw field access
-(`doc.nodes[0].entries[1] = ...`) skips `markMutated` and the encoder
-returns stale source bytes. Builder helpers all call `markMutated`
-correctly; the risk is field-access patterns.
+Resolved by a debug-only sanity check at the top of the emPreserve
+fast path: before returning `doc.sourceText`, walk top-level nodes
+and assert each node's current hash matches its `parseHash`. Raw
+field mutation that bypassed `markMutated` now raises
+`AssertionDefect` with a message naming `markMutated` and the
+builder API. Zero overhead in release builds — guarded by
+`when not defined(release)`. Tests in `test_preserve.nim` cover
+the mutation-caught, clean-doc-still-fast-paths, and
+markMutated-skips-assertion cases.
 
-**Fix:** add a `when not defined(release)` doc-level hash sanity check
-that recomputes a total hash and panics on mismatch when
-`mutated == false`. OR add a prominent warning comment to the
-fast-path branch naming this failure mode.
+### `[x]` `Medium` — validateDecimal passes dead exponent-range parameters
 
-Files: `src/encode.nim:289-290`, `src/ast.nim:441-447`.
+Resolved by grouping the three loose ints into a `DecimalBounds`
+object and providing named constants (`Decimal64Bounds`,
+`Decimal128Bounds`). Two overloads of `validateDecimalFormat` now
+exist:
 
-### `[ ]` `Medium` — validateDecimal passes dead exponent-range parameters
+- `validateDecimalFormat(v, tag)` — unbounded, used by `(decimal)`.
+- `validateDecimalFormat(v, tag, bounds)` — bounded, used by
+  `(decimal64)` and `(decimal128)`.
 
-`validateDecimal` calls `validateDecimalFormat(v, "decimal",
-maxDigits = -1, expLow = 0, expHigh = 0)`. The range checks are
-guarded by `if maxDigits > 0`, so the `expLow = 0` / `expHigh = 0`
-arguments are intentionally dead. A future maintainer flipping the
-precision to a positive value will silently apply the wrong range.
-
-**Fix:** early-return on `maxDigits < 0` at the top of
-`validateDecimalFormat`, drop the dead parameters from
-`validateDecimal`'s call site OR use `int.low` / `int.high` sentinels.
-
-File: `src/reserved.nim:1102-1103`.
+A shared `parseDecimalShape` helper does the format parse and
+returns the significand + exponent; the bounded overload applies
+ranges on top. A future maintainer adding a new bounded form
+defines a new constant — they can't accidentally leave
+`expLow=0`/`expHigh=0` because there is no place to type them
+separately.
 
 ### `[x]` `Low` — KdlValue.== compares typeAnnotation handles unsafely across docs
 

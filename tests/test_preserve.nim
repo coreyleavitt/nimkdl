@@ -257,3 +257,38 @@ when defined(kdlHashStats):
       kdlHashCallCount = 0
       discard encode(doc, emPreserve)
       check kdlHashCallCount <= nodeCount
+
+when not defined(release):
+  # Raw-field mutation should be caught with a useful diagnostic
+  # rather than silently producing stale source bytes.
+  suite "trivia preservation — raw-field-mutation detection (debug)":
+    test "raw mutation that doesn't call markMutated panics in debug":
+      let r = parse("rule \"original\"")
+      check r.isOk
+      var doc = r.get
+      # Bypass the builder API: mutate a value field directly.
+      # `doc.mutated` stays false, but the content no longer matches
+      # `parseHash`. The fast-path return of doc.sourceText would
+      # silently produce stale bytes; we want to panic instead.
+      doc.nodes[0].entries[0].argValue.strVal = "tampered"
+      expect AssertionDefect:
+        discard encode(doc, emPreserve)
+
+    test "clean parsed doc still fast-paths without panic":
+      let r = parse("rule \"a\"\nrule \"b\"")
+      check r.isOk
+      let text = encode(r.get, emPreserve)
+      check text.contains("rule")
+      check text.contains("\"a\"")
+      check text.contains("\"b\"")
+
+    test "explicit markMutated after raw mutation skips the assertion":
+      # Strings that look like bare idents canonical-emit unquoted, so
+      # we use one that requires quoting to keep the round-trip visible.
+      let r = parse("rule \"x with space\"")
+      check r.isOk
+      var doc = r.get
+      doc.nodes[0].entries[0].argValue.strVal = "y with space"
+      doc.markMutated()  # caller acknowledges; encode takes slow path
+      let text = encode(doc, emPreserve)
+      check "\"y with space\"" in text

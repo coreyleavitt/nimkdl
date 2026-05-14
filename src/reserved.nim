@@ -1018,23 +1018,39 @@ func validateCurrency(v: KdlValue): Result[void, ParseError] =
       "(currency) not a registered ISO 4217 code: " & v.strVal))
   ok(void, ParseError)
 
-func validateDecimalFormat(v: KdlValue, tag: string,
-                           maxDigits, expLow, expHigh: int):
-    Result[void, ParseError] =
-  ## Validate a decimal-format string per IEEE 754-2008 §3.3.
-  ## Accepts: optional sign, 1+ integer digits, optional `.` 1+ fraction
-  ## digits, optional `E`/`e` signed exponent. Counts significant digits
-  ## (leading zeros excluded) and checks against `maxDigits`. Checks the
-  ## decimal exponent range against `[expLow, expHigh]`.
-  ## When `maxDigits < 0`, no precision cap is applied (arbitrary-
-  ## precision (decimal) form).
+type
+  DecimalBounds = object
+    ## Precision + exponent envelope for a bounded IEEE 754-2008
+    ## decimal form. Grouped into one object so call sites pass one
+    ## named constant (`Decimal64Bounds` / `Decimal128Bounds`) rather
+    ## than three loose integers — a future maintainer adding a new
+    ## bounded form must define a new constant, not retype three
+    ## arguments and risk one going stale.
+    maxDigits: int
+    expLow: int
+    expHigh: int
+
+const
+  Decimal64Bounds = DecimalBounds(maxDigits: 16, expLow: -383, expHigh: 384)
+  Decimal128Bounds = DecimalBounds(maxDigits: 34, expLow: -6143, expHigh: 6144)
+
+type DecimalShape = object
+  sigDigits: int
+  expVal: int
+
+func parseDecimalShape(v: KdlValue, tag: string):
+    Result[DecimalShape, ParseError] =
+  ## Private: parse a decimal-format string per IEEE 754-2008 §3.3.
+  ## Returns the significand digit count + decimal exponent for the
+  ## caller to apply (or skip) bounds against. Format errors return
+  ## Err immediately.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-      "(" & tag & ") requires a string value"))
+    return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
+      v.span, "(" & tag & ") requires a string value"))
   let s = v.strVal
   if s.len == 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-      "(" & tag & ") empty"))
+    return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
+      v.span, "(" & tag & ") empty"))
   var i = 0
   if s[0] == '+' or s[0] == '-':
     inc i
@@ -1042,8 +1058,8 @@ func validateDecimalFormat(v: KdlValue, tag: string,
   while i < s.len and isDigit(s[i]):
     inc i
   if i == intStart:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-      "(" & tag & ") integer part required"))
+    return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
+      v.span, "(" & tag & ") integer part required"))
   let intEnd = i
   var fracStart = -1
   var fracEnd = -1
@@ -1054,65 +1070,79 @@ func validateDecimalFormat(v: KdlValue, tag: string,
       inc i
     fracEnd = i
     if fracEnd == fracStart:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-        "(" & tag & ") fractional digits required after '.'"))
+      return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
+        v.span, "(" & tag & ") fractional digits required after '.'"))
   var expVal = 0
-  var expHasSign = false
   if i < s.len and (s[i] == 'e' or s[i] == 'E'):
     inc i
     var expNeg = false
     if i < s.len and (s[i] == '+' or s[i] == '-'):
       expNeg = s[i] == '-'
-      expHasSign = true
       inc i
     let eStart = i
     while i < s.len and isDigit(s[i]):
       expVal = expVal * 10 + int(s[i]) - int('0')
       inc i
       if expVal > 100000:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-          "(" & tag & ") exponent magnitude too large"))
+        return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
+          v.span, "(" & tag & ") exponent magnitude too large"))
     if i == eStart:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-        "(" & tag & ") exponent digits required"))
+      return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
+        v.span, "(" & tag & ") exponent digits required"))
     if expNeg: expVal = -expVal
   if i != s.len:
+    return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
+      v.span, "(" & tag & ") trailing characters: " & s[i .. ^1]))
+  # Count significant digits: skip leading zeros from int part.
+  var sig = 0
+  var i2 = intStart
+  while i2 < intEnd and s[i2] == '0': inc i2
+  sig += intEnd - i2
+  if fracStart >= 0:
+    sig += fracEnd - fracStart
+  ok[DecimalShape, ParseError](DecimalShape(sigDigits: sig, expVal: expVal))
+
+func validateDecimalFormat(v: KdlValue, tag: string):
+    Result[void, ParseError] =
+  ## Unbounded variant — format check only, no precision / exponent
+  ## bounds. Used by `(decimal)` (arbitrary-precision).
+  let r = parseDecimalShape(v, tag)
+  if r.isErr: return err[void, ParseError](r.getErr)
+  ok(void, ParseError)
+
+func validateDecimalFormat(v: KdlValue, tag: string,
+                           bounds: DecimalBounds):
+    Result[void, ParseError] =
+  ## Bounded variant — format check, then precision + exponent-range
+  ## bounds. Used by `(decimal64)` / `(decimal128)`. The grouped
+  ## `DecimalBounds` makes it impossible to accidentally pass the
+  ## precision while leaving the range at `0..0`.
+  let r = parseDecimalShape(v, tag)
+  if r.isErr: return err[void, ParseError](r.getErr)
+  let shape = r.get
+  if shape.sigDigits > bounds.maxDigits:
     return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-      "(" & tag & ") trailing characters: " & s[i .. ^1]))
-  if maxDigits > 0:
-    # Count significant digits: skip leading zeros from int part.
-    var sig = 0
-    var i2 = intStart
-    while i2 < intEnd and s[i2] == '0': inc i2
-    sig += intEnd - i2
-    if fracStart >= 0:
-      sig += fracEnd - fracStart
-    if sig > maxDigits:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-        "(" & tag & ") significand exceeds " & $maxDigits & " digits"))
-    if expVal < expLow or expVal > expHigh:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
-        "(" & tag & ") exponent " & $expVal & " out of range [" &
-        $expLow & ", " & $expHigh & "]"))
+      "(" & tag & ") significand exceeds " & $bounds.maxDigits & " digits"))
+  if shape.expVal < bounds.expLow or shape.expVal > bounds.expHigh:
+    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      "(" & tag & ") exponent " & $shape.expVal & " out of range [" &
+      $bounds.expLow & ", " & $bounds.expHigh & "]"))
   ok(void, ParseError)
 
 func validateDecimal(v: KdlValue): Result[void, ParseError] =
   ## `(decimal)` — arbitrary-precision decimal. No precision / exponent
   ## cap; format check only.
-  validateDecimalFormat(v, "decimal", maxDigits = -1,
-                        expLow = 0, expHigh = 0)
+  validateDecimalFormat(v, "decimal")
 
 func validateDecimal64(v: KdlValue): Result[void, ParseError] =
   ## `(decimal64)` — IEEE 754-2008 decimal64: 16 significant digits,
   ## exponent in [-383, 384].
-  validateDecimalFormat(v, "decimal64", maxDigits = 16,
-                        expLow = -383, expHigh = 384)
+  validateDecimalFormat(v, "decimal64", Decimal64Bounds)
 
 func validateDecimal128(v: KdlValue): Result[void, ParseError] =
   ## `(decimal128)` — IEEE 754-2008 decimal128: 34 significant digits,
   ## exponent in [-6143, 6144].
-  validateDecimalFormat(v, "decimal128", maxDigits = 34,
-                        expLow = -6143, expHigh = 6144)
+  validateDecimalFormat(v, "decimal128", Decimal128Bounds)
 
 func validateReserved*(tag: string, v: KdlValue):
     Result[void, ParseError] {.noSideEffect.} =
