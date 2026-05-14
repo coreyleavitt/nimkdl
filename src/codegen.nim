@@ -189,16 +189,73 @@ proc kdlDecodeValue*(target: var bool, v: KdlValue, doc: var KdlDoc): bool =
   else:
     false
 
+macro buildEnumCaseImpl(target, s: typed; T: typedesc): untyped =
+  ## Emit a per-enum `case s of "memberStr": target = E.member` block.
+  ## Replaces the previous `for member in E.low..E.high: if $member == s`
+  ## loop which allocated a fresh string per member every call. Nim's
+  ## `case` on `string` lowers to an efficient dispatch internally; the
+  ## emitted code is per-enum-specialised at macro-expansion time.
+  ##
+  ## Honors Nim 2.x's stringified-value syntax:
+  ##   `akInject = "inject"`  →  matches the literal "inject".
+  ## Bare members (no `= "..."`) match their symbol name.
+  # T may arrive as:
+  #   - `typedesc[E]` BracketExpr (literal typedesc passed at call site)
+  #   - a symbol pointing at the typedesc parameter of an enclosing
+  #     generic proc — `getType` then unwraps to typedesc[E]
+  #   - the concrete enum symbol directly
+  # Normalise to the concrete enum symbol whose `getImpl` gives the
+  # TypeDef.
+  var typSym = T
+  if typSym.kind == nnkBracketExpr and typSym.len >= 2:
+    typSym = typSym[1]
+  else:
+    let ti = typSym.getTypeInst
+    if ti.kind == nnkBracketExpr and ti.len >= 2:
+      typSym = ti[1]
+  let typeDef = typSym.getImpl
+  if typeDef.kind != nnkTypeDef:
+    error("buildEnumCase: expected an enum typedesc; getImpl produced " &
+          $typeDef.kind & " from " & typSym.repr, T)
+  let body = typeDef[2]
+  if body.kind != nnkEnumTy:
+    error("buildEnumCase: expected enum body, got " & $body.kind, T)
+  var caseStmt = nnkCaseStmt.newTree(s)
+  for i in 1 ..< body.len:  # body[0] is the empty pragma slot
+    let m = body[i]
+    var matchLit: string
+    var memberRef: NimNode
+    case m.kind
+    of nnkEnumFieldDef:
+      memberRef = m[0]
+      # m[1] is either an int literal (ord override only) or a string
+      # literal (stringified form). For string form, that's the canonical
+      # `$member` representation per Nim 2.x; for int form, fall back to
+      # the symbol name.
+      if m[1].kind == nnkStrLit:
+        matchLit = m[1].strVal
+      else:
+        matchLit = $m[0]
+    of nnkSym, nnkIdent:
+      memberRef = m
+      matchLit = $m
+    else:
+      error("buildEnumCase: unexpected enum member shape: " & $m.kind, m)
+    caseStmt.add(nnkOfBranch.newTree(newLit(matchLit),
+                                      quote do:
+                                        `target` = `memberRef`
+                                        return true))
+  caseStmt.add(nnkElse.newTree(quote do: return false))
+  result = caseStmt
+
 proc decodeEnumFromString*[E: enum](target: var E, s: string): bool =
-  ## Generic enum decoder: matches `s` against each enum member's stringified
-  ## name (via `$`). Used by the generic `kdlDecodeValue[T: enum]` overload
-  ## below; respects Nim 2.x's stringified-value syntax
-  ## (`akInject = "inject"` => `$akInject == "inject"`).
-  for member in E.low .. E.high:
-    if $member == s:
-      target = member
-      return true
-  return false
+  ## Per-enum case-on-string dispatch (specialised at instantiation
+  ## via the `buildEnumCaseImpl` macro). Honors Nim 2.x's
+  ## stringified-value syntax (`akInject = "inject"` matches "inject"
+  ## rather than "akInject"). Previously walked every member via
+  ## `for member in E.low..E.high: if $member == s` — one string
+  ## allocation per member per call.
+  buildEnumCaseImpl(target, s, E)
 
 proc kdlDecodeValue*[E: enum](target: var E, v: KdlValue, doc: var KdlDoc): bool =
   ## Enum fields decode from KDL string values. Variant discriminators

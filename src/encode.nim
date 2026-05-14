@@ -60,6 +60,25 @@ type
 const
   PrettyIndent = "    "
 
+  PrecomputedIndentLevels = 64
+    ## Cover any indent depth the parser admits (`MaxParserDepth` is 256,
+    ## but real KDL configs rarely nest past 8). 64 levels is comfortably
+    ## above any practical doc while keeping the table at ~16 KB of
+    ## `.rodata`. Beyond this the emitter falls back to `repeat`.
+
+  Indents = (proc(): array[PrecomputedIndentLevels, string] =
+    for i in 0 ..< PrecomputedIndentLevels:
+      result[i] = PrettyIndent.repeat(i))()
+    ## Pre-computed indent strings for `emitNode` / `emitNodePreserve` so
+    ## the hot path looks up `Indents[indent]` instead of allocating
+    ## `PrettyIndent.repeat(indent)` per node.
+
+func indentStr(depth: int): string {.inline.} =
+  if depth >= 0 and depth < PrecomputedIndentLevels:
+    Indents[depth]
+  else:
+    PrettyIndent.repeat(depth)
+
 # ---------------------------------------------------------------------------
 # Identifier emission
 # ---------------------------------------------------------------------------
@@ -202,7 +221,7 @@ func emitEntry(e: KdlEntry, interner: Interner): string =
 
 func emitNode(n: KdlNode, interner: Interner,
               mode: EncodeMode, indent: int): string =
-  let pad = (if mode == emPretty: PrettyIndent.repeat(indent) else: "")
+  let pad = (if mode == emPretty: indentStr(indent) else: "")
   result.add(pad)
   if n.typeAnnotation != InvalidInterned:
     result.add('(')
@@ -399,7 +418,7 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
   ## 4. In-place changes → surgical textual splice into source bytes.
   ## 5. No element-level splice fired but hash mismatched → the change
   ##    is in name or type annotation; canonical fallback for this node.
-  let pad = PrettyIndent.repeat(indent)
+  let pad = indentStr(indent)
 
   # Recurse to children first. This is the linchpin of the linear-hash
   # property: each child computes its own hash bottom-up exactly once.

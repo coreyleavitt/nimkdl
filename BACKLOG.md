@@ -388,29 +388,30 @@ length-then-bytes match against the 6 entries. Identifiers longer
 than 5 chars skip the table walk entirely; the parser + grammar
 sites all route through this single helper.
 
-### `[ ]` `Low` — Pre-computed indent table would eliminate `PrettyIndent.repeat()` allocations
+### `[x]` `Low` — Pre-computed indent table eliminates `PrettyIndent.repeat()` allocations
 
-`emitNode`'s recursive descent calls `"    ".repeat(indent)` per
-level. A `const Indents = ["", "    ", "        ", ...]` would
-eliminate all small string allocations.
+Resolved with a 64-element `const Indents` table indexed by depth.
+`indentStr(depth)` looks up the precomputed string when `depth <
+PrecomputedIndentLevels` and falls back to `repeat()` beyond
+(unreachable in practice — `MaxParserDepth = 256` is the parser cap
+and real KDL configs rarely nest past 8). All `emitNode` /
+`emitNodePreserve` indent allocations are now zero.
 
-Files: `src/encode.nim:191`, `src/encode.nim:265`.
+### `[x]` `Low` — decodeEnumFromString allocates `$member` per iteration
 
-### `[ ]` `Low` — decodeEnumFromString allocates `$member` per iteration
+Resolved by a `buildEnumCaseImpl` macro that emits a per-enum
+`case s of "memberStr": target = E.member` block at instantiation
+time. Nim's `case` on `string` lowers to an efficient dispatch
+internally; no allocations per call. Honors Nim 2.x's
+stringified-value syntax (`akInject = "inject"` → matches "inject");
+bare members match their symbol name.
 
-The runtime enum-string match does `if $member == s` per member
-of the enum, one allocation per iteration.
+### `[x]` `Low` — Interner inline-entry `lookup` uses `copyMem`
 
-**Fix:** macro-generate a `case s of "..." : target = E.x` instead.
-
-File: `src/codegen.nim:196-201`.
-
-### `[ ]` `Low` — Interner inline-entry `lookup` could `copyMem`
-
-For inline (≤22-byte) entries, `lookup` walks bytes byte-by-byte
-into a `newString`. A `copyMem` would be marginally faster.
-
-File: `src/intern.nim:147-151`.
+Resolved. The bulk-copy path uses `copyMem` at runtime; a byte-loop
+fallback fires under `when nimvm` because `copyMem` is `importc`'d
+from C and isn't VM-callable — `embed[T]` runs `lookup` at compile
+time and would otherwise error.
 
 ### `[ ]` `Low` — Switch to xxh3-128 for node-content hashing
 

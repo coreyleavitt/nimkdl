@@ -147,9 +147,17 @@ func lookup*(interner: Interner, handle: InternedStr): string =
   let entry = interner.entries[idx]
   case entry.kind
   of ekInline:
-    result = newString(int(entry.length))
-    for i in 0 ..< int(entry.length):
-      result[i] = entry.data[i]
+    let n = int(entry.length)
+    result = newString(n)
+    if n > 0:
+      # Bulk copy at runtime; byte-loop fallback inside Nim's VM
+      # because `copyMem` is `importc`'d from C and isn't VM-callable
+      # — `embed[T]` runs `lookup` at compile time and would otherwise
+      # error with "cannot 'importc' variable at compile time".
+      when nimvm:
+        for i in 0 ..< n: result[i] = entry.data[i]
+      else:
+        copyMem(addr result[0], unsafeAddr entry.data[0], n)
   of ekHeap:
     result = entry.payload
 
