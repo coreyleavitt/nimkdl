@@ -42,3 +42,20 @@ suite "embed: multi-rule file via seq[T]":
       check rules[1].id == "b"
       check rules[1].enabled
       check rules[2].id == "c"
+
+suite "embed: malformed files fail the build, not the runtime":
+  test "embed of a malformed KDL file does not compile":
+    # `compiles()` returns false iff the contained expression fails
+    # compilation. With the M5 fix in place, embed[Rule] on a file
+    # whose parse produces Err must emit a {.error: ...} pragma at
+    # compile time — making this expression non-compilable.
+    # Before the fix, the file's parse error was silently embedded
+    # as data and surfaced only at runtime via .get, which defeats
+    # the whole point of compile-time validation.
+    check not compiles(embed[Rule]("fixtures/rule_broken.kdl"))
+
+  test "embed of a well-formed file still compiles":
+    # Sanity guard so we don't accidentally over-restrict and break
+    # the working path. (Already implicitly covered by the let-bindings
+    # at the top of this file, but spelling it out makes intent clear.)
+    check compiles(embed[Rule]("fixtures/rule_simple.kdl"))

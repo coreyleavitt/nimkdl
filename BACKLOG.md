@@ -229,18 +229,25 @@ arity disambiguates.
 Resolved together with the "findArg moves to ast" item above. New:
 `arg(n, idx): KdlValue` and `hasArg(n, idx): bool` in `ast.nim`.
 
-### `[ ]` `Medium` — embed[T] docstring overclaims
+### `[x]` `Medium` — embed[T] docstring overclaims
 
-The docstring says `embed[T]` validates at compile time, but the
-return type is `Result[T, ParseError]` which implies fallibility
-at the call site. Either commit to "compile-time guaranteed; returns
-T directly" (with a build error on malformed input) OR re-word the
-docstring to say "validates at module init; returns Result".
+Resolved by making the code match the claim, not the doc match the
+code. The `embedAux` macro now emits a `when isErr: {.error: ...}`
+gate on the compile-time-evaluated decode result. A malformed KDL
+file (or a decode-type-mismatch against `T`) fails the **build**
+with a message carrying the file path and the parse hint —
+previously the Err was silently embedded as data and surfaced only
+at the user's `.get()` at runtime.
 
-**Fix:** add a `requireEmbed[T]` variant that panics on init failure
-for the always-valid-after-init use case, and clarify the docstring.
+The `Result[T, ParseError]` return type is preserved for
+compositional ergonomics; in a successfully-built binary it's
+always `Ok`. The originally-proposed `requireEmbed[T]` variant is
+unnecessary now: append `.get` at the call site for the
+always-valid-after-init use case.
 
-File: `src/codegen.nim:1293`.
+Regression-guarded by `tests/test_embed.nim`'s `compiles()` checks
+against `fixtures/rule_broken.kdl` (does NOT compile) and
+`fixtures/rule_simple.kdl` (still compiles).
 
 ### `[x]` `Low` — Encode error spans on typed encode are synthetic placeholders
 

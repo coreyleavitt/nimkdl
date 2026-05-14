@@ -1348,20 +1348,24 @@ macro embedAux*(T: typed; path, callerFile: static[string]): untyped =
   ## the template fills it via `instantiationInfo`.
   ##
   ## Emits a `const`-evaluated decode call. The parse+decode chain runs
-  ## in Nim's VM when invoked in a `const` context (which `embed[T]`'s
-  ## `compileTimeDecoded` binding forces); a malformed file then surfaces
-  ## as a compile-time error carrying the parse diagnostic. The decoded
-  ## `Result` is still copied into a runtime location at module init —
-  ## the win is moving parse work to build time, not eliminating module
-  ## init entirely.
+  ## in Nim's VM when invoked in a `const` context (which the
+  ## `compileTimeDecoded` binding forces). A `when isErr` gate then
+  ## fires `{.error: ...}` so a malformed file fails the **build**, not
+  ## just the runtime `.get()` call — the whole point of moving the
+  ## work to compile time. The constructed error message names the
+  ## file path so the diagnostic is actionable.
   let resolved =
     if isAbsolute(path): path
     else: callerFile.parentDir / path
   let body = staticRead(resolved)
   let bodyLit = newLit(body)
   let pathLit = newLit(resolved)
+  let errPrefix = newLit("embed[T] parse failure in " & resolved & ": ")
   result = quote do:
     const compileTimeDecoded = decode[`T`](`bodyLit`, `pathLit`)
+    when compileTimeDecoded.isErr:
+      const compileTimeErrMsg = `errPrefix` & compileTimeDecoded.getErr.hint
+      {.error: compileTimeErrMsg.}
     compileTimeDecoded
 
 template embed*[T](path: static[string]): Result[T, ParseError] =
@@ -1373,7 +1377,18 @@ template embed*[T](path: static[string]): Result[T, ParseError] =
   ## expectation when colocating fixtures next to a test or rule loader.
   ## Absolute paths are used as-is.
   ##
-  ## A missing or unreadable file fails the build at compile time.
+  ## **Compile-time guarantees:**
+  ##   - Missing or unreadable file → build fails (via `staticRead`).
+  ##   - Malformed KDL or decode-type-mismatch → build fails with a
+  ##     `{.error: ...}` carrying the file path and the parse hint.
+  ##
+  ## Consequence: the returned `Result[T, ParseError]` is *always*
+  ## `Ok` at runtime in a successfully-built binary. The Result shape
+  ## is preserved for compositional ergonomics (`embed[T](...).get`)
+  ## and for the rare case where a future variant wants to surrender
+  ## the compile-time guarantee. If you'd rather have `T` directly
+  ## and panic on the impossible runtime-Err, append `.get` at the
+  ## call site.
   embedAux(T, path, instantiationInfo(fullPaths = true).filename)
 
 proc kdlNodeNameImpl*(typ: typedesc): string =
