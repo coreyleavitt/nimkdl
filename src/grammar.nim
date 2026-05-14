@@ -8,7 +8,7 @@
 ## `parser.nim` as ground truth will catch it.
 ##
 ## This module gives us a **second, independently-shaped recognizer** for
-## the language. The grammar lives as a `Table[string, Rule]` value — a
+## the language. The grammar lives as a `Table[string, GrammarRule]` value — a
 ## *data structure* describing what's recognized, not imperative code.
 ## The reference interpreter walks that value recursively. The two
 ## interpretations have maximally different bug surfaces:
@@ -66,7 +66,7 @@ import ./reserved
 import ./spans
 
 # ---------------------------------------------------------------------------
-# Rule data model
+# GrammarRule data model
 # ---------------------------------------------------------------------------
 
 type
@@ -82,7 +82,7 @@ type
     rkNot       ## negative lookahead: succeeds if inner fails, consumes nothing
     rkPeek      ## positive lookahead: succeeds if inner matches, consumes nothing
 
-  Rule* = ref object
+  GrammarRule* = ref object
     ## Grammar rule node. Reference type so we can build self-referential
     ## structures (rules call each other by name, but inline subrules can
     ## reference larger constructs without paying a string-lookup tax).
@@ -90,13 +90,13 @@ type
     case kind*: RuleKind
     of rkTerm: terminal*: TokenKind
     of rkRef:  refName*: string
-    of rkSeq, rkAlt: parts*: seq[Rule]
-    of rkOpt, rkStar, rkPlus, rkNot, rkPeek: inner*: Rule
+    of rkSeq, rkAlt: parts*: seq[GrammarRule]
+    of rkOpt, rkStar, rkPlus, rkNot, rkPeek: inner*: GrammarRule
     of rkEof: discard
 
   Grammar* = object
     ## A complete grammar definition: rule table plus start-symbol name.
-    rules*: Table[string, Rule]
+    rules*: Table[string, GrammarRule]
     startRule*: string
 
 # ---------------------------------------------------------------------------
@@ -104,23 +104,23 @@ type
 # ---------------------------------------------------------------------------
 #
 # Plain Nim `func`s, not macros. Building the grammar reads as normal
-# code. These produce immutable Rule values; reuse a binding to share
+# code. These produce immutable GrammarRule values; reuse a binding to share
 # the same node across multiple rules.
 
-func term*(t: TokenKind): Rule = Rule(kind: rkTerm, terminal: t)
-func refTo*(name: string): Rule = Rule(kind: rkRef, refName: name)
-func seqOf*(parts: varargs[Rule]): Rule =
-  Rule(kind: rkSeq, parts: @parts)
-func altOf*(parts: varargs[Rule]): Rule =
-  Rule(kind: rkAlt, parts: @parts)
-func opt*(inner: Rule): Rule = Rule(kind: rkOpt, inner: inner)
-func star*(inner: Rule): Rule = Rule(kind: rkStar, inner: inner)
-func plus*(inner: Rule): Rule = Rule(kind: rkPlus, inner: inner)
-func neg*(inner: Rule): Rule = Rule(kind: rkNot, inner: inner)
-func peek*(inner: Rule): Rule = Rule(kind: rkPeek, inner: inner)
-func eof*(): Rule = Rule(kind: rkEof)
+func term*(t: TokenKind): GrammarRule = GrammarRule(kind: rkTerm, terminal: t)
+func refTo*(name: string): GrammarRule = GrammarRule(kind: rkRef, refName: name)
+func seqOf*(parts: varargs[GrammarRule]): GrammarRule =
+  GrammarRule(kind: rkSeq, parts: @parts)
+func altOf*(parts: varargs[GrammarRule]): GrammarRule =
+  GrammarRule(kind: rkAlt, parts: @parts)
+func opt*(inner: GrammarRule): GrammarRule = GrammarRule(kind: rkOpt, inner: inner)
+func star*(inner: GrammarRule): GrammarRule = GrammarRule(kind: rkStar, inner: inner)
+func plus*(inner: GrammarRule): GrammarRule = GrammarRule(kind: rkPlus, inner: inner)
+func neg*(inner: GrammarRule): GrammarRule = GrammarRule(kind: rkNot, inner: inner)
+func peek*(inner: GrammarRule): GrammarRule = GrammarRule(kind: rkPeek, inner: inner)
+func eof*(): GrammarRule = GrammarRule(kind: rkEof)
 
-func labeled*(r: Rule, name: string): Rule =
+func labeled*(r: GrammarRule, name: string): GrammarRule =
   ## Attach a debug label to a rule. Doesn't change semantics; shows up
   ## in error messages and `$grammar` output.
   result = r
@@ -136,9 +136,9 @@ func labeled*(r: Rule, name: string): Rule =
 # like number-literal grammar, because the lexer already handled them).
 
 proc buildKdlGrammar*(): Grammar =
-  result = Grammar(rules: initTable[string, Rule](), startRule: "document")
+  result = Grammar(rules: initTable[string, GrammarRule](), startRule: "document")
 
-  template rule(name: string, body: Rule) =
+  template rule(name: string, body: GrammarRule) =
     result.rules[name] = body
 
   # ---- Lexical-level terminals (lexer already classified) ----
@@ -268,7 +268,7 @@ let KdlV2Grammar* = buildKdlGrammar()
 # the table. A typo (`refTo("nodee")`) becomes a compile error here, not
 # a runtime miss inside the interpreter.
 
-proc validateRule(r: Rule, names: Table[string, bool], errors: var seq[string]) =
+proc validateRule(r: GrammarRule, names: Table[string, bool], errors: var seq[string]) =
   case r.kind
   of rkRef:
     if r.refName notin names:
@@ -306,7 +306,7 @@ block:
 # Pretty-print the grammar as docs
 # ---------------------------------------------------------------------------
 
-proc renderRule(r: Rule, depth = 0): string =
+proc renderRule(r: GrammarRule, depth = 0): string =
   if r.label.len > 0: result.add("⟨" & r.label & "⟩ ")
   case r.kind
   of rkTerm:
@@ -354,7 +354,7 @@ proc `$`*(g: Grammar): string =
 
 type
   ParseNode* = ref object
-    ## A node in the raw parse tree. Each Rule that matches produces one
+    ## A node in the raw parse tree. Each GrammarRule that matches produces one
     ## of these. `tokens` is the linear sequence of tokens this match
     ## consumed; `children` is the matches from sub-rules in source order.
     ##
@@ -378,7 +378,7 @@ const InterpRecursionCap = 1024
 proc interpRule*(s: var InterpState, ruleName: string, depth: int):
     Result[ParseNode, ParseError]
 
-proc interp*(s: var InterpState, r: Rule, depth: int):
+proc interp*(s: var InterpState, r: GrammarRule, depth: int):
     Result[ParseNode, ParseError] =
   ## Walk a rule. Returns the matched parse node on success; updates
   ## `s.pos` to past the match. On failure, leaves `s.pos` at the entry

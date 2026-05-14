@@ -212,7 +212,7 @@ suite "Reference interpreter: defensive paths":
     # Construct a grammar with a refTo pointing at a missing rule and run
     # the interpreter against any input. Prior to C4 this raised KeyError;
     # now it must return a structured ParseError.
-    var bad = Grammar(rules: initTable[string, Rule](), startRule: "root")
+    var bad = Grammar(rules: initTable[string, GrammarRule](), startRule: "root")
     bad.rules["root"] = seqOf(refTo("missing"), eof())
     var doc = newDoc("<test>")
     let tokens = lex("anything", doc.interner)

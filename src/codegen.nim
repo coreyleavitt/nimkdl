@@ -752,7 +752,12 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
         quote do:
           return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
       else:
-        newEmptyNode()  # absent + has default → already set; skip
+        # Field has a default — the local was initialised with it
+        # above, so the absent path just falls through. Emit a
+        # `discard` so the `else:` block has a body that Nim can
+        # parse; `newEmptyNode()` produces a parse-failure-shaped
+        # empty arm.
+        newNimNode(nnkDiscardStmt).add(newEmptyNode())  # absent + has default → already set; skip
     quote do:
       if `nodeIdent`.hasArg(`idxLit`):
         let `valSym` = `nodeIdent`.arg(`idxLit`)
@@ -799,7 +804,12 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
         quote do:
           return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
       else:
-        newEmptyNode()
+        # Field has a default — the local was initialised with it
+        # above, so the absent path just falls through. Emit a
+        # `discard` so the `else:` block has a body that Nim can
+        # parse; `newEmptyNode()` produces a parse-failure-shaped
+        # empty arm.
+        newNimNode(nnkDiscardStmt).add(newEmptyNode())
     quote do:
       let `optSym` = `nodeIdent`.prop(`docIdent`, `kdlNameStr`)
       if `optSym`.isSome:
@@ -885,7 +895,12 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
         quote do:
           return err[void, ParseError](missingErrAt(`missingMsg`, `span`))
       else:
-        newEmptyNode()
+        # Field has a default — the local was initialised with it
+        # above, so the absent path just falls through. Emit a
+        # `discard` so the `else:` block has a body that Nim can
+        # parse; `newEmptyNode()` produces a parse-failure-shaped
+        # empty arm.
+        newNimNode(nnkDiscardStmt).add(newEmptyNode())
     let childSym = genSym(nskLet, "kdlChild")
     let optSym = genSym(nskLet, "kdlChildOpt")
     let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
