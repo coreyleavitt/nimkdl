@@ -74,34 +74,32 @@ precision to a positive value will silently apply the wrong range.
 
 File: `src/reserved.nim:1102-1103`.
 
-### `[ ]` `Low` — KdlValue.== compares typeAnnotation handles unsafely across docs
+### `[x]` `Low` — KdlValue.== compares typeAnnotation handles unsafely across docs
 
-`KdlValue.==` does `a.typeAnnotation != b.typeAnnotation` directly on
-the `InternedStr` (uint32) handle. Values from different documents
-with different interners may have the same handle pointing to
-different strings. `KdlNode.==` documents this caveat;
-`KdlValue.==` doesn't.
+Already resolved (stale BACKLOG entry): `KdlValue.==` carries the
+cross-doc caveat in its docstring and points at `valueEqual(aDoc,
+bDoc, a, b)`, which uses `equalsAcross` to compare the typeAnnotation
+by interned bytes rather than handle. Behavior regression-guarded
+by two new tests in `test_ast.nim` (same-string-different-handles →
+equal; different-strings-same-handle → not equal).
 
-**Fix:** add the cross-doc warning to the `KdlValue.==` doc comment,
-and add a `valueEqual(aDoc, bDoc, a, b)` parallel to the existing
-`nodeEqual` / `docEqual`.
+### `[x]` `Low` — setProp / addArg / setArg don't re-intern cross-doc value annotations
 
-File: `src/ast.nim:211-223`.
+Resolved via the dedicated-helper route (option C in the slice plan):
 
-### `[ ]` `Low` — setProp / addArg / setArg don't re-intern cross-doc value annotations
+- New `migrateValue(srcDoc: KdlDoc, dstDoc: var KdlDoc, v: var KdlValue)`
+  re-interns `v.typeAnnotation` against `dstDoc`'s interner. No-op
+  when annotation is `InvalidInterned` or when the two docs share
+  an interner (compared by `addr`).
+- Mutator docstrings (`setProp`, `addArg`, `setArg`) now name the
+  cross-doc caveat and point at `migrateValue`.
 
-These mutators intern the property NAME via the local doc's interner,
-but if the supplied `KdlValue` carries a `typeAnnotation` interned in
-a DIFFERENT doc, the resulting `KdlNode` holds a mix of handles. The
-encoder will then call `interner.lookup` with the wrong interner and
-produce wrong output silently.
-
-**Fix:** the cross-doc value mutator should re-intern
-`v.typeAnnotation` against the local interner, OR `assert` that
-incoming values carry `InvalidInterned` or were minted from the same
-doc.
-
-File: `src/ast.nim:514-526`.
+The signature-change route was rejected: adding a `srcDoc` parameter
+to every mutator pollutes the 99% case (values constructed via
+`newStringValue` carry `InvalidInterned`) for one rare migration
+case. A runtime cross-doc assertion was also rejected as
+fundamentally unsound — a valid foreign handle can coincide with a
+valid local handle.
 
 ---
 

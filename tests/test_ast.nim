@@ -4,6 +4,7 @@
 import std/[strutils, unittest]
 
 import ../src/ast
+import ../src/encode
 import ../src/intern
 import ../src/spans
 
@@ -194,3 +195,73 @@ suite "iterators":
     for (k, _) in n.properties:
       keys.add(doc.interner.lookup(k))
     check keys == @["a", "b"]
+
+# ---------------------------------------------------------------------------
+# Cross-doc value safety (BACKLOG Low correctness items)
+# ---------------------------------------------------------------------------
+
+suite "valueEqual: cross-doc correctness":
+  test "same string with different interner handles compares equal":
+    var docA = newDoc()
+    var docB = newDoc()
+    # Force different handles for "ipv4" by pre-interning unrelated
+    # strings in docA so the handle for "ipv4" in docA is shifted
+    # relative to docB.
+    discard docA.interner.intern("padding-string-1")
+    discard docA.interner.intern("padding-string-2")
+    var a = newStringValue("1.2.3.4")
+    a.setTypeAnnotation(docA, "ipv4")
+    var b = newStringValue("1.2.3.4")
+    b.setTypeAnnotation(docB, "ipv4")
+    # The handles differ as a result of padding in docA:
+    check a.typeAnnotation != b.typeAnnotation
+    # But the strings are identical, so valueEqual must say equal.
+    check valueEqual(docA, docB, a, b)
+
+  test "different strings happening to share a handle compares NOT equal":
+    var docA = newDoc()
+    var docB = newDoc()
+    var a = newStringValue("x")
+    a.setTypeAnnotation(docA, "tagA")   # handle 0 in docA
+    var b = newStringValue("x")
+    b.setTypeAnnotation(docB, "tagB")   # also handle 0 in docB
+    check a.typeAnnotation == b.typeAnnotation  # the bug's precondition
+    # `==` would say equal (and would be wrong); valueEqual gets it right.
+    check not valueEqual(docA, docB, a, b)
+
+suite "migrateValue: cross-doc transfer":
+  test "migrateValue rewrites typeAnnotation against the destination doc":
+    var srcDoc = newDoc()
+    var dstDoc = newDoc()
+    # Pad dstDoc so the handle for "ipv4" there won't collide with srcDoc.
+    for s in ["a", "b", "c"]:
+      discard dstDoc.interner.intern(s)
+    var v = newStringValue("1.2.3.4")
+    v.setTypeAnnotation(srcDoc, "ipv4")
+    let oldHandle = v.typeAnnotation
+    migrateValue(srcDoc, dstDoc, v)
+    # After migration: handle is dstDoc-local; resolves to the right string.
+    check v.typeAnnotation != oldHandle  # different interner → different handle
+    check dstDoc.interner.lookup(v.typeAnnotation) == "ipv4"
+
+  test "migrateValue is a no-op when typeAnnotation is InvalidInterned":
+    var srcDoc = newDoc()
+    var dstDoc = newDoc()
+    var v = newStringValue("plain")
+    let oldHandle = v.typeAnnotation
+    migrateValue(srcDoc, dstDoc, v)
+    check v.typeAnnotation == oldHandle  # unchanged
+
+  test "after migrateValue, the value works correctly when inserted into dstDoc":
+    var srcDoc = newDoc()
+    var dstDoc = newDoc()
+    discard dstDoc.interner.intern("filler")
+    var v = newStringValue("1.2.3.4")
+    v.setTypeAnnotation(srcDoc, "ipv4")
+    migrateValue(srcDoc, dstDoc, v)
+    var n = dstDoc.newNode("host")
+    n.entries.add(newArgument(v))
+    dstDoc.add(n)
+    let text = encode(dstDoc)
+    check "(ipv4)" in text  # the tag rendered correctly via dstDoc's interner
+    check "1.2.3.4" in text

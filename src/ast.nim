@@ -538,6 +538,13 @@ proc insert*(doc: var KdlDoc, idx: int, n: sink KdlNode) =
 
 proc addArg*(n: var KdlNode, doc: var KdlDoc, v: KdlValue) {.inline.} =
   ## Append a positional argument entry.
+  ##
+  ## **Cross-doc caveat:** if `v.typeAnnotation` was minted from a
+  ## different doc's interner, the resulting node holds a foreign
+  ## handle and the encoder will produce silently-wrong output. Call
+  ## `migrateValue(srcDoc, doc, v)` first when moving a value between
+  ## docs. Values constructed via `newStringValue` / `newIntValue` /
+  ## etc. carry `InvalidInterned` and are always safe.
   n.entries.add(KdlEntry(kind: keArgument, argValue: v, span: n.span))
   doc.mutated = true
 
@@ -545,7 +552,7 @@ proc setArg*(n: var KdlNode, doc: var KdlDoc, idx: int,
              v: KdlValue): bool =
   ## Replace the `idx`-th positional argument's value. Index is among
   ## arguments only (properties skipped). Returns false when out of
-  ## range.
+  ## range. See `addArg` for the cross-doc caveat.
   var argSeen = 0
   for i in 0 ..< n.entries.len:
     if n.entries[i].kind == keArgument:
@@ -586,6 +593,9 @@ proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
   ## Set property `name = v`. If a property with that name already
   ## exists, its value is replaced in place (preserving source order).
   ## Otherwise the property is appended.
+  ##
+  ## **Cross-doc caveat:** see `addArg`. Use `migrateValue(srcDoc,
+  ## doc, v)` first when `v` was constructed against a different doc.
   let key = doc.interner.intern(name)
   doc.mutated = true
   for i in 0 ..< n.entries.len:
@@ -653,6 +663,30 @@ proc setTypeAnnotation*(v: var KdlValue, doc: var KdlDoc, tag: string) {.inline.
 proc clearTypeAnnotation*(v: var KdlValue, doc: var KdlDoc) {.inline.} =
   v.typeAnnotation = InvalidInterned
   doc.mutated = true
+
+proc migrateValue*(srcDoc: KdlDoc, dstDoc: var KdlDoc, v: var KdlValue) =
+  ## Re-intern `v.typeAnnotation` against `dstDoc`'s interner so that
+  ## `v` can be safely inserted into `dstDoc` (via `setProp`, `addArg`,
+  ## raw field assignment, etc.) without leaving a foreign handle on
+  ## the value.
+  ##
+  ## Mutator APIs intern the property NAME against the local doc but
+  ## trust that any incoming `KdlValue.typeAnnotation` is either
+  ## `InvalidInterned` or was minted from the same doc. Crossing a
+  ## value between docs without migrating leaves a foreign handle in
+  ## the AST, which the encoder later looks up against the *wrong*
+  ## interner — producing silently wrong output.
+  ##
+  ## No-op when the value carries no annotation, or when `srcDoc` and
+  ## `dstDoc` share an interner (compared by `addr`; we don't have a
+  ## stronger identity for value-typed objects).
+  if v.typeAnnotation == InvalidInterned: return
+  if cast[pointer](unsafeAddr srcDoc.interner) ==
+     cast[pointer](unsafeAddr dstDoc.interner):
+    return
+  let tagBytes = srcDoc.interner.lookup(v.typeAnnotation)
+  v.typeAnnotation = dstDoc.interner.intern(tagBytes)
+  dstDoc.mutated = true
 
 proc removeNode*(doc: var KdlDoc, name: string): int =
   ## Remove every top-level node with the given name. Returns count.
