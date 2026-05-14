@@ -36,6 +36,9 @@ import std/strutils
 
 import ./ast
 import ./fnv
+import ./intern
+import ./lexer  # ReservedBarewords (centralized v2 keyword denylist)
+import ./spans
 
 when defined(kdlHashStats):
   # Test-only instrumentation. Counts how many full node-content
@@ -45,9 +48,6 @@ when defined(kdlHashStats):
   # hash per ancestor it sits under). Behind a `define` so production
   # builds carry no overhead.
   var kdlHashCallCount* {.threadvar.}: int
-import ./intern
-import ./lexer  # ReservedBarewords (centralized v2 keyword denylist)
-import ./spans
 
 type
   EncodeMode* = enum
@@ -79,7 +79,7 @@ func canEmitBare(s: string): bool =
   ## broader set but this subset is always safe and matches what humans
   ## actually write.
   if s.len == 0: return false
-  if s in ReservedBarewords: return false
+  if isReservedBareword(s): return false
   for i, c in s:
     if not isBareIdentChar(c, first = (i == 0)):
       return false
@@ -203,13 +203,15 @@ func emitEntry(e: KdlEntry, interner: Interner): string =
 func emitNode(n: KdlNode, interner: Interner,
               mode: EncodeMode, indent: int): string =
   let pad = (if mode == emPretty: PrettyIndent.repeat(indent) else: "")
-  let annoPrefix =
-    if n.typeAnnotation == InvalidInterned: ""
-    else: "(" & emitIdent(interner.lookup(n.typeAnnotation)) & ")"
-  var parts = @[annoPrefix & emitIdent(interner.lookup(n.name))]
+  result.add(pad)
+  if n.typeAnnotation != InvalidInterned:
+    result.add('(')
+    result.add(emitIdent(interner.lookup(n.typeAnnotation)))
+    result.add(')')
+  result.add(emitIdent(interner.lookup(n.name)))
   for e in n.entries:
-    parts.add(emitEntry(e, interner))
-  result = pad & parts.join(" ")
+    result.add(' ')
+    result.add(emitEntry(e, interner))
   if n.children.len > 0:
     case mode
     of emPreserve, emPretty:
@@ -320,13 +322,14 @@ func emitNamePart(n: KdlNode, interner: Interner): string =
   ## The "head" of a node — type annotation + name + entries — without
   ## the children block or trailing newline. Shared between canonical
   ## emit and the preserving emit's mismatched-subtree case.
-  let annoPrefix =
-    if n.typeAnnotation == InvalidInterned: ""
-    else: "(" & emitIdent(interner.lookup(n.typeAnnotation)) & ")"
-  var parts = @[annoPrefix & emitIdent(interner.lookup(n.name))]
+  if n.typeAnnotation != InvalidInterned:
+    result.add('(')
+    result.add(emitIdent(interner.lookup(n.typeAnnotation)))
+    result.add(')')
+  result.add(emitIdent(interner.lookup(n.name)))
   for e in n.entries:
-    parts.add(emitEntry(e, interner))
-  parts.join(" ")
+    result.add(' ')
+    result.add(emitEntry(e, interner))
 
 func validSpanInto(span: Span, source: string): bool {.inline.} =
   source.len > 0 and span.start.offset >= 0 and

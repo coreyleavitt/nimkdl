@@ -195,13 +195,24 @@ func decodeFloatFromToken*(tok: Token): Result[float, ParseError] =
   ## raising `ValueError`. This is the property `parser.nim`'s
   ## `{.noSideEffect.}` contract needs.
   assert tok.kind == tkNumber
-  # parseutils doesn't strip underscores; strip them first.
-  var clean = newStringOfCap(tok.numText.len)
+  # parseutils doesn't strip underscores. Most decimal float tokens
+  # have none, so scan first and only allocate a stripped copy when
+  # underscores are actually present — keeps the common case alloc-
+  # free while still handling `1_000.5e1_2` correctly.
+  var hasUnderscore = false
   for c in tok.numText:
-    if c != '_': clean.add(c)
+    if c == '_': hasUnderscore = true; break
+  let text =
+    if hasUnderscore:
+      var s = newStringOfCap(tok.numText.len)
+      for c in tok.numText:
+        if c != '_': s.add(c)
+      s
+    else:
+      tok.numText
   var value: float
-  let consumed = parseutils.parseFloat(clean, value)
-  if consumed == 0 or consumed != clean.len:
+  let consumed = parseutils.parseFloat(text, value)
+  if consumed == 0 or consumed != text.len:
     return err[float, ParseError](
       initError(peLexInvalidNumber, tok.span, "malformed float literal"))
   ok[float, ParseError](value)

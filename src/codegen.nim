@@ -707,21 +707,28 @@ proc emitArgDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
 
 proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     NimNode =
+  ## Emitted code uses the public string-keyed `prop(n, doc, name)`
+  ## accessor (Option-returning) which does a single byte-comparison
+  ## scan via `interner.equals`. Previous emit interned the field-name
+  ## literal at the start of every call and then did two separate
+  ## scans (hasPropInterned + findPropInterned). The intern was wasted
+  ## work — the literal is constant per-generated-decoder — and the
+  ## paired scans walked entries twice.
   let kdlNameStr = newLit(f.kdlName)
-  let keyIdent = genSym(nskLet, "kdlKey")
   let mismatchMsg = newLit("type mismatch on property '" & f.kdlName & "'")
   let missingMsg = newLit("missing required property '" & f.kdlName & "'")
   let span = quote do: `nodeIdent`.span
   let mEmit = mismatchEmitter(f)
   let valSym = genSym(nskLet, "kdlPropVal")
+  let optSym = genSym(nskLet, "kdlPropOpt")
   let reservedCheck = emitReservedTagCheck(f, valSym, docIdent)
   if f.isOption:
     let innerT = f.innerType
     let localSym = genSym(nskVar, "optLocal_" & f.nimName)
     quote do:
-      let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      if `nodeIdent`.hasPropInterned(`keyIdent`):
-        let `valSym` = `nodeIdent`.findPropInterned(`keyIdent`)
+      let `optSym` = `nodeIdent`.prop(`docIdent`, `kdlNameStr`)
+      if `optSym`.isSome:
+        let `valSym` = `optSym`.get
         `reservedCheck`
         var `localSym`: `innerT`
         if not kdlDecodeValue(`localSym`, `valSym`, `docIdent`):
@@ -737,9 +744,9 @@ proc emitAttrDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
       else:
         newEmptyNode()
     quote do:
-      let `keyIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      if `nodeIdent`.hasPropInterned(`keyIdent`):
-        let `valSym` = `nodeIdent`.findPropInterned(`keyIdent`)
+      let `optSym` = `nodeIdent`.prop(`docIdent`, `kdlNameStr`)
+      if `optSym`.isSome:
+        let `valSym` = `optSym`.get
         `reservedCheck`
         if not kdlDecodeValue(`targetAccess`, `valSym`, `docIdent`):
           return err[void, ParseError](`mEmit`(`mismatchMsg`, `span`))
@@ -770,8 +777,10 @@ proc emitChildTagCheck(f: FieldSpec, childIdent, docIdent: NimNode): NimNode =
 
 proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     NimNode =
+  ## Emitted code uses the public string-keyed `child(n, doc, name)` /
+  ## `children(n, doc, name)` accessors — same zero-intern, single-scan
+  ## advantage as `emitAttrDecode`.
   let kdlNameStr = newLit(f.kdlName)
-  let nameIdent = genSym(nskLet, "kdlChildName")
   if typeNodeIsSeq(f.typeNode):
     let elemType = f.typeNode[1]
     let elemSym = genSym(nskVar, "elem")
@@ -779,8 +788,7 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let recurseRes = genSym(nskLet, "recurseRes")
     let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
-      let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      for `childSym` in `nodeIdent`.childrenNamedInterned(`nameIdent`):
+      for `childSym` in `nodeIdent`.children(`docIdent`, `kdlNameStr`):
         `childTagCheck`
         var `elemSym`: `elemType`
         let `recurseRes` = kdlDecodeImpl(`elemSym`, `childSym`, `docIdent`)
@@ -791,12 +799,13 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
     let innerT = f.innerType
     let localSym = genSym(nskVar, "optChild_" & f.nimName)
     let childSym = genSym(nskLet, "kdlChild")
+    let optSym = genSym(nskLet, "kdlChildOpt")
     let recurseRes = genSym(nskLet, "recurseRes")
     let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
-      let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      let `childSym` = `nodeIdent`.findChildInterned(`nameIdent`)
-      if not (`childSym`.name == InvalidInterned):
+      let `optSym` = `nodeIdent`.child(`docIdent`, `kdlNameStr`)
+      if `optSym`.isSome:
+        let `childSym` = `optSym`.get
         `childTagCheck`
         var `localSym`: `innerT`
         let `recurseRes` = kdlDecodeImpl(`localSym`, `childSym`, `docIdent`)
@@ -821,11 +830,12 @@ proc emitChildDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
       else:
         newEmptyNode()
     let childSym = genSym(nskLet, "kdlChild")
+    let optSym = genSym(nskLet, "kdlChildOpt")
     let childTagCheck = emitChildTagCheck(f, childSym, docIdent)
     quote do:
-      let `nameIdent` = `docIdent`.interner.intern(`kdlNameStr`)
-      let `childSym` = `nodeIdent`.findChildInterned(`nameIdent`)
-      if not (`childSym`.name == InvalidInterned):
+      let `optSym` = `nodeIdent`.child(`docIdent`, `kdlNameStr`)
+      if `optSym`.isSome:
+        let `childSym` = `optSym`.get
         `childTagCheck`
         let `recurseRes` = kdlDecodeImpl(`targetAccess`, `childSym`, `docIdent`)
         if `recurseRes`.isErr:

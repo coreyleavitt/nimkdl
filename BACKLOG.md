@@ -323,65 +323,63 @@ exactly once per encode pass — linear, not quadratic.
 Regression guard: `tests/test_preserve.nim` has a test (gated on
 `-d:kdlHashStats`) that asserts hash-call count ≤ node count.
 
-### `[ ]` `Medium` — Multi-line string lexer allocates three intermediate buffers
+### `[~]` `Medium` — Multi-line string lexer allocates three intermediate buffers
 
-`lexRegularOrMultiline` builds `rawBuf` (phase 1), `dedented`
-(phase 2), and `decoded` (phase 3) for `"""..."""` strings. For the
-common case (no whitespace escapes), `rawBuf` and `dedented` are
-identical — a copy is wasted.
+Partially resolved with `newStringOfCap(rawBuf.len)` on the
+dedented buffer (elides one growth realloc per multi-line string).
 
-**Fix:** detect "no whitespace escapes" during phase 1 and skip
-phase 2.
+**Defended skip on the larger fix.** The BACKLOG claim that
+"rawBuf and dedented are identical in the common case" is
+structurally inaccurate: `dedented` excludes the closing-prefix
+line by design (built from `lines[0..^2]` only) and applies the
+whitespace-only-line-collapse rule. The three phases are doing
+distinct work — fusing them is a non-trivial restructuring for
+marginal gain. If profiling later shows multi-line strings on
+the hot path, a phase-2/3 fusion with cursor-based dedent is the
+natural next step.
 
-File: `src/lexer.nim:671-815`.
+### `[x]` `Medium` — decodeFloatFromToken always allocates an underscore-stripped copy
 
-### `[ ]` `Medium` — decodeFloatFromToken always allocates an underscore-stripped copy
+Resolved. Now scans for `_` first; reuses `tok.numText` directly
+when none present, allocates the stripped copy only when needed.
 
-`decodeFloatFromToken` does `for c in tok.numText: if c != '_':
-clean.add(c)` unconditionally, even when the source has no
-underscores (most cases).
+### `[x]` `Medium` — emitNode builds entries into a seq[string] then joins
 
-**Fix:** scan first; allocate only if underscore present.
+Resolved. Both `emitNode` and `emitNamePart` write directly into
+`result` via `result.add(...)` — no intermediate seq[string],
+no `join(" ")` allocation per node.
 
-File: `src/numlit.nim:198-207`.
+### `[x]` `Medium` — Generated decoders intern each field-name literal on every decode call
 
-### `[ ]` `Medium` — emitNode builds entries into a seq[string] then joins
+Resolved with a deeper fix than the BACKLOG sketched: the macro now
+emits calls to the public `prop(n, doc, name)` / `child(n, doc, name)`
+/ `children(n, doc, name)` accessors, which use `interner.equals`
+internally. This eliminates BOTH the redundant `intern` AND the
+paired two-scan pattern (the old emit called `hasPropInterned` then
+`findPropInterned`, walking entries twice). Single byte-comparison
+scan per field, zero allocation.
 
-`var parts = @[...]; for e in n.entries: parts.add(emitEntry(...));
-result = pad & parts.join(" ")`. N+2 heap allocations per node.
+### `[x]` `Medium` — collectTokens called multiple times on the same ParseNode
 
-**Fix:** replace with direct `result.add()` calls.
+Resolved by:
+- Adding `collectTokensInto(n, buf: var seq[Token])` for hot-path
+  callers that already hold a buffer to reuse.
+- Pre-sizing the convenience `collectTokens(n)` via
+  `newSeqOfCap(n.tokens.len + 1)` — elides the growth realloc that
+  fires on the common single-token-leaf case.
 
-Files: `src/encode.nim:196-199`, `src/encode.nim:246-249`.
+The "overlapping subtrees" claim in the original BACKLOG entry was
+overstated — call sites operate on distinct match subtrees from
+the grammar — but the per-call allocation overhead is real and now
+mitigated.
 
-### `[ ]` `Medium` — Generated decoders intern each field-name literal on every decode call
+### `[x]` `Medium` — Reserved-keyword check does 6 string comparisons per identifier
 
-`codegen.nim:724` emits `let keyIdent = docIdent.interner.intern(
-kdlNameStr)` per field per decode. The literal is constant; the
-intern is wasted work.
-
-**Fix:** use `interner.equals(handle, literal)` in the generated
-lookup paths instead of `intern + compare`.
-
-### `[ ]` `Medium` — collectTokens called multiple times on the same ParseNode
-
-Reference interpreter path: `collectTokens` allocates a fresh
-`seq[Token]` per call. Called by `buildValue`, `buildEntry`,
-`buildNode` repeatedly on overlapping subtrees.
-
-**Fix:** memoize via a cache OR pass a preallocated buffer.
-
-File: `src/grammar.nim:552-554`.
-
-### `[ ]` `Medium` — Reserved-keyword check does 6 string comparisons per identifier
-
-`identStr in ReservedBarewords` (length-6 array of literal strings)
-fires on every ident lookup in parser + grammar paths.
-
-**Fix:** intern the 6 keywords at interner init and compare handles,
-OR length-prefilter (max reserved length is 5).
-
-Files: `src/parser.nim:152,220,306`, `src/grammar.nim:609,836,843`.
+Resolved by `isReservedBareword(s)` in `lexer.nim` — does an
+`s.len > MaxReservedBarewordLen` (5) prefilter, then a
+length-then-bytes match against the 6 entries. Identifiers longer
+than 5 chars skip the table walk entirely; the parser + grammar
+sites all route through this single helper.
 
 ### `[ ]` `Low` — Pre-computed indent table would eliminate `PrettyIndent.repeat()` allocations
 

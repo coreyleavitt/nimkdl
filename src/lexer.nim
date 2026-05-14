@@ -45,13 +45,29 @@ const
     ## name, property key, or value); they must be `#`-prefixed (booleans/
     ## null/special floats) or quoted (string values). Centralized here so
     ## parser, reference interpreter, and encoder agree.
-    ## Maximum number of `#` characters allowed at the start of a raw
-    ## string literal (`#"..."#`, `##"..."##`, …). KDL imposes no spec
-    ## limit, but matching closing-hash scans are O(H * N) over the
-    ## body and an unbounded `H` is an easy DoS vector against the
-    ## lexer when parsing untrusted documents. KDL configs in the
-    ## wild use 0–4 hashes; 255 is comfortably above any plausible
-    ## use while keeping the scan bounded.
+  MaxReservedBarewordLen* = 5
+    ## Length of the longest entry in `ReservedBarewords` (`"false"`).
+    ## Identifiers longer than this cannot match any reserved bareword,
+    ## so the 6-string scan can be skipped entirely. Used by
+    ## `isReservedBareword` below; hot on every parsed identifier.
+
+  # (Earlier revisions of this file had a doc-comment block for
+  # `MaxRawStringHashes` floating after `ReservedBarewords`; the
+  # rationale moved up next to the constant where it belongs.)
+
+func isReservedBareword*(s: openArray[char]): bool {.inline.} =
+  ## Length-prefiltered membership test for `ReservedBarewords`.
+  ## A 6-string scan per identifier was visible in profiling; this
+  ## short-circuits on `s.len > 5` and skips the comparison loop
+  ## entirely for the overwhelming majority of identifiers.
+  if s.len > MaxReservedBarewordLen: return false
+  for kw in ReservedBarewords:
+    if kw.len != s.len: continue
+    var matches = true
+    for i in 0 ..< s.len:
+      if kw[i] != s[i]: matches = false; break
+    if matches: return true
+  false
 
 type
   TokenKind* = enum
@@ -710,7 +726,7 @@ proc lexRegularOrMultiline(lx: var Lexer) =
                        "closing \"\"\" must be on its own line " &
                        "(non-whitespace before closing delimiter)")
           return
-        var dedented = ""
+        var dedented = newStringOfCap(rawBuf.len)
         # Intermediate content = lines[0 .. ^2]; lines[^1] is the closing
         # prefix consumed above. Per spec: a line that contains ONLY
         # whitespace is exempt from the prefix-match requirement; it

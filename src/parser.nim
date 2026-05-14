@@ -149,7 +149,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     # quoted or `#`-prefixed.
     discard p.advance()
     let identStr = p.doc.interner.lookup(tok.ident)
-    if identStr in ReservedBarewords:
+    if isReservedBareword(identStr):
       return err[KdlValue, ParseError](initError(peLexReservedKeyword,
         tok.span,
         "reserved keyword '" & identStr & "' cannot be used as a bare " &
@@ -217,7 +217,7 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
   # /inf/-inf/nan). v2 forbids these in key position even without `#`.
   if p.peek.kind == tkIdent and p.peek(1).kind == tkEquals:
     let kw = p.doc.interner.lookup(p.peek.ident)
-    if kw in ReservedBarewords:
+    if isReservedBareword(kw):
       return err[KdlEntry, ParseError](initError(peLexReservedKeyword,
         p.peek.span,
         "reserved keyword '" & kw & "' cannot be used as a property key"))
@@ -315,7 +315,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   of tkIdent:
     let tok = p.advance()
     let identStr = p.doc.interner.lookup(tok.ident)
-    if identStr in ReservedBarewords:
+    if isReservedBareword(identStr):
       return err[KdlNode, ParseError](initError(peLexReservedKeyword,
         tok.span,
         "reserved keyword '" & identStr & "' cannot be used as a bare " &

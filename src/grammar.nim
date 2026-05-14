@@ -549,9 +549,21 @@ proc toSpan(consumed: Slice[int], toks: seq[Token]): Span =
 # in R1 (the unscoped variants picked up matches from nested rule
 # scopes — see R1 grilling on H8). Deleted in R2.
 
+proc collectTokensInto(n: ParseNode, into: var seq[Token]) =
+  ## Append all tokens under `n` into `into` (depth-first, source order).
+  ## Use when the caller already has a buffer to reuse; avoids the per-
+  ## call allocation that `collectTokens` produces.
+  into.add(n.tokens)
+  for c in n.children: collectTokensInto(c, into)
+
 proc collectTokens(n: ParseNode): seq[Token] =
-  result.add(n.tokens)
-  for c in n.children: result.add(collectTokens(c))
+  ## Convenience: allocates a fresh seq pre-sized for `n`'s own token
+  ## count (most ParseNodes are small leaves), then appends children.
+  ## The capacity hint elides one growth realloc on the common case
+  ## of single-token leaves. Hot paths that already hold a buffer
+  ## should call `collectTokensInto` directly to avoid the alloc.
+  result = newSeqOfCap[Token](n.tokens.len + 1)
+  collectTokensInto(n, result)
 
 proc resolveName(toks: seq[Token], doc: var KdlDoc): InternedStr =
   ## Helper: bareword / quoted string / raw string used as a name.
@@ -606,7 +618,7 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc,
   of tkIdent:
     # Bare-ident value: resolves through the doc's interner.
     let identStr = doc.interner.lookup(v.ident)
-    if identStr in ReservedBarewords:
+    if isReservedBareword(identStr):
       errs.add(initError(peLexReservedKeyword, v.span,
         "reserved keyword '" & identStr & "' cannot be used as a bare value"))
       result = newNullValue(v.span)
@@ -837,14 +849,14 @@ proc checkNoReservedKeywords(nodes: seq[KdlNode], doc: KdlDoc):
   ## checks here after the build.
   for n in nodes:
     let nameStr = doc.interner.lookup(n.name)
-    if nameStr in ReservedBarewords:
+    if isReservedBareword(nameStr):
       return err[void, ParseError](initError(peLexReservedKeyword,
         n.span,
         "reserved keyword '" & nameStr & "' cannot be used as a bare node name"))
     for e in n.entries:
       if e.kind == keProperty:
         let k = doc.interner.lookup(e.propName)
-        if k in ReservedBarewords:
+        if isReservedBareword(k):
           return err[void, ParseError](initError(peLexReservedKeyword,
             e.span,
             "reserved keyword '" & k & "' cannot be used as a property key"))
