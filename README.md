@@ -12,15 +12,17 @@ type Service {.kdlNode: "service".} = object
 
 deriveDecode(Service)
 
-# Parse error fails the BUILD, not the runtime. VM-evaluated:
-const services = embed[seq[Service]]("config/services.kdl")
+# A parse error here fails `nim c`, not production. The file gets
+# read + parsed + decoded inside Nim's VM and the typed value lands
+# in the binary's data segment, so .get is safe at runtime.
+const services = embed[seq[Service]]("config/services.kdl").get
 
-# Compile-time field-checked iteration:
+# Compile-time field-checked iteration. A typo like `it.enabeled`
+# becomes a "did you mean 'enabled'?" compile error instead of
+# silently returning an empty result the way string-based query
+# languages do.
 for name in path(services, [it.enabled].name):
   echo name
-# A typo (it.enabeled) becomes a compile error with the standard
-# "did you mean 'enabled'?" suggestion instead of silently returning
-# an empty result the way string-based query languages do.
 ```
 
 ## What's in the box
@@ -84,14 +86,13 @@ We replace it with the typed schema-path DSL (`path()` macro). Compile-time fiel
 ```nim
 import kdl
 
-let r = parse("""
-rule "compaction" {
-  action "inject" template="ctx pressure rising"
-}
-""", preserveFormat = true)  # opt-in for byte-lossless emPreserve
+let r = parse(readFile("rules.kdl"), preserveFormat = true)
+if r.isErr:
+  echo "parse failed: ", r.getErr.hint
+  quit 1
 
-doAssert r.isOk
-echo encode(r.get)  # byte-identical to the input
+let doc = r.get
+echo encode(doc)  # byte-identical to the input
 ```
 
 ### Type-driven decode
@@ -110,15 +111,15 @@ type
 deriveDecode(Action)
 deriveDecode(Rule)
 
-let r = decode[Rule]("""
-  rule "compaction" {
-    action "inject" template="ctx pressure rising"
-  }
-""")
-doAssert r.isOk
-doAssert r.get.id == "compaction"
-doAssert r.get.enabled                # default fired
-doAssert r.get.action.kind == "inject"
+let r = decode[Rule](readFile("rule.kdl"))
+if r.isErr:
+  echo r.getErr.formatError(filename = "rule.kdl")
+  quit 1
+
+let rule = r.get
+echo "loaded rule '", rule.id, "', action ", rule.action.kind
+if rule.enabled:
+  apply(rule)
 ```
 
 ### Compile-time embed
@@ -126,34 +127,41 @@ doAssert r.get.action.kind == "inject"
 `embed[T]("path")` evaluates `lex` then `parse` then `decode[T]` inside Nim's VM and emits a `const`. A parse error fails the build, not the runtime. Zero module-init cost because the typed value is already in the binary's data segment.
 
 ```nim
-const builtins = embed[seq[Rule]]("rules/defaults.kdl")
-doAssert builtins.isOk   # always true at runtime, error would
-                         # have failed the build
+const builtins = embed[seq[Rule]]("rules/defaults.kdl").get
+# `.get` is safe here. If the file were malformed, the build would
+# have failed at `nim c` rather than producing a runtime Err.
+
+for rule in builtins:
+  echo "loaded builtin '", rule.id, "'"
 ```
 
 ### Typed query
 
 ```nim
-let rules = builtins.get
-
 # path() macro, compile-time field-checked
-for id in path(rules, [it.enabled].id):
-  echo id
+for id in path(builtins, [it.enabled].id):
+  echo "enabled: ", id
 
 # iterator chain
-for r in rules.where(it.enabled):
-  echo r.id
-let first = rules.first(it.id == "compaction")
+for rule in builtins.where(it.enabled):
+  apply(rule)
+
+let compaction = builtins.first(it.id == "compaction")
+if compaction.isSome:
+  apply(compaction.get)
 ```
 
 ### Differential testing
 
 ```nim
+# Used in the test suite to cross-validate every conformance fixture.
 let viaFast = parse(source)
 let viaRef  = referenceInterpret(source)
-doAssert viaFast.isOk == viaRef.isOk
-if viaFast.isOk:
-  doAssert docEqual(viaFast.get, viaRef.get)
+
+if viaFast.isOk != viaRef.isOk:
+  echo "parsers disagree on success/failure for: ", source
+elif viaFast.isOk and not docEqual(viaFast.get, viaRef.get):
+  echo "parsers disagree on AST for: ", source
 ```
 
 ## Pragmas
