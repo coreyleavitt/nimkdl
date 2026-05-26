@@ -71,13 +71,162 @@ Reserved type annotations (spec §3) get parse-time validation for all 30-ish sp
 
 ### KDL Schema Language (KSL), not implemented
 
-KSL targets KDL v1 and has no working reference implementation. We replace it with Nim-types-are-the-schema. A pragma-annotated Nim type is the canonical schema. `deriveDecode[T]` reflects on it at compile time via `getImpl` and generates the decoder directly. Combined with the `kdlReserved` pragma (field or type level), this is a strict superset of KSL's portable-schema capability at the cost of being Nim-only.
+KSL targets KDL v1 and has no working reference implementation. We replace it with Nim-types-are-the-schema. The Nim type IS the schema, and the compiler enforces it.
+
+Say you want to validate a config that looks like this.
+
+```kdl
+service "auth" {
+  replicas 3
+  port 8443
+  env {
+    LOG_LEVEL "info"
+  }
+}
+```
+
+A KSL-style approach would put validation in a separate `.ksl` file your tooling would have to parse and apply at runtime. Our approach puts it in the Nim type, validated at compile time.
+
+```nim
+import kdl
+
+type
+  EnvVar {.kdlNode.} = object
+    name  {.kdlArg.}: string
+    value {.kdlArg.}: string
+
+  Env {.kdlNode: "env".} = object
+    vars: seq[EnvVar]
+
+  Service {.kdlNode: "service".} = object
+    name     {.kdlArg.}: string
+    replicas {.kdlChild.}: int = 1
+    port     {.kdlChild.}: int
+    env      {.kdlChild.}: Env
+
+deriveDecode(EnvVar)
+deriveDecode(Env)
+deriveDecode(Service)
+
+let r = decode[Service](readFile("auth.kdl"))
+if r.isErr:
+  echo r.getErr.formatError(filename = "auth.kdl")
+  quit 1
+```
+
+A missing `port` value is a parse error. A typo in `replcias` becomes the standard "did you mean 'replicas'" diagnostic. A wrong type (`port "8443"` when the field is `int`) errors at parse time. None of this requires a separate schema file or a runtime validation pass.
+
+Combined with the `kdlReserved` pragma (`{.kdlReserved.}` at the type level rejects any unknown node names, at the field level rejects any unknown props), this is a strict superset of what KSL was meant to provide, at the cost of being Nim-only.
 
 ### KDL Query Language (KQL), not implemented
 
 The kdl-org spec marks KQL as "unreleased". The Rust reference implementation has its KQL tests under `disabled_tests/`. Building against a moving target with no working oracle isn't a good trade.
 
-We replace it with the typed schema-path DSL (`path()` macro). Compile-time field validation makes string queries strictly worse for our use case. Refactor-safe, IDE-aware, "did you mean" diagnostics for free.
+We replace it with the typed schema-path DSL (`path()` macro), which is a string-free analog of JSONPath or jq for KDL.
+
+Say you have a parsed config and you want all the enabled service names.
+
+```nim
+# KQL (hypothetical, no working impl):
+let result = query(doc, """top() >> service[.enabled == true] >> @name""")
+# Returns Result[seq[string]], at runtime.
+# A typo in 'service' or 'enabled' produces an empty result, silently.
+
+# nimkdl path():
+let names = path(services, [it.enabled].name)
+# Returns iterator[string], compile-time field-checked.
+# A typo (it.enabeled) becomes a compile error with the standard
+# "did you mean 'enabled'?" suggestion.
+```
+
+The `path(items, [pred].chain)` syntax reads as `items where pred yielding chain`. Predicates and accessors are real Nim expressions, type-checked against the actual type. Iterator output means it composes with the rest of the stdlib (`toSeq`, `map`, etc.).
+
+```nim
+import std/sequtils
+
+# All enabled service names
+for name in path(services, [it.enabled].name):
+  echo name
+
+# Just the first matching one
+let firstAuth = services.first(it.name.startsWith("auth"))
+if firstAuth.isSome:
+  echo firstAuth.get.replicas
+
+# Compose with sequtils
+let allPorts = path(services, [it.enabled].port).toSeq.sorted
+```
+
+String queries are strictly worse for our use case because the field references aren't refactor-safe, IDE-aware, or typo-detected. The trade-off is that you can't ship a query as a string to a runtime user (e.g. a CLI flag), which is something jq-style tools do support. We assume the consumer is Nim code, not an interactive query layer.
+
+## Getting started
+
+For consumers new to nimkdl or Nim, the simplest possible usage is `parse(source)`, then walk the resulting `KdlDoc` directly. No macros, no pragmas, no compile-time machinery.
+
+Given this file `services.kdl`:
+
+```kdl
+service "auth" port=8443 replicas=2
+service "gateway" port=8080 replicas=4
+service "metrics" port=9090
+```
+
+The shortest useful program reads it and prints the names.
+
+```nim
+import kdl
+
+let r = parse(readFile("services.kdl"))
+if r.isErr:
+  echo "parse failed: ", r.getErr.hint
+  quit 1
+
+for node in r.get.nodes:
+  echo r.get.interner.lookup(node.name)
+
+# Output:
+#   service
+#   service
+#   service
+```
+
+Every node has a `name` (interned, look it up to get the string), zero or more `entries` (the args and props), and zero or more `children` (more nodes).
+
+To read the first arg of each node:
+
+```nim
+for node in r.get.nodes:
+  for entry in node.entries:
+    if entry.kind == keArgument:
+      echo entry.argValue.strVal   # the first positional arg
+      break
+```
+
+To read a specific property:
+
+```nim
+for node in r.get.nodes:
+  for entry in node.entries:
+    if entry.kind == keProperty and r.get.interner.lookup(entry.propName) == "port":
+      echo entry.propValue.intVal
+```
+
+That's enough to do useful work. Most consumers move from there to typed decode, which is more concise and catches schema errors at compile time.
+
+```nim
+type Service {.kdlNode: "service".} = object
+  name {.kdlArg.}: string
+  port {.kdlProp.}: int
+  replicas {.kdlProp.}: int = 1
+
+deriveDecode(Service)
+
+let services = decode[seq[Service]](readFile("services.kdl")).get
+for s in services:
+  echo s.name, " on port ", s.port, " x", s.replicas
+```
+
+Same data, less boilerplate, and a missing field or wrong type fails at parse time with a useful error pointing at the right line.
 
 ## Worked examples
 
@@ -205,4 +354,4 @@ podman run --rm -v "$PWD:/work:Z" -w /work docker.io/nimlang/nim:2.2.0 nimble te
 
 ## License
 
-MIT.
+Apache 2.0. See [LICENSE](LICENSE).

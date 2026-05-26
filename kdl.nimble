@@ -12,7 +12,7 @@
 version       = "0.1.0"
 author        = "Corey Leavitt"
 description   = "KDL v2 parser, type-driven codegen, and typed-path DSL. See README.md."
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "src"
 
 requires "nim >= 2.0.0"
