@@ -12,18 +12,19 @@ type Service {.kdlNode: "service".} = object
 
 deriveDecode(Service)
 
-# A parse error here fails `nim c`, not production. The file gets
-# read + parsed + decoded inside Nim's VM and the typed value lands
-# in the binary's data segment, so .get is safe at runtime.
-const services = embed[seq[Service]]("config/services.kdl").get
+# Runtime parse of a user-supplied config file.
+let r = decode[seq[Service]](readFile("services.kdl"))
+if r.isErr:
+  stderr.writeLine r.getErr.formatError(readFile("services.kdl"),
+                                        filename = "services.kdl")
+  quit 1
 
-# Compile-time field-checked iteration. A typo like `it.enabeled`
-# becomes a "did you mean 'enabled'?" compile error instead of
-# silently returning an empty result the way string-based query
-# languages do.
-for name in path(services, [it.enabled].name):
-  echo name
+for service in r.get:
+  if service.enabled:
+    echo service.name, " x", service.replicas
 ```
+
+The same file can also be embedded at compile time. A parse error then fails `nim c` instead of production. See [the embed section](#compile-time-embed).
 
 ## What's in the box
 
@@ -43,9 +44,11 @@ All visible via `import kdl`.
 
 KDL is a strong document language with a thin parser ecosystem. The existing options are kdl-rs (Rust, mature, slow for the work it does) and greenm01/nimkdl (Nim, no compile-time integration, fails the v2 multi-script identifier corpus). Neither offered what we wanted for Nim consumers writing config-driven systems.
 
-We wanted to catch config errors at compile time, not runtime. KDL files are configuration. They ship in the binary or get loaded at startup. `embed[T]("config.kdl")` evaluates the full parse and decode chain inside Nim's VM. A malformed file fails `nim c`, not production.
+We wanted the runtime case to be ergonomic. Loading a user-supplied config at startup, parsing a config submitted to an HTTP endpoint, validating a file an operator just edited. These are the common scenarios. The library leans on `Result[T, ParseError]` for the happy path, structured errors with rich span information for the diagnostic path, and `parseAll` for "show me every error at once" workflows (LSP, CI lint, batch validation).
 
 We wanted to catch query errors at compile time. Every JSON-Path-style query system returns silent empty results on a field-name typo. The `path()` macro walks an AST expression that the Nim compiler actually type-checks. Typos surface as "did you mean" diagnostics with standard editor integration.
+
+We wanted compile-time integration as a bonus, not the only path. KDL files that ship in the binary (built-in rules, default policies, embedded schemas) can be validated at `nim c` time via `embed[T]("config.kdl")`. The parser runs inside Nim's VM and a malformed file fails the build. Same library, opt-in capability.
 
 We wanted byte-lossless format preservation without per-token overhead. kdl-rs stores leading and trailing whitespace plus comments on every AST token. We store a 128-bit `parseHash` per node (opt-in, default off) and surgically splice canonical output into the byte ranges that diverge from the parse-time fingerprint. Same round-trip guarantee, roughly 5x less data per node.
 
@@ -230,6 +233,56 @@ Same data, less boilerplate, and a missing field or wrong type fails at parse ti
 
 ## Worked examples
 
+### Handling user-submitted input
+
+This is the common case. A file the user just edited, a config posted to an HTTP endpoint, a CLI flag pointing at a path. The user gets a useful diagnostic on failure and the program continues to do its job on success.
+
+```nim
+import kdl
+
+proc loadServices(path: string): seq[Service] =
+  let src = readFile(path)
+  let r = decode[seq[Service]](src)
+  if r.isErr:
+    stderr.writeLine r.getErr.formatError(src, filename = path)
+    quit 1
+  r.get
+
+let services = loadServices("services.kdl")
+```
+
+`formatError` renders the standard caret diagnostic.
+
+```
+error: expected an integer, got string
+  --> services.kdl:3:14
+   |
+ 3 |   port "8443"
+   |        ^^^^^^
+   hint: type annotation (int) expected here
+```
+
+For interactive tools, IDEs, or batch validators that need to surface every error at once, use `parseAll` instead. It collects every lex and parse error at the doc, node, and entry level and returns a partial AST built from whatever did parse.
+
+```nim
+let (doc, errors) = parseAll(readFile("services.kdl"), sourcePath = "services.kdl")
+
+if errors.len > 0:
+  for e in errors:
+    stderr.writeLine e.formatError(doc.sourceText, filename = "services.kdl")
+  # Decide whether to continue with the partial doc or bail.
+  # CI lint = bail. IDE = continue (highlight + autocomplete).
+```
+
+For untrusted input (an HTTP body, a user upload), apply a size cap before parsing. The lexer has internal guards against pathological strings (`MaxRawStringHashes`) and recursion depth (`MaxParserDepth`), but you generally want a coarse size limit at the boundary too.
+
+```nim
+const MaxConfigBytes = 1 * 1024 * 1024  # 1 MB
+if body.len > MaxConfigBytes:
+  return Http413(detail: "config too large")
+let r = decode[ServiceList](body)
+```
+
 ### Parse then encode round-trip
 
 ```nim
@@ -273,7 +326,11 @@ if rule.enabled:
 
 ### Compile-time embed
 
+This is the niche case. For configs that ship in the binary (built-in defaults, embedded schemas, generated tables) you can validate at `nim c` time instead of startup.
+
 `embed[T]("path")` evaluates `lex` then `parse` then `decode[T]` inside Nim's VM and emits a `const`. A parse error fails the build, not the runtime. Zero module-init cost because the typed value is already in the binary's data segment.
+
+For everything else (user-supplied files, HTTP bodies, anything that arrives at runtime) you want `decode[T](readFile(path))` from the section above.
 
 ```nim
 const builtins = embed[seq[Rule]]("rules/defaults.kdl").get
