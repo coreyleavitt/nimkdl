@@ -296,7 +296,7 @@ func isDisallowedControl*(b: char): bool {.inline.} =
   let u = uint8(b)
   (u <= 0x08'u8) or (u >= 0x0E'u8 and u <= 0x1F'u8) or (u == 0x7F'u8)
 
-func containsBidiControl*(s: string): bool =
+func containsBidiControl*(s: openArray[char]): bool =
   ## True if `s` contains any of the 10 Unicode bidirectional control
   ## codepoints that the KDL v2 spec rejects in identifiers and most
   ## other source positions:
@@ -1220,28 +1220,27 @@ proc lexBareIdent(lx: var Lexer, interner: var Interner) =
       let (cp, w) = decodeUtf8At(lx.source, lx.pos.offset)
       if cp < 0 or not isIdentCodepoint(cp): break
       for _ in 0 ..< w: lx.advanceOne()
-  let text = lx.source[start.offset ..< lx.pos.offset]
+  let textLast = lx.pos.offset - 1
   let span = initSpan(start, lx.pos)
-  # KDL v2 forbids Unicode bidirectional control codepoints inside
-  # identifiers (and basically everywhere outside strings) — they
-  # let an attacker render an identifier differently from its bytes.
-  # See containsBidiControl for the 10 forbidden codepoints.
-  if containsBidiControl(text):
+  # Use an openArray slice into source — avoids allocating a string
+  # just to validate + intern. intern() also takes openArray; only
+  # the SBO path (≤22 bytes) is fully zero-alloc, the heap path
+  # still allocates once for the Entry payload.
+  if containsBidiControl(lx.source.toOpenArray(start.offset, textLast)):
     lx.emitError(peLexInvalidIdentifier, span,
                  "bidirectional control codepoint in identifier")
     return
   # Legacy KDL v1 raw-string syntax: `r"..."` / `r#"..."#`. v2 requires
-  # raw strings to start with `#"`, not `r"`. If the lexed ident is
-  # exactly `r` (or `R`) and the next byte is `"` or `#` with no
-  # whitespace between, reject — silently treating `r` as an ident
-  # would let v1 docs accidentally parse with broken semantics.
-  if (text == "r" or text == "R") and not lx.atEof and
-     (lx.peek == '"' or lx.peek == '#'):
+  # raw strings to start with `#"`. Single-char r/R check is a direct
+  # byte read — no need to materialize the string for ==.
+  if (textLast == start.offset and
+      (lx.source[start.offset] == 'r' or lx.source[start.offset] == 'R')) and
+     not lx.atEof and (lx.peek == '"' or lx.peek == '#'):
     lx.emitError(peLexInvalidIdentifier, span,
                  "KDL v1 raw-string syntax `r\"...\"` is not valid in v2; " &
                  "use `#\"...\"#` instead")
     return
-  let handle = interner.intern(text)
+  let handle = interner.intern(lx.source.toOpenArray(start.offset, textLast))
   lx.emit(Token(kind: tkIdent, ident: handle, span: span))
 
 proc lexKeyword(lx: var Lexer) =

@@ -108,10 +108,14 @@ func makeInline(s: openArray[char]): Entry =
 # intern + lookup
 # ---------------------------------------------------------------------------
 
-proc intern*(interner: var Interner, s: string): InternedStr =
+proc intern*(interner: var Interner, s: openArray[char]): InternedStr =
   ## Insert `s` (or return the existing handle if already interned).
   ## O(1) amortized for unique strings; O(k) on hash collisions where k
   ## is the collision-bucket size (rare in practice).
+  ##
+  ## Takes `openArray[char]` so callers can pass a slice into the lexer
+  ## source without allocating an intermediate string. The heap path
+  ## still allocates one string for the Entry payload.
   let h = hash(s)
   if h in interner.byHash:
     for idx in interner.byHash[h]:
@@ -121,17 +125,24 @@ proc intern*(interner: var Interner, s: string): InternedStr =
         if inlineEquals(entry, s):
           return InternedStr(idx)
       of ekHeap:
-        if entry.heapHash == h and entry.payload == s:
-          return InternedStr(idx)
+        if entry.heapHash == h and entry.payload.len == s.len:
+          var same = true
+          for i in 0 ..< s.len:
+            if entry.payload[i] != s[i]:
+              same = false
+              break
+          if same: return InternedStr(idx)
 
   doAssert interner.entries.len < int(uint32.high),
     "Interner exhausted: 4G distinct strings interned. The next handle " &
     "would alias InvalidInterned and silently corrupt lookups."
   let newIdx = uint32(interner.entries.len)
   if s.len <= InlineCapacity:
-    interner.entries.add(makeInline(s.toOpenArray(0, s.high)))
+    interner.entries.add(makeInline(s))
   else:
-    interner.entries.add(Entry(kind: ekHeap, payload: s, heapHash: h))
+    var payload = newString(s.len)
+    for i in 0 ..< s.len: payload[i] = s[i]
+    interner.entries.add(Entry(kind: ekHeap, payload: payload, heapHash: h))
   # `mgetOrPut(h, @[]).add(newIdx)` eagerly evaluates the `@[]` default
   # on every call — even when the key is already present — turning each
   # intern() into one extra dead seq allocation. Split into existence
