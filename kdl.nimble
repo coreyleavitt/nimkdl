@@ -50,3 +50,15 @@ task test, "Run unit tests":
   exec cmd & " tests/test_h2_compiletime.nim"
   exec cmd & " tests/test_public_api.nim"
   exec cmd & " tests/test_readme_examples.nim"
+
+task perfGuard, "Verify no KdlNode deep-copy regression":
+  ## Compile-time check that the parser hot paths don't introduce
+  ## KdlNode `=copy` calls. Adding any `for i, c in seq[KdlNode]`-style
+  ## iteration or non-sink `Result.get` on a tree-bearing type will
+  ## fail this with a clear diagnostic pointing at the offending line.
+  ## A 14× perf regression was caught + fixed this way (660fe7a).
+  ## Runs only over src/ + the perf-critical bench — test files
+  ## may legitimately copy small KdlNodes (intentional, not perf-path).
+  echo "perfGuard: -d:probeKdlNodeCopy build of src/ + perf bench"
+  exec "nim c -c --hints:off -d:probeKdlNodeCopy -d:nimCallDepthLimit=20000 benchmarks/perf_deep_chain.nim"
+  echo "perfGuard: OK (no KdlNode copies in parse hot path)"

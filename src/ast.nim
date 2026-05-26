@@ -151,7 +151,14 @@ type
     nodes*: seq[KdlNode]
 
 when defined(probeKdlNodeCopy):
-  proc `=copy`*(dst: var KdlNode, src: KdlNode) {.error: "KdlNode copy detected".}
+  # CI guard — compile any consumer with -d:probeKdlNodeCopy and Nim
+  # surfaces every site where a KdlNode (or its enclosing seq[KdlNode])
+  # would be deep-copied. Bug class: `for i, c in seq` binds c by
+  # value-copy; non-sink `Result.get`; non-sink wrap into Result.
+  # Past breach: parse-time hashing + Result.get + for-loop iter were
+  # all silently deep-copying every level of recursion — fixed in
+  # 660fe7a after 30 min with perf record + this probe.
+  proc `=copy`*(dst: var KdlNode, src: KdlNode) {.error: "KdlNode copy detected — use indexed access, .take, sink params, or move() to fix".}
 
 # ---------------------------------------------------------------------------
 # Constructors
