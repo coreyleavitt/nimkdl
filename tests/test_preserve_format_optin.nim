@@ -1,4 +1,4 @@
-## Opt-in parseHash — verifies the new `preserveHashes` parameter on
+## Opt-in parseHash — verifies the new `preserveFormat` parameter on
 ## `parse()` skips ~all FNV-128 work when false (the default), and
 ## that `encode(doc, emPreserve)` fails loud when the consumer asks
 ## for preservation on a doc that wasn't parsed with hashes.
@@ -14,9 +14,9 @@ when defined(kdlHashStats):
       check r.isOk
       check kdlHashCallCount == 0
 
-    test "parse(src, preserveHashes = true) DOES hash":
+    test "parse(src, preserveFormat = true) DOES hash":
       kdlHashCallCount = 0
-      let r = parse("rule \"a\" {\n  child \"b\"\n}", preserveHashes = true)
+      let r = parse("rule \"a\" {\n  child \"b\"\n}", preserveFormat = true)
       check r.isOk
       check kdlHashCallCount > 0
 
@@ -29,7 +29,7 @@ suite "parseHash opt-in — encode emPreserve":
       discard encode(doc, emPreserve)
 
   test "emPreserve on with-hash doc works":
-    let r = parse("rule \"a\"\nrule \"b\"", preserveHashes = true)
+    let r = parse("rule \"a\"\nrule \"b\"", preserveFormat = true)
     check r.isOk
     var doc = r.get
     let text = encode(doc, emPreserve)

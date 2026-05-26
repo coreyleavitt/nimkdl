@@ -444,7 +444,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
       # KDL v2: when a property key repeats, the later assignment wins.
       # Replace any earlier entry with the same key before appending.
       var newEntry = eRes.get
-      if p.doc.preserveHashes:
+      if p.doc.preserveFormat:
         newEntry.parseHash = hashEntry(newEntry, p.doc.interner)
       if newEntry.kind == keProperty:
         var i = 0
@@ -487,7 +487,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   # The two formulations are algebraically equivalent on unmutated trees;
   # `tests/test_hash_complexity.nim` pins both the linearity and the
   # equivalence.
-  if p.doc.preserveHashes:
+  if p.doc.preserveFormat:
     var childHashes = newSeq[Hash128](node.children.len)
     # Index directly — `for i, c in node.children` binds `c` by value-copy,
     # which deep-copies each KdlNode's children subtree. Direct indexing
@@ -626,12 +626,12 @@ proc parseDocumentAccumulating(p: var Parser, errors: var seq[ParseError]):
 # ---------------------------------------------------------------------------
 
 proc parse*(source: string, sourcePath = "<input>",
-            preserveHashes: bool = false):
+            preserveFormat: bool = false):
     Result[KdlDoc, ParseError] {.noSideEffect.} =
   ## Parse `source` into a `KdlDoc`. Returns the first error encountered
   ## (lexer or parser). The doc owns its interner.
   ##
-  ## `preserveHashes` (default false) — when true, the parser populates
+  ## `preserveFormat` (default false) — when true, the parser populates
   ## per-node and per-entry parseHash fields needed by
   ## `encode(doc, emPreserve)` for byte-lossless round-trip. Opt-in
   ## because hashing is ~18% of parse cost; the common case (typed
@@ -639,7 +639,7 @@ proc parse*(source: string, sourcePath = "<input>",
   ## `encode(doc, emPreserve)` fails loud if called on a doc that
   ## wasn't parsed with this flag set.
   var doc = newDoc(sourcePath)
-  doc.preserveHashes = preserveHashes
+  doc.preserveFormat = preserveFormat
   let tokens = lex(source, doc.interner)
   # Early-exit on any inline lex errors so callers get the lex diagnostic,
   # not a downstream parser-confusion diagnostic.
@@ -660,7 +660,7 @@ proc parse*(source: string, sourcePath = "<input>",
   ok[KdlDoc, ParseError](move p.doc)   # explicit move out of p
 
 proc parseAll*(source: string, sourcePath = "<input>",
-               preserveHashes: bool = false):
+               preserveFormat: bool = false):
     tuple[doc: KdlDoc, errors: seq[ParseError]] {.noSideEffect.} =
   ## Multi-error variant of `parse`. Collects every lex- and node-level
   ## error into `errors` while continuing to parse the rest of the
@@ -676,7 +676,7 @@ proc parseAll*(source: string, sourcePath = "<input>",
   ## `parse()` continues to return only the first error and matches
   ## `parseAll(source).errors[0]` when failures exist.
   result.doc = newDoc(sourcePath)
-  result.doc.preserveHashes = preserveHashes
+  result.doc.preserveFormat = preserveFormat
   let tokens = lex(source, result.doc.interner)
   for t in tokens.tokens:
     if t.kind == tkError:

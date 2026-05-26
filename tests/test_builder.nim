@@ -11,8 +11,8 @@ import ../src/parser
 import ../src/spans
 
 template parseGet(src: string, doc: untyped, body: untyped) =
-  # preserveHashes=true — these tests mutate then encode(emPreserve)
-  let res = parse(src, preserveHashes = true)
+  # preserveFormat=true — these tests mutate then encode(emPreserve)
+  let res = parse(src, preserveFormat = true)
   check res.isOk
   if res.isOk:
     var doc {.inject.} = res.get

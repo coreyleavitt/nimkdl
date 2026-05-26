@@ -27,7 +27,7 @@ for name in path(services, [it.enabled].name):
 
 | Layer | Surface | Notes |
 |---|---|---|
-| Parse | `parse(src, preserveHashes = false) -> Result[KdlDoc, ParseError]` | KDL v2 text to AST. `preserveHashes` is opt-in for `emPreserve`. |
+| Parse | `parse(src, preserveFormat = false) -> Result[KdlDoc, ParseError]` | KDL v2 text to AST. `preserveFormat` is opt-in for `emPreserve`. |
 | Encode | `encode(doc, mode = emPreserve) -> string` | `emPreserve` is byte-lossless; `emPretty` and `emCompact` are canonical. |
 | Decode | `decode[T](src) -> Result[T, ParseError]` | Typed decode via `deriveDecode[T]`. |
 | Embed | `embed[T]("path")` | `staticRead` plus decode at compile time. Bad input fails the build. |
@@ -51,31 +51,9 @@ We wanted differential testing. The full conformance corpus runs against a hand-
 
 We wanted honest perf. See [BENCHMARK.md](BENCHMARK.md). Methodology matters more than the headline number. The cross-implementation numbers are reproducible in the same container at the same flag profile, and we publish the path each fix took.
 
-## Technique
+## Performance
 
-The 8x total perf improvement over our own starting point and the 16x lead over kdl-rs didn't come from one trick. Five architectural choices compound.
-
-### Compile-time-eval forced zero-alloc patterns
-
-`embed[T]("file.kdl")` evaluates the entire parser inside Nim's VM. The VM has no FFI, no exceptions, and restricted pointer semantics. Making `embed` work at all forced the parser to be `{.noSideEffect.}` end-to-end, which forced `Result[T, E]` instead of exception-based errors, span-based tokens with payloads in side-tables, a pure-Nim FNV-128 (xxh3 via FFI would have broken `embed[T]`), and string interning with small-buffer optimization. None of these were for perf. They were for compile-time correctness. Perf came as a side effect.
-
-### Sink-perfect Nim ORC
-
-Nim 2.x's ORC supports move semantics on last-use, but the discriminant on `case object` blocks the move analysis. Without explicit `sink` hooks, every `nodes.add(parseResult.get)` deep-copied the entire subtree at every level of recursion. That's Σ N total copies on a depth-N chain, classic O(N²) on deep configs. Sink overloads on `Result.ok` (producer-side move-in) plus a `take()` method (consumer-side move-out) brought parse-time copying to zero. Caught by `perf record` showing `eqcopy_(seq<KdlNode>)` at 19% of CPU recursing 10+ levels deep.
-
-The `nimble perfGuard` CI task pins this. `proc =copy(KdlNode) {.error.}` under `-d:probeKdlNodeCopy` makes any new copy site a compile error.
-
-### Opt-in parseHash
-
-The format-preservation path needs an FNV-128 fingerprint per node and entry, computed at parse time. The 95% of consumers who don't preserve format (typed decode, validation-and-discard, codegen) shouldn't pay for it. `parse(src, preserveHashes = false)` is the default. `encode(doc, emPreserve)` fails loud if called on a no-hash doc rather than silently emitting reformatted output. Worth about 18% on its own.
-
-### SWAR bare-ident scanner
-
-The lexer's bare-ident hot loop processes 8 bytes per memory load using the standard XOR plus hasZeroByte SWAR pattern. Branch-free, handles ASCII fast-path, falls back to the byte loop on the first non-ASCII byte for Unicode codepoint validation. Worth about 4% on real-world configs. Modest because most idents in realistic configs are under 8 bytes and skip the SWAR loop, but the win shows up for long namespaced identifiers like `deployment.coreyleavitt.io/owner`.
-
-### Single-source-of-truth discipline
-
-Two parallel hash functions over the same node shape (`hashNodeContent` recursing vs `hashNodeFromChildHashes` using stored child hashes) caused a 14.4x perf regression on deep configs. The fix split the contract. Parser uses the bottom-up form. The debug-only ground-truth recomputation uses the recursive form. An algebraic equivalence test pins the relationship; conformance byte-equivalence (243/243) exercises it end-to-end.
+Roughly 16x faster than kdl-rs and 15x faster than greenm01/nimkdl on realistic configs. Methodology, per-fixture comparison, and reproduction steps in [BENCHMARK.md](BENCHMARK.md). The architectural story behind the numbers is written up [on the blog](https://blog.leavitt.dev/posts/nimkdl-perf-hunt/).
 
 ## Spec coverage
 
@@ -85,7 +63,7 @@ Full v2 spec coverage. The lexer handles every token form (bare and quoted and r
 
 Conformance is **338 / 338** of the [kdl-org/kdl test corpus](https://github.com/kdl-org/kdl/tree/main/tests/test_cases). Zero skipped cases. The corpus is vendored at `tests/conformance/`.
 
-Byte-equivalence is **243 / 243** of positive corpus cases. Every one satisfies `encode(parse(x, preserveHashes=true), emPreserve) == x`.
+Byte-equivalence is **243 / 243** of positive corpus cases. Every one satisfies `encode(parse(x, preserveFormat=true), emPreserve) == x`.
 
 Reserved type annotations (spec §3) get parse-time validation for all 30-ish spec-defined tags. Range checks for `i8` through `u128`, `f32`, `f64`. Format validation for `uuid`, `ipv4`, `ipv6`, `date`, `time`, `date-time`, `duration`, `email`, `url`. ISO registry membership for `country-2`, `country-3`, `currency`. IEEE 754-2008 checks for `decimal`, `decimal64`, `decimal128`.
 
@@ -110,7 +88,7 @@ let r = parse("""
 rule "compaction" {
   action "inject" template="ctx pressure rising"
 }
-""", preserveHashes = true)  # opt-in for byte-lossless emPreserve
+""", preserveFormat = true)  # opt-in for byte-lossless emPreserve
 
 doAssert r.isOk
 echo encode(r.get)  # byte-identical to the input

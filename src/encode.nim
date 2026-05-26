@@ -508,9 +508,9 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
     # The default `parse(src)` skips that work (~18% perf win) so
     # consumers opting into preservation must parse with the flag.
     # Fail loud rather than silently emitting reformatted output.
-    if doc.sourceText.len > 0 and not doc.preserveHashes:
+    if doc.sourceText.len > 0 and not doc.preserveFormat:
       raise newException(AssertionDefect,
-        "encode(doc, emPreserve) requires parse(src, preserveHashes = true). " &
+        "encode(doc, emPreserve) requires parse(src, preserveFormat = true). " &
         "The default parse() skips parseHash computation for ~18% perf — " &
         "opt in if you need byte-lossless round-trip.")
     if doc.sourceText.len > 0 and not doc.mutated:

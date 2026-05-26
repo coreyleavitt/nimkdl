@@ -46,7 +46,7 @@ suite "README: parse → encode round trip":
 rule "compaction" {
   action "inject" template="ctx pressure rising"
 }
-""", preserveHashes = true)
+""", preserveFormat = true)
     check r.isOk
     let encoded = encode(r.get)
     check "rule" in encoded

@@ -18,12 +18,6 @@ Every fixture, every parser, same container, same iteration counts. Bars show th
 
 greenm01 fails outright on `unicode-heavy.kdl`. It rejects valid v2 multi-script identifiers despite claiming "100% v2 compliance." Not a perf failure, a spec gap.
 
-## The perf hunt
-
-![Perf journey](docs/charts/journey.svg)
-
-The 8x improvement over our own starting point came from a sustained perf hunt driven by `perf record` and a `=copy` probe added to the CI guard. Each diff is in git history. Largest single win was the hash-recursion fix, a one-line change to use a stored value instead of recomputing it. Largest "everything else" win was the sink-Result fix, caught by perf showing 19% of CPU stuck in `eqcopy_(seq<KdlNode>)` recursing ten levels deep.
-
 ## Methodology
 
 Cross-implementation benchmarks lie easily. The discipline that makes this comparison hold up to outside scrutiny.

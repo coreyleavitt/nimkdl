@@ -5,7 +5,7 @@
 ## 1. Parses via the hand parser
 ## 2. Parses via the reference interpreter
 ## 3. If an `expected_kdl/<case>` counterpart exists: both must succeed,
-##    both must agree (docEqual), and `parse(encode(doc, preserveHashes = true))` must round-trip
+##    both must agree (docEqual), and `parse(encode(doc, preserveFormat = true))` must round-trip
 ##    to a `docEqual` result.
 ## 4. If no expected counterpart: both must reject the input.
 ##
@@ -52,7 +52,7 @@ proc evalCase(name, inputPath, expectedPath: string,
   result.name = name
   let inputText = readFile(inputPath)
 
-  let viaFast = parse(inputText, preserveHashes = true)
+  let viaFast = parse(inputText, preserveFormat = true)
   let viaRef  = referenceInterpret(inputText)
 
   if not expectedExists:
@@ -84,7 +84,7 @@ proc evalCase(name, inputPath, expectedPath: string,
 
   # Round-trip through the encoder.
   let encoded = encode(viaFast.get)
-  let reparsed = parse(encoded, preserveHashes = true)
+  let reparsed = parse(encoded, preserveFormat = true)
   if reparsed.isErr:
     result.outcome = coFail
     result.reason = "encoder output failed to re-parse: " & reparsed.getErr.hint
@@ -99,7 +99,7 @@ proc evalCase(name, inputPath, expectedPath: string,
   # check: it confirms we agree with the kdl-org reference on what
   # the canonical form should look like (structurally).
   let expectedText = readFile(expectedPath)
-  let expectedDoc = parse(expectedText, preserveHashes = true)
+  let expectedDoc = parse(expectedText, preserveFormat = true)
   if expectedDoc.isErr:
     result.outcome = coFail
     result.reason = "could not parse corpus expected_kdl: " &
@@ -188,7 +188,7 @@ suite "KDL v2 conformance corpus":
         # Negative cases (input must reject) — no preservation to test.
         inc skip; continue
       let inputText = readFile(inPath)
-      let r = parse(inputText, preserveHashes = true)
+      let r = parse(inputText, preserveFormat = true)
       if r.isErr:
         inc fail
         firstFailures.add(name & " | parse failed: " & r.getErr.hint)
