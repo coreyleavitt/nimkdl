@@ -1,41 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 280" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 320" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
   <style>
     .axis { fill: #94a3b8; font-size: 13px; }
     .label { fill: #cbd5e1; font-size: 14px; font-weight: 500; }
+    .sublabel { fill: #94a3b8; font-size: 11px; }
     .value { fill: #f1f5f9; font-size: 13px; font-family: ui-monospace, monospace; }
     .title { fill: #f1f5f9; font-size: 16px; font-weight: 600; }
     .subtitle { fill: #94a3b8; font-size: 12px; }
     .bar-ours { fill: #14b8a6; }
-    .bar-other { fill: #475569; }
+    .bar-ckdl { fill: #64748b; }
+    .bar-other { fill: #334155; }
     .grid { stroke: #1e293b; stroke-width: 1; }
   </style>
-  <rect width="760" height="280" fill="#0b1220"/>
+  <rect width="760" height="320" fill="#0b1220"/>
 
   <text x="40" y="32" class="title">realistic-config.kdl (5.6KB)</text>
-  <text x="40" y="50" class="subtitle">parses per second, same container, release+LTO</text>
+  <text x="40" y="50" class="subtitle">parses per second, same container, release+LTO equivalent</text>
 
-  <line x1="160" y1="80"  x2="160" y2="240" class="grid"/>
-  <line x1="280" y1="80"  x2="280" y2="240" class="grid"/>
-  <line x1="400" y1="80"  x2="400" y2="240" class="grid"/>
-  <line x1="520" y1="80"  x2="520" y2="240" class="grid"/>
-  <line x1="640" y1="80"  x2="640" y2="240" class="grid"/>
-  <line x1="160" y1="240" x2="700" y2="240" class="grid"/>
+  <line x1="180" y1="80"  x2="180" y2="280" class="grid"/>
+  <line x1="300" y1="80"  x2="300" y2="280" class="grid"/>
+  <line x1="420" y1="80"  x2="420" y2="280" class="grid"/>
+  <line x1="540" y1="80"  x2="540" y2="280" class="grid"/>
+  <line x1="660" y1="80"  x2="660" y2="280" class="grid"/>
+  <line x1="180" y1="280" x2="700" y2="280" class="grid"/>
 
-  <text x="160" y="262" class="axis" text-anchor="middle">0</text>
-  <text x="280" y="262" class="axis" text-anchor="middle">5K</text>
-  <text x="400" y="262" class="axis" text-anchor="middle">10K</text>
-  <text x="520" y="262" class="axis" text-anchor="middle">15K</text>
-  <text x="640" y="262" class="axis" text-anchor="middle">20K</text>
+  <text x="180" y="302" class="axis" text-anchor="middle">0</text>
+  <text x="300" y="302" class="axis" text-anchor="middle">5K</text>
+  <text x="420" y="302" class="axis" text-anchor="middle">10K</text>
+  <text x="540" y="302" class="axis" text-anchor="middle">15K</text>
+  <text x="660" y="302" class="axis" text-anchor="middle">20K</text>
 
-  <text x="150" y="110" class="label" text-anchor="end">nimkdl</text>
-  <rect x="160" y="92"  width="464" height="28" class="bar-ours"/>
-  <text x="632" y="111" class="value">19,300</text>
+  <text x="170" y="108" class="label" text-anchor="end">nimkdl</text>
+  <text x="170" y="124" class="sublabel" text-anchor="end">Nim</text>
+  <rect x="180" y="92"  width="513" height="32" class="bar-ours"/>
+  <text x="700" y="113" class="value">21,400</text>
 
-  <text x="150" y="160" class="label" text-anchor="end">greenm01</text>
-  <rect x="160" y="142" width="30" height="28" class="bar-other"/>
-  <text x="198" y="161" class="value">1,250  (15.4x slower)</text>
+  <text x="170" y="158" class="label" text-anchor="end">ckdl</text>
+  <text x="170" y="174" class="sublabel" text-anchor="end">C, event-drain</text>
+  <rect x="180" y="142" width="372" height="32" class="bar-ckdl"/>
+  <text x="560" y="163" class="value">15,500  (1.4× slower)</text>
 
-  <text x="150" y="210" class="label" text-anchor="end">kdl-rs</text>
-  <rect x="160" y="192" width="28" height="28" class="bar-other"/>
-  <text x="198" y="211" class="value">1,186  (16.3x slower)</text>
+  <text x="170" y="208" class="label" text-anchor="end">knus</text>
+  <text x="170" y="224" class="sublabel" text-anchor="end">Rust, serde-style</text>
+  <rect x="180" y="192" width="60" height="32" class="bar-other"/>
+  <text x="248" y="213" class="value">2,500  (8.6× slower)</text>
+
+  <text x="170" y="258" class="label" text-anchor="end">kdl-rs</text>
+  <text x="170" y="274" class="sublabel" text-anchor="end">Rust</text>
+  <rect x="180" y="242" width="28" height="32" class="bar-other"/>
+  <text x="216" y="263" class="value">1,186  (18× slower)</text>
 </svg>

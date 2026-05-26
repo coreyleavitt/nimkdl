@@ -1,6 +1,6 @@
 # nimkdl
 
-A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. Currently the fastest format-preserving KDL parser benchmarked. About 16x faster than kdl-rs and 15x faster than greenm01/nimkdl on realistic configs ([benchmarks](BENCHMARK.md)).
+A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. On realistic configs nimkdl runs about 1.4x faster than [ckdl](https://github.com/tjol/ckdl) (a hand-written C parser) and 8-18x faster than the Rust options (knus, kdl-rs). See [BENCHMARK.md](BENCHMARK.md).
 
 ```nim
 import kdl
@@ -42,7 +42,7 @@ All visible via `import kdl`.
 
 ## Intent
 
-KDL is a strong document language with a thin parser ecosystem. The existing options are kdl-rs (Rust, mature, slow for the work it does) and greenm01/nimkdl (Nim, no compile-time integration, fails the v2 multi-script identifier corpus). Neither offered what we wanted for Nim consumers writing config-driven systems.
+KDL is a strong document language with a thin parser ecosystem. The viable options before nimkdl were [kdl-rs](https://github.com/kdl-org/kdl-rs) (the canonical Rust impl, mature, slow for the work it does), [knus](https://crates.io/crates/knus) (Rust serde-style, type-driven, also slow), and [ckdl](https://github.com/tjol/ckdl) (a well-engineered C library with a SAX-style event API). None of them ran on Nim's compile-time VM, none caught query typos at compile time, and the Rust options carry per-token whitespace storage that's heavy for the byte-lossless round-trip case.
 
 We wanted the runtime case to be ergonomic. Loading a user-supplied config at startup, parsing a config submitted to an HTTP endpoint, validating a file an operator just edited. These are the common scenarios. The library leans on `Result[T, ParseError]` for the happy path, structured errors with rich span information for the diagnostic path, and `parseAll` for "show me every error at once" workflows (LSP, CI lint, batch validation).
 
@@ -58,7 +58,7 @@ We wanted honest perf. See [BENCHMARK.md](BENCHMARK.md). Methodology matters mor
 
 ## Performance
 
-Roughly 16x faster than kdl-rs and 15x faster than greenm01/nimkdl on realistic configs. Methodology, per-fixture comparison, and reproduction steps in [BENCHMARK.md](BENCHMARK.md). The architectural story behind the numbers is written up [on the blog](https://blog.leavitt.dev/posts/nimkdl-perf-hunt/).
+Roughly 1.4x faster than ckdl (C), 8x faster than knus, and 18x faster than kdl-rs on realistic configs. Methodology, per-fixture comparison, and reproduction steps in [BENCHMARK.md](BENCHMARK.md). The story of how we got there is on [the blog](https://blog.leavitt.dev/posts/nimkdl-perf-hunt/).
 
 ## Spec coverage
 
