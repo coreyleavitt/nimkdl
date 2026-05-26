@@ -341,13 +341,13 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
     return err[KdlNode, ParseError](initError(peParseExpected,
       p.peek.span, "expected node name"))
 
-  # Per-node entries + children seqs stay at default capacity. Pre-sizing
-  # was measured: a `newSeqOfCap(2)` cost more per node than the reallocs
-  # it saved (regressions on tight-loop tiny-doc benches outweighed any
-  # win on entry-heavy nodes). Variance per node is too high for a single
-  # heuristic to be net positive.
+  # Pre-size entries to 2 (typical: 1 arg or 1-2 props per node). The
+  # earlier note said this was net-negative, but that measurement was
+  # before the sink/copy-elimination fixes when alloc was dominated by
+  # deep-copies. Re-test after each major perf change.
   var node = KdlNode(name: nameHandle, typeAnnotation: anno,
-                     entries: @[], children: @[], span: startSpan)
+                     entries: newSeqOfCap[KdlEntry](2),
+                     children: @[], span: startSpan)
 
   # Helpers for accumulating-mode (parseAll) entry-level recovery.
   template accumulating(): bool = not p.errorBuf.isNil

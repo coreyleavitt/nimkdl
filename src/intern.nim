@@ -132,7 +132,14 @@ proc intern*(interner: var Interner, s: string): InternedStr =
     interner.entries.add(makeInline(s.toOpenArray(0, s.high)))
   else:
     interner.entries.add(Entry(kind: ekHeap, payload: s, heapHash: h))
-  interner.byHash.mgetOrPut(h, @[]).add(newIdx)
+  # `mgetOrPut(h, @[]).add(newIdx)` eagerly evaluates the `@[]` default
+  # on every call — even when the key is already present — turning each
+  # intern() into one extra dead seq allocation. Split into existence
+  # check + targeted insert/append to skip that.
+  if h in interner.byHash:
+    interner.byHash[h].add(newIdx)
+  else:
+    interner.byHash[h] = @[newIdx]
   result = InternedStr(newIdx)
 
 func lookup*(interner: Interner, handle: InternedStr): string =
