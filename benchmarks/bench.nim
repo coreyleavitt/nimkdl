@@ -72,6 +72,27 @@ proc benchmark(name, section: string, content: string,
     opsPerSec: iterations.float / elapsed,
     fileSize: content.len)
 
+proc benchmarkEncode(name, section: string, content: string,
+                     mode: EncodeMode, preserveFormat: bool,
+                     iterations: int): BenchResult =
+  ## Encode-side bench. Parses once up front (with the right
+  ## preserveFormat flag for the target mode) and times only the
+  ## encode loop. Output: parses-per-second of the encode pass.
+  let r = parse(content, preserveFormat = preserveFormat)
+  if r.isErr:
+    echo &"parse failed for {name}: {r.getErr.hint}"
+    return BenchResult(name: name, section: section, fileSize: content.len)
+  let doc = r.get
+  for i in 1..min(100, iterations div 10): discard encode(doc, mode)
+  let start = getMonoTime()
+  for i in 1..iterations: discard encode(doc, mode)
+  let elapsed = (getMonoTime() - start).inNanoseconds.float / 1_000_000_000.0
+  result = BenchResult(name: name, section: section,
+    totalTime: elapsed, iterations: iterations,
+    avgTime: elapsed / iterations.float,
+    opsPerSec: iterations.float / elapsed,
+    fileSize: content.len)
+
 proc printSection(results: seq[BenchResult], section: string) =
   let rs = results.filterIt(it.section == section)
   if rs.len == 0: return
@@ -93,6 +114,23 @@ proc printSection(results: seq[BenchResult], section: string) =
   let mbps = totalBytes.float / totalTime / (1024.0 * 1024.0)
   echo &"  section avg: {mbps:.1f} MB/s"
 
+proc printEncodeSection(results: seq[BenchResult], section: string) =
+  ## Same layout as printSection but throughput is bytes-out per second
+  ## (the encoded size, not the input size) so the MB/s number reflects
+  ## actual output produced. Reported alongside ops/s.
+  let rs = results.filterIt(it.section == section)
+  if rs.len == 0: return
+  echo ""
+  echo "  " & section
+  echo "  " & "-".repeat(78)
+  echo "  " & alignLeft("benchmark", 36) & alignLeft("size", 8) &
+       alignLeft("iters", 10) & alignLeft("avg time", 12) &
+       "throughput"
+  for r in rs:
+    echo "  " & alignLeft(r.name, 36) & alignLeft(formatSize(r.fileSize), 8) &
+         alignLeft($r.iterations, 10) & alignLeft(formatDuration(r.avgTime), 12) &
+         formatRate(r.opsPerSec)
+
 proc printResults(results: seq[BenchResult]) =
   echo ""
   echo "=".repeat(80)
@@ -101,6 +139,9 @@ proc printResults(results: seq[BenchResult]) =
   printSection(results, "real-world")
   printSection(results, "large")
   printSection(results, "regression-guard")
+  printEncodeSection(results, "encode-preserve")
+  printEncodeSection(results, "encode-pretty")
+  printEncodeSection(results, "encode-compact")
   echo ""
 
 proc main() =
@@ -119,52 +160,60 @@ proc main() =
     ("ci.kdl",               fixtures / "ci.kdl",                5_000),
     ("website.kdl",          fixtures / "website.kdl",           5_000),
   ]
+  # Every fixture is now a real file on disk under benchmarks/fixtures/.
+  # The synthetic shapes (deep-chain, tree, flat-deps) are checked in
+  # so all four comparison harnesses can parse byte-identical inputs.
+  # Re-generate from benchmarks/fixtures/generate.nim if shapes change.
+  let largeCases = [
+    ("flat-deps (~100 nodes)",       fixtures / "flat-deps-100.kdl",  2_000),
+    ("tree d=8 b=3 (~9.8k nodes)",   fixtures / "tree-d8-b3.kdl",       200),
+  ]
+  let guardCases = [
+    ("deep-chain (100)",             fixtures / "deep-chain-100.kdl", 1_000),
+    ("unicode-heavy.kdl",            fixtures / "unicode-heavy.kdl",  2_000),
+  ]
+
   for (name, path, iters) in realCases:
     if not fileExists(path):
       echo &"warn: {path} not found, skipping"; continue
     results.add(benchmark(name, "real-world", readFile(path), iters))
+  for (name, path, iters) in largeCases:
+    if not fileExists(path):
+      echo &"warn: {path} not found, skipping"; continue
+    results.add(benchmark(name, "large", readFile(path), iters))
+  for (name, path, iters) in guardCases:
+    if not fileExists(path):
+      echo &"warn: {path} not found, skipping"; continue
+    results.add(benchmark(name, "regression-guard", readFile(path), iters))
 
-  # ---- Large workloads -----------------------------------------------------
-  # Flat-deps: shape of a typical dependency or service list. ~100 nodes,
-  # one level deep.
-  var flatDeps = "// flat list of ~100 services, common config shape\n"
-  for i in 1..100:
-    flatDeps.add(&"service \"svc-{i}\" port=(tcp){{8000 + i}} replicas={(i mod 5) + 1}\n")
-  flatDeps = flatDeps.replace("{{8000 + i}}", "8042")  # quick literal
-  results.add(benchmark("flat-deps (~100 nodes)", "large", flatDeps, 2_000))
-
-  # Tree d=8 b=3 — branching ~9.8k nodes, monorepo workspace shape.
-  proc buildTree(depth, branch: int, prefix: string): string =
-    if depth == 0:
-      return &"{prefix}leaf \"x\" idx=0\n"
-    for b in 0 ..< branch:
-      let name = &"{prefix}n{b}"
-      result.add(&"{prefix}{name} arg=\"v\" depth={depth} {{\n")
-      result.add(buildTree(depth - 1, branch, prefix & "  "))
-      result.add(&"{prefix}}}\n")
-  let bigTree = buildTree(8, 3, "")
-  results.add(benchmark("tree d=8 b=3 (~9.8k nodes)", "large", bigTree, 200))
-
-  # ---- Regression guards ---------------------------------------------------
-  # These are PATHOLOGICAL shapes — not representative of real workloads.
-  # They exist to catch perf regressions on the code paths they hit.
-  # Each one's slow case corresponds to a real bug we've fixed before.
-
-  # deep-chain (100): the shape that caught the O(N²) Result.get deep-copy
-  # in commit 660fe7a. If this throughput regresses materially, someone
-  # introduced another `.get` instead of `.take` (or a for-loop value-copy).
-  var deep = ""
-  for i in 1..100: deep.add(&"level{i} arg{i} key{i}={i} {{\n")
-  deep.add("leaf \"bottom\" depth=100\n")
-  for _ in 1..100: deep.add("}\n")
-  results.add(benchmark("deep-chain (100)", "regression-guard", deep, 1_000))
-
-  # unicode-heavy: multi-script identifiers + combining marks + emoji ZWJ.
-  # Guards the lexBareIdent unicode codepoint classification path.
-  # greenm01/nimkdl outright FAILS to parse this — claims "100% v2"
-  # but rejects valid v2 multi-script idents.
-  let unicode = readFile(fixtures / "unicode-heavy.kdl")
-  results.add(benchmark("unicode-heavy.kdl", "regression-guard", unicode, 2_000))
+  # ---- Encode -------------------------------------------------------------
+  # Three modes, three signal flavors.
+  #
+  #   emPreserve  byte-lossless: returns doc.sourceText verbatim when the
+  #               doc hasn't been mutated. The fast-path is essentially a
+  #               string return. Slower path is per-node hash check +
+  #               surgical splice on edited subtrees.
+  #   emPretty    canonical multi-line with indentation. Allocates and
+  #               formats every node.
+  #   emCompact   canonical single-line with `;` separators. Same work
+  #               as emPretty without the indentation/newline padding.
+  #
+  # Bench on the real-world fixtures + the big tree. preserveFormat
+  # is true for emPreserve, false otherwise (the canonical modes
+  # don't need parseHash).
+  let encodeCases = [
+    ("realistic-config.kdl",       fixtures / "realistic-config.kdl",  5_000),
+    ("ci.kdl",                     fixtures / "ci.kdl",                5_000),
+    ("website.kdl",                fixtures / "website.kdl",           5_000),
+    ("tree-d8-b3.kdl",             fixtures / "tree-d8-b3.kdl",          200),
+  ]
+  for (name, path, iters) in encodeCases:
+    if not fileExists(path):
+      echo &"warn: {path} not found, skipping"; continue
+    let src = readFile(path)
+    results.add(benchmarkEncode(name, "encode-preserve", src, emPreserve, true,  iters))
+    results.add(benchmarkEncode(name, "encode-pretty",   src, emPretty,   false, iters))
+    results.add(benchmarkEncode(name, "encode-compact",  src, emCompact,  false, iters))
 
   printResults(results)
 
