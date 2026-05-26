@@ -31,7 +31,7 @@
 ## The lexer never raises and never returns Err — error recovery is the
 ## parser's job (it can re-sync and continue, surfacing all errors at once).
 
-import std/[strutils, unicode]
+import std/[strutils, unicode, bitops]
 
 import ./spans
 import ./intern
@@ -183,6 +183,82 @@ func isIdentCont(ch: char): bool {.inline.} =
   of '\0' .. ' ', '\x7f': false
   of '{', '}', '(', ')', '[', ']', '/', '\\', '"', '#', '=', ';': false
   else: true
+
+## SWAR (SIMD Within A Register) bulk scanner for ASCII ident-cont
+## bytes. Branch-free, processes 8 bytes per memory load. Falls back
+## to the byte-by-byte path on any non-ASCII byte (>=0x80) or
+## terminator byte found in the chunk. Caller resumes byte-loop from
+## the precise stop position.
+##
+## Forbidden ident-cont bytes (terminators):
+##   0x00..0x20  (control + space)         — range check
+##   0x22 "  0x23 #  0x28 (  0x29 )        — broadcast equals
+##   0x2F /  0x3B ;  0x3D =
+##   0x5B [  0x5C \\  0x5D ]
+##   0x7B {  0x7D }  0x7F DEL
+##
+## Strategy: for each forbidden byte b, compute hasByteEqual(word, b)
+## using the standard XOR + hasZeroByte trick. OR all the results and
+## the range-check for 0..0x20. The position of the first set high-bit
+## tells us where to stop. countTrailingZeros / 8 gives the byte index.
+
+const SwarLo = 0x0101010101010101'u64
+const SwarHi = 0x8080808080808080'u64
+
+func hasZeroByte(v: uint64): uint64 {.inline.} =
+  ((v - SwarLo) and (not v) and SwarHi)
+
+func hasByteEqual(w: uint64, b: uint8): uint64 {.inline.} =
+  hasZeroByte(w xor (uint64(b) * SwarLo))
+
+func anyByteLE(w: uint64, b: uint8): uint64 {.inline.} =
+  ## Returns nonzero high-bits in positions where byte <= b.
+  ## Trick: (w +~ 0x7F...) - subtract-with-bias. Standard SWAR pattern.
+  let bb = uint64(b) * SwarLo
+  hasZeroByte(w xor bb) or
+    (((w xor SwarHi) - (bb xor SwarHi)) and not (w xor bb) and SwarHi)
+
+func loadU64LE(s: string, offset: int): uint64 {.inline.} =
+  ## Little-endian load of 8 bytes. Caller must ensure offset+8 <= s.len.
+  cast[ptr uint64](unsafeAddr s[offset])[]
+
+func firstTerminatorBit(mask: uint64): int {.inline.} =
+  ## Given a mask where each "stop" byte position has the 0x80 bit set,
+  ## return the byte index of the first stop (0..7). Caller has already
+  ## verified mask != 0.
+  countTrailingZeroBits(mask) shr 3
+
+proc swarScanIdentCont*(source: string, start: int): int =
+  ## Bulk-scan ASCII ident-cont bytes from `start`. Returns the first
+  ## index where scanning stops — either a terminator byte or any
+  ## non-ASCII byte (>=0x80) requiring unicode validation by caller.
+  var i = start
+  # 8-byte SWAR loop
+  while i + 8 <= source.len:
+    let w = loadU64LE(source, i)
+    # any byte >= 0x80? (unicode start — caller handles)
+    let highBitSet = w and SwarHi
+    # any byte <= 0x20 (control + space)?
+    let leSpace = anyByteLE(w, 0x20)
+    # any of the 12 forbidden punctuation bytes?
+    let m = hasByteEqual(w, 0x22'u8) or hasByteEqual(w, 0x23'u8) or
+            hasByteEqual(w, 0x28'u8) or hasByteEqual(w, 0x29'u8) or
+            hasByteEqual(w, 0x2F'u8) or hasByteEqual(w, 0x3B'u8) or
+            hasByteEqual(w, 0x3D'u8) or hasByteEqual(w, 0x5B'u8) or
+            hasByteEqual(w, 0x5C'u8) or hasByteEqual(w, 0x5D'u8) or
+            hasByteEqual(w, 0x7B'u8) or hasByteEqual(w, 0x7D'u8) or
+            hasByteEqual(w, 0x7F'u8)
+    let stop = highBitSet or leSpace or m
+    if stop != 0:
+      return i + firstTerminatorBit(stop)
+    i += 8
+  # Byte-loop tail for the remainder (<8 bytes)
+  while i < source.len:
+    let b = uint8(source[i])
+    if b >= 0x80'u8: break
+    if not isIdentCont(source[i]): break
+    inc i
+  i
 
 func decodeUtf8At*(s: string, pos: int): tuple[cp: int, width: int] =
   ## Decode one UTF-8 codepoint at `s[pos]`. Returns (-1, 0) on EOF or
@@ -1229,8 +1305,9 @@ proc lexBareIdent(lx: var Lexer, interner: var Interner) =
   while not lx.atEof:
     let b = uint8(lx.peek)
     if b < 0x80'u8:
-      if not isIdentCont(lx.peek): break
-      lx.advanceOne()
+      let newOffset = swarScanIdentCont(lx.source, lx.pos.offset)
+      if newOffset == lx.pos.offset: break
+      lx.pos = lx.pos.advance(newOffset - lx.pos.offset)
     else:
       let (cp, w) = decodeUtf8At(lx.source, lx.pos.offset)
       if cp < 0 or not isIdentCodepoint(cp): break
