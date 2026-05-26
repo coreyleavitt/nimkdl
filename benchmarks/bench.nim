@@ -136,11 +136,41 @@ node3 3.14 prop3="value"
 """.repeat(10)
   results.add(benchmark("Synthetic (30 nodes)", syntheticNodes, 10_000))
 
+  # Shallow legacy shape — kept for back-compatibility with greenm01's
+  # published numbers.
   var deepNest = ""
   for i in 1..20: deepNest.add(&"level{i} {{\n")
   deepNest.add("leaf \"value\"\n")
   for i in 1..20: deepNest.add("}\n")
-  results.add(benchmark("Synthetic (deep nesting)", deepNest, 10_000))
+  results.add(benchmark("Synthetic (deep nesting, 20)", deepNest, 10_000))
+
+  # Pure deep chain — depth 100, every level has a couple of entries
+  # so the parser does non-trivial work per level. This is the shape
+  # that stress-tests the hash-call complexity the most: an O(N·d) hash
+  # at parse time would be Σ 1..100 = 5050 hash calls; bottom-up is 100.
+  var deepChain = ""
+  const chainDepth = 100
+  for i in 1..chainDepth:
+    deepChain.add(&"level{i} arg{i} key{i}={i} {{\n")
+  deepChain.add("leaf \"bottom\" depth=" & $chainDepth & "\n")
+  for _ in 1..chainDepth: deepChain.add("}\n")
+  results.add(benchmark(&"Synthetic (deep chain, {chainDepth})", deepChain, 2_000))
+
+  # Realistic deep+wide tree — branching factor 3, depth 8 → 9841 nodes.
+  # Mirrors the shape of a moderately-large config (something like a
+  # cargo workspace with nested workspaces and tasks). The previous
+  # bench had a 13-node toy.
+  proc buildTree(depth, branch: int, prefix: string): string =
+    if depth == 0:
+      result = &"{prefix}leaf \"{prefix}\" idx=0\n"
+      return
+    for b in 0 ..< branch:
+      let name = &"{prefix}n{b}"
+      result.add(&"{prefix}{name} arg=\"v\" depth={depth} {{\n")
+      result.add(buildTree(depth - 1, branch, prefix & "  "))
+      result.add(&"{prefix}}}\n")
+  let bigTree = buildTree(8, 3, "")
+  results.add(benchmark("Synthetic (tree d=8 b=3, ~9.8k nodes)", bigTree, 200))
 
   var wide = ""
   for i in 1..100: wide.add(&"node{i} \"arg\" key=\"val\"\n")
