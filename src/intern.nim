@@ -85,6 +85,11 @@ func hash*(s: InternedStr): Hash {.inline.} =
 func initInterner*(): Interner =
   ## A fresh empty interner. No pre-allocation — caller controls capacity
   ## via the surrounding allocator if it matters.
+  ##
+  ## Pre-sizing tried (commit 8e397a0+1) — `newSeqOfCap[Entry](source/16)`
+  ## was net-neutral or worse: alloc cost cancels realloc savings on
+  ## small/medium docs. Re-test if/when interner.entries grows to be
+  ## a bigger fraction of profile.
   Interner(entries: @[], byHash: initTable[Hash, seq[uint32]]())
 
 # ---------------------------------------------------------------------------
