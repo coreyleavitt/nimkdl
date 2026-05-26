@@ -12,6 +12,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to publish under (e.g. v0.1.0-canary)"
+        required: true
+        default: "v0.1.0-canary"
 
 jobs:
   publish:
@@ -22,8 +28,8 @@ jobs:
       packages: write   # push OCI artifact to GHCR
     with:
       name: nimkdl
-      version: ${{ github.ref_name }}
+      version: ${{ inputs.version || github.ref_name }}
       # Canary suffix triggers dry-run; real tags publish for real.
-      dry-run: ${{ contains(github.ref_name, '-canary') }}
+      dry-run: ${{ contains(inputs.version || github.ref_name, '-canary') }}
     secrets:
       milpa-install-token: ${{ secrets.MILPA_READ_PAT }}
