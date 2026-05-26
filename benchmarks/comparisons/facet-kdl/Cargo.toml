@@ -1,0 +1,12 @@
+[package]
+name = "facet-kdl-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+facet = "0.42"
+facet-kdl = "0.42"
+
+[profile.release]
+lto = true
+codegen-units = 1

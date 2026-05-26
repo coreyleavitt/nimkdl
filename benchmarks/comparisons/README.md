@@ -7,11 +7,12 @@ knows one of these libraries better than we do can audit our usage.
 
 ## What's here
 
-| Directory | Harness                                | Notes |
-|-----------|----------------------------------------|-------|
-| `ckdl/`   | C, SAX-style event-drain               | Hand-written, generally the floor for parse cost. |
-| `knus/`   | Rust, three paths (parse_ast, typed Vec<T>, typed enum) | Serde-style decode framework. Author has flagged it as superseded by `facet-kdl`. |
-| `kdl-rs/` | Rust, `KdlDocument::parse_v2`          | The canonical Rust implementation. |
+| Directory     | Harness                                | Notes |
+|---------------|----------------------------------------|-------|
+| `ckdl/`       | C, SAX-style event-drain               | Hand-written, generally the floor for parse cost. |
+| `knus/`       | Rust, three paths (parse_ast, typed Vec<T>, typed enum) | Serde-style decode framework. Author has flagged it as superseded by `facet-kdl`. |
+| `facet-kdl/`  | Rust, two typed paths (Vec<T>, enum)   | The successor to knus per knus's own README. Uses the `facet` derive system. |
+| `kdl-rs/`     | Rust, `KdlDocument::parse_v2`          | The canonical Rust implementation. |
 
 The nimkdl harness lives one level up at `benchmarks/bench.nim`
 (it's our own code, no need to vendor a copy).
@@ -67,8 +68,21 @@ except the homogeneous typed path which is actually slower than
 parse_ast. See BENCHMARK.md's typed-decode section.
 
 Note. The knus author has [stated](https://docs.rs/knus/latest/knus/)
-that knus is being superseded by `facet-kdl`. When that ships, we
-should add it to the comparison.
+that knus is being superseded by `facet-kdl`, which is now in the
+comparison.
+
+### facet-kdl
+
+The spiritual successor to knus, built on the [facet](https://crates.io/crates/facet)
+derive system instead of knus's bespoke derive macros. Tests two
+typed paths.
+
+1. `from_str::<Vec<Service>>` — typed homogeneous decode.
+2. `from_str::<Vec<ConfigNode>>` — typed enum / discriminated union
+   for heterogeneous top-level nodes.
+
+facet-kdl has no exposed AST-only path; everything goes through
+typed deserialize.
 
 ### kdl-rs
 

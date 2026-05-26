@@ -26,15 +26,20 @@ knus and kdl-rs are both 10-20x behind ckdl and nimkdl across the board. Both pr
 
 The headline bench measures parse-to-AST. Most consumers actually want parse-then-decode-into-typed-structures in one shot. This is what `nimkdl decode[T]`, `knus parse::<Vec<T>>`, and `serde_json::from_str::<T>` all promise.
 
-A small fixture of 100 homogeneous service nodes (~3.8KB).
+A small fixture of 100 homogeneous service nodes (~5KB).
 
 | Parser           | Path                                | ops/s   | vs nimkdl |
 |------------------|-------------------------------------|--------:|----------:|
 | **nimkdl**       | `decode[seq[Service]]`              | 12,800  | 1.0x      |
-| knus             | `parse::<Vec<GenericNode>>` (catch-all) | 2,600 | 4.9x slower |
+| knus             | `parse_ast` (AST, untyped)          | 2,600   | 4.9x slower |
+| facet-kdl        | `from_str::<ServiceDoc>`            | 900     | 14.2x slower |
 | knus             | `parse::<Vec<Service>>` (typed)     | 720     | 17.9x slower |
 
-Surprising finding. knus typed decode is **slower than knus generic decode**. That inverts the serde-style pitch. serde-json's typed path is faster than `Value` because the schema lets the parser skip intermediate allocations. knus appears to parse to an internal representation first and then validate against the schema, which adds work instead of removing it.
+Two surprising findings.
+
+First, knus typed decode is **slower than knus's own untyped `parse_ast`**. That inverts the serde-style pitch. serde-json's typed path is faster than `Value` because the schema lets the parser skip intermediate allocations. knus appears to parse to an internal representation first and then validate against the schema, which adds work rather than removing it.
+
+Second, facet-kdl (advertised as knus's successor) is barely faster than knus on the typed path. The reason is structural. facet-kdl is built on top of kdl-rs (it depends on `kdl ^6.5.0`), so its perf is bounded by kdl-rs's parser plus the facet deserialize layer. The "successor" framing is about the typed-decode interface improvements, not about being a faster parser.
 
 nimkdl's typed decode is faster than its own untyped parse for the same reason serde-json's typed path is fast. Knowing the schema at compile time means `deriveDecode` generates a decoder that writes directly into the target fields. No `KdlDoc` allocation, no entry/property indirection. The compile-time-eval discipline gets to amortize across the typed code path too.
 
@@ -54,7 +59,7 @@ So the comparison isn't "Nim parser beats C parser at C parser's game." It's "AS
 
 Cross-implementation benchmarks lie easily. The discipline that makes this comparison hold up to outside scrutiny.
 
-Same container. Hardware and scheduler variance swamps most software differences. All four parsers run in the same set of containers, back-to-back in the same session.
+Same container. Hardware and scheduler variance swamps most software differences. All five parsers run in the same set of containers, back-to-back in the same session.
 
 Same input bytes, vendored. "We both used Cargo.kdl" is not the same as "we used the same bytes." Verify byte-for-byte.
 

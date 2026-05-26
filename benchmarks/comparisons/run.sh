@@ -88,6 +88,24 @@ run_knus() {
   echo ""
 }
 
+run_facet_kdl() {
+  echo "================================================================"
+  echo "  facet-kdl (Rust, knus successor per knus README)"
+  echo "================================================================"
+  # facet 0.42 requires rustc 1.89+ per its workspace pins.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/facet-kdl:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/library/rust:1.90 \
+    sh -c '
+      mkdir -p src && cp main.rs src/main.rs
+      cargo build --release 2>&1 | tail -3
+      ./target/release/facet-kdl-bench
+    '
+  echo ""
+}
+
 run_kdl_rs() {
   echo "================================================================"
   echo "  kdl-rs (Rust, canonical impl)"
@@ -109,16 +127,18 @@ if [ $# -eq 0 ]; then
   run_nimkdl
   run_ckdl
   run_knus
+  run_facet_kdl
   run_kdl_rs
   exit 0
 fi
 
 for target in "$@"; do
   case "$target" in
-    nimkdl) run_nimkdl ;;
-    ckdl)   run_ckdl ;;
-    knus)   run_knus ;;
-    kdl-rs) run_kdl_rs ;;
-    *) echo "unknown target: $target (nimkdl|ckdl|knus|kdl-rs)" >&2; exit 1 ;;
+    nimkdl)    run_nimkdl ;;
+    ckdl)      run_ckdl ;;
+    knus)      run_knus ;;
+    facet-kdl) run_facet_kdl ;;
+    kdl-rs)    run_kdl_rs ;;
+    *) echo "unknown target: $target (nimkdl|ckdl|knus|facet-kdl|kdl-rs)" >&2; exit 1 ;;
   esac
 done
