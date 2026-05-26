@@ -1,0 +1,20 @@
+// Synthetic unicode-heavy KDL: bare-ident chars, string values,
+// multi-byte sequences throughout. Tests whether the ASCII fast-path
+// advantage collapses when input is realistically Unicode-loaded.
+
+café_éclair "résumé naïve façade" señor="piñata" entrée="déjà vu"
+configuración "ñoño" país="México" región="América Latina" {
+    日本語 "こんにちは世界" 値="テスト" 数="一二三"
+    中文 "你好世界" 键="测试" 数="一二三"
+    한국어 "안녕하세요세계" 키="시험" 숫자="일이삼"
+    العربية "مرحبا بالعالم" مفتاح="اختبار" رقم="واحد"
+    ελληνικά "γειά σου κόσμε" κλειδί="δοκιμή" αριθμός="ένα"
+    русский "привет мир" ключ="тест" число="один"
+}
+🎉🎊 "emoji nodes work too" emoji_key="🚀🎯" multi="🇲🇽🇯🇵🇰🇷" {
+    fruta "manzana" color="rojo" 🍎=1
+    nopales "🌵 cactus paddles" 🥗="ensalada"
+    tomatillo "🍅 green tomato" 🟢="verde"
+}
+mathematical_symbols ∑ ∏ ∫ ∂ ∆ ∇ "Σ_{i=1}^{n} a_i"
+greek_variables α β γ δ ε ζ η θ ι κ λ μ ν ξ ο π ρ σ τ υ φ χ ψ ω

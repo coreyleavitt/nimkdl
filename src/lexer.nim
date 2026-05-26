@@ -96,39 +96,57 @@ type
   KeywordKind* = enum
     kwTrue, kwFalse, kwNull, kwInf, kwNegInf, kwNan
 
+  NumberPayload* = object
+    ## Heavy data for a tkNumber token. Stored once per token in the
+    ## owning `TokenStream`'s `numberPayloads` seq; the token holds a
+    ## u32 index.
+    text*: string
+    base*: NumberBase
+    negative*: bool
+
   Token* = object
-    span*: Span
-    precededByWs*: bool
-      ## True if any whitespace, comment, newline-token, semicolon, or
-      ## line-continuation preceded this token (or it is the first token
-      ## in the stream). Set by the lexer; consumed by the parser at
-      ## entry-position sites to enforce the v2 spec's token-adjacency
-      ## rules (corpus `zero_space_before_*_fail`).
-    case kind*: TokenKind
-    of tkIdent:     ident*: InternedStr
-    of tkString:    strVal*: string
-    of tkRawString: rawVal*: string
-    of tkNumber:
-      numText*: string
-      numBase*: NumberBase
-      numNegative*: bool
-    of tkKeyword:   keyword*: KeywordKind
-    of tkError:     error*: ParseError
+    ## Compact token: 8-byte span + 1-byte flag + 1-byte kind + 4-byte
+    ## payload = 14 bytes natural, padded to 24. Heavy payload (string
+    ## bytes, error structs, number text) is stored in `TokenStream`
+    ## side tables; tokens hold u32 indices.
+    span*: Span                ## 8 bytes
+    precededByWs*: bool        ## 1 byte — true if any whitespace, comment,
+                               ## newline, semicolon, or line-continuation
+                               ## preceded this token (or it's the first).
+                               ## Used at entry-position sites to enforce
+                               ## v2 token-adjacency rules.
+    case kind*: TokenKind      ## 1 byte discriminator
+    of tkIdent:     ident*: InternedStr        ## 4 bytes (handle)
+    of tkString:    strIdx*: uint32            ## 4 bytes index into stringPayloads
+    of tkRawString: rawIdx*: uint32            ## 4 bytes index into rawStringPayloads
+    of tkNumber:    numIdx*: uint32            ## 4 bytes index into numberPayloads
+    of tkKeyword:   keyword*: KeywordKind      ## 1 byte
+    of tkError:     errIdx*: uint32            ## 4 bytes index into errorPayloads
     else:           discard
+
+  TokenStream* = object
+    ## The lexer's output: a compact token sequence plus the side
+    ## tables holding any heavy payload. Each tkString/tkRawString/
+    ## tkNumber/tkError token carries a u32 index into the matching
+    ## seq below.
+    ##
+    ## The split exists so the token sequence stays cache-friendly
+    ## (24-byte tokens, ~2.5 per cache line); the parser streams tokens
+    ## linearly and only chases an indirection when a heavy payload is
+    ## actually needed.
+    tokens*: seq[Token]
+    stringPayloads*: seq[string]
+    rawStringPayloads*: seq[string]
+    numberPayloads*: seq[NumberPayload]
+    errorPayloads*: seq[ParseError]
 
   Lexer = object
     ## Lexer state during a `lex(source, interner)` call. The interner
-    ## is NOT a field — it's threaded as a `var Interner` parameter
-    ## through the few procs that intern. This keeps the Lexer
-    ## `ptr`-free so the whole tokenization can run in Nim's VM at
-    ## compile time (enables `embed[T]`'s real const evaluation).
+    ## is NOT a field — it's threaded as a `var Interner` parameter.
     source: string
     pos: Position
-    tokens: seq[Token]
+    stream: TokenStream      ## accumulating tokens + side tables
     wsPending: bool
-      ## True if the next emitted token should be marked precededByWs.
-      ## Initial state and after consuming any whitespace/comment/newline/
-      ## semicolon/line-continuation/slashdash. Cleared on each emit.
 
 # ---------------------------------------------------------------------------
 # Char classifiers
@@ -362,8 +380,7 @@ proc advanceNewline(lx: var Lexer) =
   ## Windows-style files. Also handles VT, FF, NEL, LS, PS.
   let w = lx.multilineNewlineWidth
   if w == 0: return
-  lx.pos = Position(line: lx.pos.line + 1, col: 1,
-                    offset: lx.pos.offset + w)
+  lx.pos = Position(offset: lx.pos.offset + w)
 
 func isNewline(ch: char): bool {.inline.} =
   ## ASCII-only newline predicate (for hot byte-level paths). Multi-byte
@@ -402,7 +419,7 @@ func isMultilineWsEscapeStart(ch: char): bool {.inline.} =
 proc emit(lx: var Lexer, tok: sink Token) =
   var t = tok
   t.precededByWs = lx.wsPending
-  lx.tokens.add(t)
+  lx.stream.tokens.add(t)
   # Structural tokens that semantically end a "phrase" implicitly grant
   # the next token wsPending. tkNewline, tkSemicolon, and tkSlashDash all
   # act like whitespace as far as entry-adjacency is concerned.
@@ -412,9 +429,32 @@ proc emit(lx: var Lexer, tok: sink Token) =
   else:
     lx.wsPending = false
 
+# ---------------------------------------------------------------------------
+# Side-table emitters — produce a compact Token holding a u32 index into
+# the matching payload seq, after appending the heavy payload to the seq.
+# ---------------------------------------------------------------------------
+
+proc emitString(lx: var Lexer, value: sink string, span: Span) =
+  let idx = uint32(lx.stream.stringPayloads.len)
+  lx.stream.stringPayloads.add(value)
+  lx.emit(Token(kind: tkString, strIdx: idx, span: span))
+
+proc emitRawString(lx: var Lexer, value: sink string, span: Span) =
+  let idx = uint32(lx.stream.rawStringPayloads.len)
+  lx.stream.rawStringPayloads.add(value)
+  lx.emit(Token(kind: tkRawString, rawIdx: idx, span: span))
+
+proc emitNumber(lx: var Lexer, text: sink string, base: NumberBase,
+                negative: bool, span: Span) =
+  let idx = uint32(lx.stream.numberPayloads.len)
+  lx.stream.numberPayloads.add(NumberPayload(
+    text: text, base: base, negative: negative))
+  lx.emit(Token(kind: tkNumber, numIdx: idx, span: span))
+
 proc emitError(lx: var Lexer, code: ParseErrorCode, span: Span, hint = "") =
-  lx.emit(Token(kind: tkError, span: span,
-                error: initError(code, span, hint)))
+  let idx = uint32(lx.stream.errorPayloads.len)
+  lx.stream.errorPayloads.add(initError(code, span, hint))
+  lx.emit(Token(kind: tkError, errIdx: idx, span: span))
 
 # ---------------------------------------------------------------------------
 # Whitespace + comments
@@ -427,7 +467,7 @@ proc skipBlockComment(lx: var Lexer): bool =
   let start = lx.pos
   # Reposition `start` to the `/*` so the error span points there
   let startSpan = initSpan(
-    Position(line: start.line, col: start.col - 2, offset: start.offset - 2),
+    Position(offset: start.offset - 2),
     start)
   var depth = 1
   while depth > 0:
@@ -632,8 +672,7 @@ proc decodeRegularString(lx: var Lexer, openSpan: Span,
       if lx.atEof:
         lx.emitError(peLexInvalidEscape, openSpan, "EOF after backslash")
         return result
-      let escSpan = initSpan(escStart, Position(
-        line: lx.pos.line, col: lx.pos.col + 1, offset: lx.pos.offset + 1))
+      let escSpan = initSpan(escStart, Position(offset: lx.pos.offset + 1))
       case lx.dispatchEscape(escSpan, result)
       of eoDecoded, eoUnknown:
         discard
@@ -827,8 +866,7 @@ proc lexRegularOrMultiline(lx: var Lexer) =
               return
           else:
             decoded.add(ch); inc j
-        lx.emit(Token(kind: tkString, strVal: decoded,
-                      span: initSpan(start, lx.pos)))
+        lx.emitString(decoded, initSpan(start, lx.pos))
         return
       # Phase 1: copy bytes into rawBuf, with whitespace-escapes deleted.
       if lx.peek == '\\':
@@ -868,12 +906,10 @@ proc lexRegularOrMultiline(lx: var Lexer) =
     return
 
   # Regular single-line string
-  let openSpan = initSpan(start, Position(
-    line: start.line, col: start.col + 1, offset: start.offset + 1))
+  let openSpan = initSpan(start, Position(offset: start.offset + 1))
   lx.advanceOne()  # consume opening "
   let decoded = lx.decodeRegularString(openSpan, '"')
-  lx.emit(Token(kind: tkString, strVal: decoded,
-                span: initSpan(start, lx.pos)))
+  lx.emitString(decoded, initSpan(start, lx.pos))
 
 proc lexRawString(lx: var Lexer) =
   ## At the opening `#`. Count `#`s, then either find `"` (raw string)
@@ -964,8 +1000,7 @@ proc lexRawString(lx: var Lexer) =
               lx.emitError(peLexUnterminatedString, span,
                            "line content has less indent than closing #\"\"\"…")
               return
-          lx.emit(Token(kind: tkRawString, rawVal: decoded,
-                        span: initSpan(start, lx.pos)))
+          lx.emitRawString(decoded, initSpan(start, lx.pos))
           return
         else:
           # Not enough trailing hashes — treat as content
@@ -1002,8 +1037,7 @@ proc lexRawString(lx: var Lexer) =
       if i == hashCount + 1:
         for _ in 0 ..< 1 + hashCount:
           lx.advanceOne()
-        lx.emit(Token(kind: tkRawString, rawVal: body,
-                      span: initSpan(start, lx.pos)))
+        lx.emitRawString(body, initSpan(start, lx.pos))
         return
     if isNewline(lx.peek):
       let span = initSpan(start, lx.pos)
@@ -1080,8 +1114,7 @@ proc lexNumber(lx: var Lexer) =
                    "non-base digit in numeric literal")
       return
     let span = initSpan(start, lx.pos)
-    lx.emit(Token(kind: tkNumber, numText: lx.source[start.offset ..< lx.pos.offset],
-                  numBase: base, numNegative: negative, span: span))
+    lx.emitNumber(lx.source[start.offset ..< lx.pos.offset], base, negative, span)
     return
 
   # Decimal integer part
@@ -1170,9 +1203,7 @@ proc lexNumber(lx: var Lexer) =
     return
 
   let span = initSpan(start, lx.pos)
-  lx.emit(Token(kind: tkNumber,
-                numText: lx.source[start.offset ..< lx.pos.offset],
-                numBase: base, numNegative: negative, span: span))
+  lx.emitNumber(lx.source[start.offset ..< lx.pos.offset], base, negative, span)
 
 # ---------------------------------------------------------------------------
 # Identifiers + keywords
@@ -1336,38 +1367,71 @@ proc lexOne(lx: var Lexer, interner: var Interner) =
     lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
                  "unexpected character '" & $ch & "'")
 
-proc lex*(source: string, interner: var Interner): seq[Token]
-    {.noSideEffect.} =
-  ## Tokenize `source`. Always returns a stream terminated by `tkEof`.
-  ## Errors are surfaced as `tkError` tokens with embedded `ParseError`
-  ## diagnostics; the parser handles re-sync.
+func estimateTokenCount*(sourceLen: int): int {.inline.} =
+  ## Heuristic for pre-allocating the lexer's `seq[Token]` capacity.
   ##
-  ## `interner` is threaded as a `var` parameter through the few internal
-  ## procs that actually intern (just `lexBareIdent`). No `ptr` field in
-  ## the Lexer struct — keeps the whole tokenizer VM-callable so the
-  ## parser chain runs at compile time via `embed[T]`.
-  var lx = Lexer(source: source, pos: StartPosition, tokens: @[],
-                 wsPending: true)  # start of input counts as preceded by ws
-  # Reject malformed UTF-8 up front — checked once over the whole input
-  # so downstream lexing can assume byte-by-byte iteration is safe.
-  # Pairs with `containsBidiControl` to prevent denylist bypass via
-  # over-long encodings or surrogate halves.
+  ## Empirically, KDL configs produce ~1 token per 6-8 source bytes
+  ## (mix of single-byte punctuation, 1-byte newlines, and 5-15-byte
+  ## identifiers/numbers/strings). Dividing by 6 slightly over-
+  ## estimates the typical case so the seq doesn't need to re-grow
+  ## during the lex pass for any realistic input.
+  ##
+  ## Returns at least 16 — for tiny inputs the lex overhead is
+  ## dominated by setup costs, not a few extra preallocated slots.
+  max(16, sourceLen div 6)
+
+
+func sourceSizeOk*(len: int): Result[void, ParseError] =
+  ## The compact `Span` representation stores byte offsets as `uint32`,
+  ## capping source size at 4 GiB. Past that boundary, offsets would
+  ## silently truncate and produce corrupted spans — better to refuse
+  ## up front with a clear error.
+  if len > int(uint32.high):
+    err[void, ParseError](initError(peOther, pointSpan(StartPosition),
+      "source too large: " & $len & " bytes exceeds the " &
+      $int(uint32.high) & "-byte limit"))
+  else:
+    ok(void, ParseError)
+
+
+proc lex*(source: string, interner: var Interner): TokenStream
+    {.noSideEffect.} =
+  ## Tokenize `source`. Returns a `TokenStream` (compact tokens + side
+  ## tables for heavy payloads); the token sequence is always terminated
+  ## by `tkEof`. Errors surface as `tkError` tokens with a u32 index into
+  ## `errorPayloads`; the parser handles re-sync.
+  # Pre-allocate seqs at estimated final size — eliminates O(log N)
+  # reallocations during the lex pass for typical inputs.
+  let tokCap = estimateTokenCount(source.len)
+  let stringCap = max(4, source.len div 64)
+  let numberCap = max(4, source.len div 128)
+  var lx = Lexer(source: source, pos: StartPosition,
+                 stream: TokenStream(
+                   tokens: newSeqOfCap[Token](tokCap),
+                   stringPayloads: newSeqOfCap[string](stringCap),
+                   numberPayloads: newSeqOfCap[NumberPayload](numberCap),
+                 ),
+                 wsPending: true)
+  let szCheck = sourceSizeOk(source.len)
+  if szCheck.isErr:
+    lx.stream.errorPayloads.add(szCheck.getErr)
+    lx.stream.tokens.add(Token(kind: tkError, errIdx: 0,
+                               span: pointSpan(StartPosition)))
+    lx.stream.tokens.add(Token(kind: tkEof, span: pointSpan(StartPosition)))
+    return lx.stream
   if not isWellFormedUtf8(source):
     lx.emitError(peLexUnexpectedChar, pointSpan(StartPosition),
                  "input is not well-formed UTF-8")
     lx.emit(Token(kind: tkEof, span: pointSpan(StartPosition)))
-    return lx.tokens
-  # Skip BOM (U+FEFF, encoded as EF BB BF) at start of input — per
-  # KDL v2 spec it's silently consumed at position 0 but flagged as an
-  # error if it appears later. We handle the start-of-input case here.
+    return lx.stream
   if lx.source.len >= 3 and
      lx.source[0] == '\xEF' and lx.source[1] == '\xBB' and
      lx.source[2] == '\xBF':
-    lx.pos = Position(line: 1, col: 1, offset: 3)
+    lx.pos = Position(offset: 3)
   while not lx.atEof:
     lx.skipWhitespaceAndComments()
     if lx.atEof: break
     lx.lexOne(interner)
-  if lx.tokens.len == 0 or lx.tokens[^1].kind != tkEof:
+  if lx.stream.tokens.len == 0 or lx.stream.tokens[^1].kind != tkEof:
     lx.emit(Token(kind: tkEof, span: pointSpan(lx.pos)))
-  result = lx.tokens
+  result = lx.stream

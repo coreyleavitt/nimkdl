@@ -50,7 +50,7 @@ const
 
 type
   Parser = object
-    tokens: seq[Token]
+    stream: TokenStream
     cursor: int
     depth: int
     doc: KdlDoc
@@ -64,16 +64,16 @@ type
 # ---------------------------------------------------------------------------
 
 func atEnd(p: Parser): bool {.inline.} =
-  p.cursor >= p.tokens.len or p.tokens[p.cursor].kind == tkEof
+  p.cursor >= p.stream.tokens.len or p.stream.tokens[p.cursor].kind == tkEof
 
 func peek(p: Parser, ahead = 0): Token {.inline.} =
-  if p.cursor + ahead < p.tokens.len:
-    p.tokens[p.cursor + ahead]
+  if p.cursor + ahead < p.stream.tokens.len:
+    p.stream.tokens[p.cursor + ahead]
   else:
     Token(kind: tkEof, span: pointSpan(StartPosition))
 
 proc advance(p: var Parser): Token {.inline, noSideEffect.} =
-  result = p.tokens[p.cursor]
+  result = p.stream.tokens[p.cursor]
   inc p.cursor
 
 proc check(p: Parser, kind: TokenKind): bool {.inline, noSideEffect.} =
@@ -97,16 +97,16 @@ proc parseTypeAnno(p: var Parser): Result[InternedStr, ParseError] {.noSideEffec
     handle = p.advance().ident
   of tkString:
     let tok = p.advance()
-    if containsBidiControl(tok.strVal):
+    if containsBidiControl(p.stream.stringPayloads[tok.strIdx]):
       return err[InternedStr, ParseError](initError(peLexInvalidIdentifier,
         tok.span, "bidi control codepoint in type annotation name"))
-    handle = p.doc.interner.intern(tok.strVal)
+    handle = p.doc.interner.intern(p.stream.stringPayloads[tok.strIdx])
   of tkRawString:
     let tok = p.advance()
-    if containsBidiControl(tok.rawVal):
+    if containsBidiControl(p.stream.rawStringPayloads[tok.rawIdx]):
       return err[InternedStr, ParseError](initError(peLexInvalidIdentifier,
         tok.span, "bidi control codepoint in type annotation name"))
-    handle = p.doc.interner.intern(tok.rawVal)
+    handle = p.doc.interner.intern(p.stream.rawStringPayloads[tok.rawIdx])
   else:
     return err[InternedStr, ParseError](initError(peParseExpected,
       p.peek.span, "expected identifier or string inside type annotation"))
@@ -137,10 +137,10 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
   case tok.kind
   of tkString:
     discard p.advance()
-    if containsBidiControl(tok.strVal):
+    if containsBidiControl(p.stream.stringPayloads[tok.strIdx]):
       return err[KdlValue, ParseError](initError(peLexInvalidIdentifier,
         tok.span, "bidi control codepoint in string value"))
-    var v = newStringValue(tok.strVal, tok.span)
+    var v = newStringValue(p.stream.stringPayloads[tok.strIdx], tok.span)
     v.typeAnnotation = anno
     returnValidated(p, v, anno)
   of tkIdent:
@@ -159,21 +159,22 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     returnValidated(p, v, anno)
   of tkRawString:
     discard p.advance()
-    if containsBidiControl(tok.rawVal):
+    if containsBidiControl(p.stream.rawStringPayloads[tok.rawIdx]):
       return err[KdlValue, ParseError](initError(peLexInvalidIdentifier,
         tok.span, "bidi control codepoint in string value"))
-    var v = newStringValue(tok.rawVal, tok.span)
+    var v = newStringValue(p.stream.rawStringPayloads[tok.rawIdx], tok.span)
     v.typeAnnotation = anno
     returnValidated(p, v, anno)
   of tkNumber:
     discard p.advance()
-    if looksLikeFloat(tok):
-      let floatRes = decodeFloatFromToken(tok)
+    let n = p.stream.numberPayloads[tok.numIdx]
+    if looksLikeFloat(n):
+      let floatRes = decodeFloatFromToken(n, tok.span)
       if floatRes.isErr: return err[KdlValue, ParseError](floatRes.getErr)
       var v = newFloatValue(floatRes.get, tok.span)
       v.typeAnnotation = anno
       returnValidated(p, v, anno)
-    let intRes = decodeIntPromoting(tok)
+    let intRes = decodeIntPromoting(n, tok.span)
     if intRes.isErr: return err[KdlValue, ParseError](intRes.getErr)
     let d = intRes.get
     var v = if d.fits64: newIntValue(d.intVal, tok.span)
@@ -194,7 +195,7 @@ proc parseValue(p: var Parser): Result[KdlValue, ParseError] {.noSideEffect.} =
     returnValidated(p, v, anno)
   of tkError:
     discard p.advance()
-    return err[KdlValue, ParseError](tok.error)
+    return err[KdlValue, ParseError](p.stream.errorPayloads[tok.errIdx])
   else:
     return err[KdlValue, ParseError](initError(peParseExpected, tok.span,
       "expected a value (string, number, keyword)"))
@@ -230,16 +231,16 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
     of tkIdent: key = p.advance().ident
     of tkString:
       let tok = p.advance()
-      if containsBidiControl(tok.strVal):
+      if containsBidiControl(p.stream.stringPayloads[tok.strIdx]):
         return err[KdlEntry, ParseError](initError(peLexInvalidIdentifier,
           tok.span, "bidi control codepoint in property key"))
-      key = p.doc.interner.intern(tok.strVal)
+      key = p.doc.interner.intern(p.stream.stringPayloads[tok.strIdx])
     of tkRawString:
       let tok = p.advance()
-      if containsBidiControl(tok.rawVal):
+      if containsBidiControl(p.stream.rawStringPayloads[tok.rawIdx]):
         return err[KdlEntry, ParseError](initError(peLexInvalidIdentifier,
           tok.span, "bidi control codepoint in property key"))
-      key = p.doc.interner.intern(tok.rawVal)
+      key = p.doc.interner.intern(p.stream.rawStringPayloads[tok.rawIdx])
     else: discard  # unreachable (guarded above)
     discard p.advance()  # consume `=`
     let vRes = p.parseValue()
@@ -248,7 +249,7 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
     # emPreserve splice path uses entry.span to extract source bytes,
     # and including trailing whitespace would shadow the spacing the
     # user authored between this entry and the next.
-    let lastTokEnd = p.tokens[p.cursor - 1].span.finish
+    let lastTokEnd = p.stream.tokens[p.cursor - 1].span.finish
     return ok[KdlEntry, ParseError](KdlEntry(
       kind: keProperty, propName: key, propValue: vRes.get,
       span: initSpan(startSpan.start, lastTokEnd)))
@@ -259,7 +260,7 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
   let argStart = p.peek.span.start
   let vRes = p.parseValue()
   if vRes.isErr: return err[KdlEntry, ParseError](vRes.getErr)
-  let lastTokEnd = p.tokens[p.cursor - 1].span.finish
+  let lastTokEnd = p.stream.tokens[p.cursor - 1].span.finish
   ok[KdlEntry, ParseError](KdlEntry(
     kind: keArgument, argValue: vRes.get,
     span: initSpan(argStart, lastTokEnd)))
@@ -323,22 +324,27 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
     nameHandle = tok.ident
   of tkString:
     let tok = p.advance()
-    if containsBidiControl(tok.strVal):
+    if containsBidiControl(p.stream.stringPayloads[tok.strIdx]):
       return err[KdlNode, ParseError](initError(peLexInvalidIdentifier,
         tok.span, "bidi control codepoint in node name"))
-    nameHandle = p.doc.interner.intern(tok.strVal)
+    nameHandle = p.doc.interner.intern(p.stream.stringPayloads[tok.strIdx])
   of tkRawString:
     let tok = p.advance()
-    if containsBidiControl(tok.rawVal):
+    if containsBidiControl(p.stream.rawStringPayloads[tok.rawIdx]):
       return err[KdlNode, ParseError](initError(peLexInvalidIdentifier,
         tok.span, "bidi control codepoint in node name"))
-    nameHandle = p.doc.interner.intern(tok.rawVal)
+    nameHandle = p.doc.interner.intern(p.stream.rawStringPayloads[tok.rawIdx])
   of tkError:
-    return err[KdlNode, ParseError](p.advance().error)
+    let errTok = p.advance(); return err[KdlNode, ParseError](p.stream.errorPayloads[errTok.errIdx])
   else:
     return err[KdlNode, ParseError](initError(peParseExpected,
       p.peek.span, "expected node name"))
 
+  # Per-node entries + children seqs stay at default capacity. Pre-sizing
+  # was measured: a `newSeqOfCap(2)` cost more per node than the reallocs
+  # it saved (regressions on tight-loop tiny-doc benches outweighed any
+  # win on entry-heavy nodes). Variance per node is too high for a single
+  # heuristic to be net positive.
   var node = KdlNode(name: nameHandle, typeAnnotation: anno,
                      entries: @[], children: @[], span: startSpan)
 
@@ -455,7 +461,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   of tkEof, tkRBrace:
     discard  # Don't consume; the enclosing loop handles it
   of tkError:
-    return err[KdlNode, ParseError](p.advance().error)
+    let errTok = p.advance(); return err[KdlNode, ParseError](p.stream.errorPayloads[errTok.errIdx])
   else:
     return err[KdlNode, ParseError](initError(peParseUnexpected,
       p.peek.span, "expected newline, ';', or end of node"))
@@ -467,7 +473,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   # splice path doesn't drag in the spacing the user authored
   # between sibling nodes.
   let lastTokEnd =
-    if p.cursor > 0: p.tokens[p.cursor - 1].span.finish
+    if p.cursor > 0: p.stream.tokens[p.cursor - 1].span.finish
     else: startSpan.start
   node.span = initSpan(startSpan.start, lastTokEnd)
   node.parseEntryCount = int32(node.entries.len)
@@ -531,8 +537,19 @@ proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffe
 # Document parsing
 # ---------------------------------------------------------------------------
 
+func estimateDocNodes*(tokenCount: int): int {.inline.} =
+  ## Heuristic for pre-allocating `KdlDoc.nodes`. Each top-level node
+  ## consumes ~5+ tokens (name + entry + entry + terminator at minimum;
+  ## typically more). Estimating at `tokens/5` slightly over-shoots
+  ## the common case so the seq doesn't re-grow during parsing.
+  ##
+  ## Floors at 4 — tiny docs don't benefit from a smaller initial
+  ## capacity than the first power-of-two seq growth would land on.
+  max(4, tokenCount div 5)
+
+
 proc parseDocument(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffect.} =
-  var nodes: seq[KdlNode] = @[]
+  var nodes = newSeqOfCap[KdlNode](estimateDocNodes(p.stream.tokens.len))
   p.skipNewlines()
   while not p.atEnd:
     var skipNode = false
@@ -599,10 +616,10 @@ proc parse*(source: string, sourcePath = "<input>"):
   let tokens = lex(source, doc.interner)
   # Early-exit on any inline lex errors so callers get the lex diagnostic,
   # not a downstream parser-confusion diagnostic.
-  for t in tokens:
+  for t in tokens.tokens:
     if t.kind == tkError:
-      return err[KdlDoc, ParseError](t.error)
-  var p = Parser(tokens: tokens, cursor: 0, depth: 0, doc: doc)
+      return err[KdlDoc, ParseError](tokens.errorPayloads[t.errIdx])
+  var p = Parser(stream: tokens, cursor: 0, depth: 0, doc: doc)
   let dRes = p.parseDocument()
   if dRes.isErr:
     return err[KdlDoc, ParseError](dRes.getErr)
@@ -632,10 +649,10 @@ proc parseAll*(source: string, sourcePath = "<input>"):
   ## `parseAll(source).errors[0]` when failures exist.
   result.doc = newDoc(sourcePath)
   let tokens = lex(source, result.doc.interner)
-  for t in tokens:
+  for t in tokens.tokens:
     if t.kind == tkError:
-      result.errors.add(t.error)
-  var p = Parser(tokens: tokens, cursor: 0, depth: 0, doc: result.doc,
+      result.errors.add(tokens.errorPayloads[t.errIdx])
+  var p = Parser(stream: tokens, cursor: 0, depth: 0, doc: result.doc,
                  errorBuf: addr result.errors)
   let nodes = parseDocumentAccumulating(p, result.errors)
   p.doc.nodes = nodes

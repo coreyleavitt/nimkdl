@@ -1,0 +1,7 @@
+# Compiled test binaries
+tests/test_*
+!tests/test_*.nim
+!tests/test_*/
+
+# Conformance failure log (regenerated)
+tests/.last-conformance-failures.log

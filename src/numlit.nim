@@ -48,23 +48,22 @@ func radixOf*(base: NumberBase): int {.inline.} =
   of nbOctal: 8
   of nbBinary: 2
 
-func decodeIntFromToken*(tok: Token): Result[int64, ParseError] =
+func decodeIntFromToken*(n: NumberPayload, span: Span): Result[int64, ParseError] =
   ## Decode a `tkNumber` token's raw integer text into `int64`, respecting
   ## sign and base. Handles `int64.low` correctly via uint64 accumulation
   ## (a value the naïve decode-magnitude-then-negate path can't represent).
   ##
   ## Returns `peLexInvalidNumber` on any digit-character mismatch or
   ## true overflow.
-  assert tok.kind == tkNumber
-  var s = tok.numText
+  var s = n.text
   if s.len > 0 and (s[0] == '+' or s[0] == '-'):
     s = s[1 .. ^1]
-  if tok.numBase != nbDecimal and s.len >= 2:
+  if n.base != nbDecimal and s.len >= 2:
     s = s[2 .. ^1]
-  let radix = radixOf(tok.numBase)
+  let radix = radixOf(n.base)
   let radixU = uint64(radix)
   let limit =
-    if tok.numNegative: Int64LowMagU
+    if n.negative: Int64LowMagU
     else: Int64HighU
   var acc: uint64 = 0
   for c in s:
@@ -77,15 +76,15 @@ func decodeIntFromToken*(tok: Token): Result[int64, ParseError] =
       else: -1
     if d < 0 or d >= radix:
       return err[int64, ParseError](
-        initError(peLexInvalidNumber, tok.span, "invalid digit for base"))
+        initError(peLexInvalidNumber, span, "invalid digit for base"))
     # Pre-multiplication overflow check against the *signed* limit for
     # this token's sign. We need `acc * radix + d <= limit`.
     if acc > (limit - uint64(d)) div radixU:
       return err[int64, ParseError](
-        initError(peLexInvalidNumber, tok.span,
+        initError(peLexInvalidNumber, span,
                   "integer literal does not fit in int64"))
     acc = acc * radixU + uint64(d)
-  if tok.numNegative:
+  if n.negative:
     if acc == Int64LowMagU:
       # -2^63 — representable as int64 but not via simple negation
       # (the magnitude itself overflows the signed range). Cast through
@@ -137,19 +136,18 @@ func mulAdd128(hi, lo: var uint64, mul: uint64, add: uint64): bool =
   hi = (r3 shl 32) or r2
   false
 
-func decodeIntPromoting*(tok: Token): Result[IntDecode, ParseError] =
+func decodeIntPromoting*(n: NumberPayload, span: Span): Result[IntDecode, ParseError] =
   ## Decode an integer literal that may exceed int64.high. Produces
   ## `fits64 = true` when the value fits int64 (with int64.low special-
   ## cased like `decodeIntFromToken`); otherwise produces a 128-bit
   ## magnitude in (bigHi, bigLo) with sign in `negative`. 128-bit
   ## overflow still errors with `peLexInvalidNumber`.
-  assert tok.kind == tkNumber
-  var s = tok.numText
+  var s = n.text
   if s.len > 0 and (s[0] == '+' or s[0] == '-'):
     s = s[1 .. ^1]
-  if tok.numBase != nbDecimal and s.len >= 2:
+  if n.base != nbDecimal and s.len >= 2:
     s = s[2 .. ^1]
-  let radix = uint64(radixOf(tok.numBase))
+  let radix = uint64(radixOf(n.base))
   var hi: uint64 = 0
   var lo: uint64 = 0
   for c in s:
@@ -162,13 +160,13 @@ func decodeIntPromoting*(tok: Token): Result[IntDecode, ParseError] =
       else: high(uint64)
     if d >= radix:
       return err[IntDecode, ParseError](
-        initError(peLexInvalidNumber, tok.span, "invalid digit for base"))
+        initError(peLexInvalidNumber, span, "invalid digit for base"))
     if mulAdd128(hi, lo, radix, d):
       return err[IntDecode, ParseError](
-        initError(peLexInvalidNumber, tok.span,
+        initError(peLexInvalidNumber, span,
                   "integer literal exceeds 128 bits"))
   # Now (hi, lo) holds the unsigned magnitude.
-  let neg = tok.numNegative
+  let neg = n.negative
   if hi == 0:
     if not neg:
       if lo <= Int64HighU:
@@ -189,40 +187,39 @@ func decodeIntPromoting*(tok: Token): Result[IntDecode, ParseError] =
 # Float decode
 # ---------------------------------------------------------------------------
 
-func decodeFloatFromToken*(tok: Token): Result[float, ParseError] =
+func decodeFloatFromToken*(n: NumberPayload, span: Span): Result[float, ParseError] =
   ## Decode a `tkNumber` token's raw float text. Non-raising — uses
   ## `parseutils.parseFloat` which returns 0 on failure rather than
   ## raising `ValueError`. This is the property `parser.nim`'s
   ## `{.noSideEffect.}` contract needs.
-  assert tok.kind == tkNumber
   # parseutils doesn't strip underscores. Most decimal float tokens
   # have none, so scan first and only allocate a stripped copy when
   # underscores are actually present — keeps the common case alloc-
   # free while still handling `1_000.5e1_2` correctly.
   var hasUnderscore = false
-  for c in tok.numText:
+  for c in n.text:
     if c == '_': hasUnderscore = true; break
   let text =
     if hasUnderscore:
-      var s = newStringOfCap(tok.numText.len)
-      for c in tok.numText:
+      var s = newStringOfCap(n.text.len)
+      for c in n.text:
         if c != '_': s.add(c)
       s
     else:
-      tok.numText
+      n.text
   var value: float
   let consumed = parseutils.parseFloat(text, value)
   if consumed == 0 or consumed != text.len:
     return err[float, ParseError](
-      initError(peLexInvalidNumber, tok.span, "malformed float literal"))
+      initError(peLexInvalidNumber, span, "malformed float literal"))
   ok[float, ParseError](value)
 
 # ---------------------------------------------------------------------------
 # Float-vs-int classification
 # ---------------------------------------------------------------------------
 
-func looksLikeFloat*(tok: Token): bool {.inline.} =
+func looksLikeFloat*(n: NumberPayload): bool {.inline.} =
   ## A decimal number is a float iff it carries a fractional part or
   ## an exponent. Hex/oct/bin literals are always integers.
-  tok.numBase == nbDecimal and
-    ('.' in tok.numText or 'e' in tok.numText or 'E' in tok.numText)
+  n.base == nbDecimal and
+    ('.' in n.text or 'e' in n.text or 'E' in n.text)

@@ -1,72 +1,83 @@
 ## spans — source positions, spans, structured parse errors, and a
 ## no-exception `Result[T, E]` sum-type.
 ##
-## The parser surface is exception-free by design: every fallible operation
-## returns `Result[T, ParseError]`. This is what lets the parser run at
-## compile time via `{.noSideEffect.}` — Nim's effect tracking forbids
-## raising across a noSideEffect boundary, so an exception-based parser
-## couldn't fuel the `parse[T]` / `embed[T]` macros (#528, #529).
+## ## Compact-span design
 ##
-## All public procs in this module are `{.noSideEffect, raises: [].}`.
+## A `Position` is a single `uint32` byte offset into the source. A
+## `Span` is `(offset: uint32, length: uint16)`. The (line, col)
+## coordinates that humans see in error messages are reconstructed
+## lazily from the offset via a `LineMap` built once per source.
+##
+## This shrinks `Position` from 24 → 4 bytes and `Span` from 48 → 8
+## bytes vs the prior `{line, col, offset}` shape. The savings cascade
+## into `Token`, `KdlNode`, `KdlValue` — each carries spans, all benefit.
+##
+## ## Compile-time parsing
+##
+## The parser surface is exception-free by design: every fallible
+## operation returns `Result[T, ParseError]`. This is what lets the
+## parser run at compile time via `{.noSideEffect.}` — Nim's effect
+## tracking forbids raising across a noSideEffect boundary, so an
+## exception-based parser couldn't fuel the `parse[T]` / `embed[T]`
+## macros.
 
 import std/strutils
 
 type
   Position* = object
-    ## Source position. `line` and `col` are 1-based for human-readable
-    ## diagnostics; `offset` is 0-based byte index for tooling that needs
-    ## to slice the source.
-    line*: int
-    col*: int
+    ## 0-based byte offset into the source. Line and column are NOT
+    ## stored — they're reconstructed by `LineMap.lineColOf` when
+    ## error rendering needs them.
+    ##
+    ## Stored as `int` for ergonomic interop with `string.len` and
+    ## other size types throughout the codebase. `Position` is a *view*
+    ## type — it's NOT what gets packed into `Span` for the cache-line
+    ## benefit (that's the raw fields on `Span` itself).
     offset*: int
 
   Span* = object
-    ## Half-open source range `[start, finish)`. `finish == start` is a
-    ## point span used when an error is associated with a single position
-    ## (e.g. "expected something here") rather than a span of source.
-    start*: Position
-    finish*: Position
+    ## Half-open source range `[offset, offset + length)`. `length == 0`
+    ## is a point span used when an error is associated with a single
+    ## position rather than a region.
+    ##
+    ## Storage: 4-byte offset + 4-byte length = 8 bytes exactly. The
+    ## length was originally uint16 (capping a single token at 64 KiB)
+    ## but real-world multiline strings can legitimately exceed that;
+    ## promoting to uint32 costs zero storage (the alignment padding
+    ## was already 8) and removes the silent-truncation edge case.
+    offsetRaw*: uint32
+    lengthRaw*: uint32
+
+  LineMap* = object
+    ## Maps byte offsets to (line, col). Built once per source by
+    ## scanning for newlines; O(n) construction, O(log n) lookup.
+    ## Owned by the parsed document (or the parser, for error paths).
+    sourceLen*: int
+    lineStarts*: seq[int]  ## byte offset of each line's first char.
+                           ## Always `[0, ...]` (line 1 starts at 0).
 
   ParseErrorCode* = enum
-    ## Stable categorization of parse failures. Extend as new failure
-    ## modes appear in subsequent lib/kdl subsystems — the wire shape
-    ## (code + span + hint) stays constant.
-
-    # Lexer (#521)
-    peLexUnexpectedChar       ## byte the lexer can't classify
-    peLexUnterminatedString   ## ran off end of input mid-string
-    peLexInvalidEscape        ## bad escape sequence inside a string
-    peLexInvalidNumber        ## malformed numeric literal
-    peLexInvalidIdentifier    ## bare-word that can't form an identifier
-    peLexReservedKeyword      ## bare ident matches a v2 reserved keyword
-                              ## (true/false/null/inf/-inf/nan) — must be
-                              ## quoted or `#`-prefixed per spec
-    peReservedTypeInvalid     ## value content fails the standard
-                              ## interpretation of its reserved type
-                              ## annotation (RFC/ISO/IEEE per tag)
-    peTypeReservedMismatch    ## decode-time: source value's type
-                              ## annotation differs from the
-                              ## `kdlReserved` pragma declaration on
-                              ## the target field
-
-    # Parser (#523)
-    peParseUnexpected         ## token where none was expected
-    peParseExpected           ## hole where a specific shape was expected
-    peParseDepthExceeded      ## recursion past MaxParserDepth
-
-    # Type-driven codegen (#528, #529)
-    peTypeUnknownField        ## KDL field absent from the target Nim type
-    peTypeMismatch            ## KDL value's type incompatible with field
-    peTypeMissingRequired     ## required field omitted, no default
-    peTypeEnumInvalid         ## string doesn't match any enum member
-    peTypeDiscriminatorBad    ## object-variant discriminator unrecognized
-
-    # Generic catch-all (avoid in new code — add a specific code instead)
+    ## Stable categorization of parse failures.
+    peLexUnexpectedChar
+    peLexUnterminatedString
+    peLexInvalidEscape
+    peLexInvalidNumber
+    peLexInvalidIdentifier
+    peLexReservedKeyword
+    peReservedTypeInvalid
+    peTypeReservedMismatch
+    peParseUnexpected
+    peParseExpected
+    peParseDepthExceeded
+    peTypeUnknownField
+    peTypeMismatch
+    peTypeMissingRequired
+    peTypeEnumInvalid
+    peTypeDiscriminatorBad
     peOther
 
   ParseError* = object
-    ## Structured error. `hint` is human-readable supplementary text —
-    ## "did you mean ..." style. Empty hint is fine; renderer just omits it.
+    ## Structured error.
     code*: ParseErrorCode
     span*: Span
     hint*: string
@@ -75,12 +86,6 @@ type
     rkOk, rkErr
 
   Result*[T, E] = object
-    ## Sum-typed `Ok(T)` / `Err(E)` result. Hand-rolled rather than pulling
-    ## a results library — one file of stdlib-shaped surface vs a transitive
-    ## dep we don't need elsewhere.
-    ##
-    ## `Result[void, E]` is a valid specialization: the `rkOk` branch has
-    ## no payload, only the discriminator. Use `ok(void, E)` to construct.
     case kind*: ResultKind
     of rkOk:
       when T isnot void:
@@ -88,49 +93,109 @@ type
     of rkErr:
       error*: E
 
+
 # ---------------------------------------------------------------------------
-# Position / Span constructors and arithmetic
+# Position / Span constructors
 # ---------------------------------------------------------------------------
 
-const StartPosition* = Position(line: 1, col: 1, offset: 0)
-  ## Lexer's starting position before reading any input.
+const StartPosition* = Position(offset: 0)
+  ## Position before reading any input.
 
-func initPosition*(line, col, offset: int): Position {.inline.} =
-  Position(line: line, col: col, offset: offset)
+func initPosition*(offset: int): Position {.inline.} =
+  Position(offset: offset)
+
+func offset*(s: Span): int {.inline.} = int(s.offsetRaw)
+  ## Byte offset of span start.
+
+func length*(s: Span): int {.inline.} = int(s.lengthRaw)
+  ## Byte length of span. Zero-length = "point span".
+
+func initSpan*(offset, length: int): Span {.inline.} =
+  Span(offsetRaw: uint32(offset), lengthRaw: uint32(length))
 
 func initSpan*(start, finish: Position): Span {.inline.} =
-  Span(start: start, finish: finish)
+  ## Back-compat constructor — derive length from two endpoints.
+  Span(offsetRaw: uint32(start.offset),
+       lengthRaw: uint32(finish.offset - start.offset))
 
 func pointSpan*(p: Position): Span {.inline.} =
-  ## Zero-width span at a single position — for "expected X here" errors.
-  Span(start: p, finish: p)
+  ## Zero-width span at a single position.
+  Span(offsetRaw: uint32(p.offset), lengthRaw: 0)
+
+func pointSpan*(offset: int): Span {.inline.} =
+  Span(offsetRaw: uint32(offset), lengthRaw: 0)
+
+func start*(s: Span): Position {.inline.} =
+  ## Back-compat accessor — many callers wrote `span.start`.
+  Position(offset: int(s.offsetRaw))
+
+func finish*(s: Span): Position {.inline.} =
+  ## Back-compat accessor — `span.finish` was the exclusive end.
+  Position(offset: int(s.offsetRaw) + int(s.lengthRaw))
+
+func endOffset*(s: Span): int {.inline.} =
+  int(s.offsetRaw) + int(s.lengthRaw)
+
+func advance*(p: Position, n: int = 1): Position {.inline.} =
+  Position(offset: p.offset + n)
 
 func advance*(p: Position, ch: char): Position {.inline.} =
-  ## Move past a single byte. Newline (`\n`) bumps line + resets col;
-  ## carriage return (`\r`) is ignored on the column count — KDL v2's
-  ## newline taxonomy is broader than just `\n` but the lexer (#521)
-  ## will normalize before reaching this helper.
-  if ch == '\n':
-    Position(line: p.line + 1, col: 1, offset: p.offset + 1)
-  else:
-    Position(line: p.line, col: p.col + 1, offset: p.offset + 1)
+  ## Single-byte advance. Newline handling is now a no-op at the
+  ## Position layer — line tracking belongs to the LineMap, computed
+  ## after lexing.
+  Position(offset: p.offset + 1)
 
-func advance*(p: Position, s: string): Position =
-  ## Advance through a multi-character string. Used by the lexer when
-  ## consuming a token whose internal bytes don't matter for position
-  ## tracking (e.g. an identifier).
-  result = p
-  for ch in s:
-    result = result.advance(ch)
+func advance*(p: Position, s: string): Position {.inline.} =
+  Position(offset: p.offset + s.len)
+
+func `==`*(a, b: Position): bool {.inline.} = a.offset == b.offset
+func `==`*(a, b: Span): bool {.inline.} =
+  a.offsetRaw == b.offsetRaw and a.lengthRaw == b.lengthRaw
+
+func `<`*(a, b: Position): bool {.inline.} = a.offset < b.offset
 
 func `$`*(p: Position): string {.inline.} =
-  $p.line & ":" & $p.col
+  "@" & $p.offset
 
 func `$`*(s: Span): string =
-  if s.start == s.finish:
-    $s.start
+  if s.lengthRaw == 0:
+    "@" & $s.offsetRaw
   else:
-    $s.start & "-" & $s.finish
+    "@" & $s.offsetRaw & "+" & $s.lengthRaw
+
+
+# ---------------------------------------------------------------------------
+# LineMap — offset → (line, col) reconstruction
+# ---------------------------------------------------------------------------
+
+func buildLineMap*(source: string): LineMap =
+  ## Precompute line start offsets. O(n) once; subsequent lookups
+  ## are O(log n) via binary search.
+  result.sourceLen = source.len
+  result.lineStarts = @[0]
+  for i in 0 ..< source.len:
+    if source[i] == '\n':
+      result.lineStarts.add(i + 1)
+
+func lineColOf*(lm: LineMap, offset: int): tuple[line: int, col: int] =
+  ## Binary search for the line containing `offset`. Returns 1-based
+  ## (line, col). Clamps to valid range — out-of-range offsets snap
+  ## to source bounds rather than panicking.
+  let n = lm.lineStarts.len
+  if n == 0: return (1, 1)
+  let off = max(0, offset)
+  # Find largest lineStarts[i] <= off.
+  var lo = 0
+  var hi = n - 1
+  while lo < hi:
+    let mid = (lo + hi + 1) div 2
+    if lm.lineStarts[mid] <= off: lo = mid
+    else: hi = mid - 1
+  return (lo + 1, off - lm.lineStarts[lo] + 1)
+
+func lineColOf*(lm: LineMap, p: Position): tuple[line: int, col: int] {.inline.} =
+  lm.lineColOf(int(p.offset))
+
 
 # ---------------------------------------------------------------------------
 # ParseError constructors + rendering
@@ -143,9 +208,6 @@ func initError*(code: ParseErrorCode, pos: Position, hint = ""): ParseError {.in
   ParseError(code: code, span: pointSpan(pos), hint: hint)
 
 func codeMessage*(code: ParseErrorCode): string =
-  ## One-line human-readable summary per code. Kept inline (not localized,
-  ## not table-driven) so adding a new code lights up a non-exhaustive-case
-  ## warning here as a forcing function.
   case code
   of peLexUnexpectedChar:    "unexpected character"
   of peLexUnterminatedString:"unterminated string literal"
@@ -166,13 +228,11 @@ func codeMessage*(code: ParseErrorCode): string =
   of peOther:                "parse error"
 
 func lineSlice(source: string, line: int): string =
-  ## Extract the Nth (1-based) line of `source`, without the terminator.
-  ## Returns empty string when line is out of range — caller decides
-  ## whether to render anything in that case.
   if line < 1: return ""
   var current = 1
   var start = 0
-  for i, ch in source:
+  for i in 0 ..< source.len:
+    let ch = source[i]
     if current == line and ch == '\n':
       return source[start ..< i]
     if ch == '\n':
@@ -183,29 +243,22 @@ func lineSlice(source: string, line: int): string =
   result = ""
 
 func formatError*(err: ParseError, source: string, filename = ""): string =
-  ## Render a caret-pointer diagnostic:
-  ##
-  ##   error: <code message>
-  ##     --> <filename>:<line>:<col>
-  ##      |
-  ##    N | <source line>
-  ##      |       ^^^^ <hint>
-  ##
-  ## Mirrors rustc's compact style — easy to read in terminal output
-  ## and easy to parse for editor integrations later.
-  let pos = err.span.start
-  let lineText = lineSlice(source, pos.line)
+  ## Render a caret-pointer diagnostic. Builds a LineMap internally
+  ## (error rendering is the rare path; the per-call O(n) scan is fine).
+  let lm = buildLineMap(source)
+  let (startLine, startCol) = lm.lineColOf(err.span.offset)
+  let (finishLine, finishCol) = lm.lineColOf(err.span.offset + err.span.length)
+  let lineText = lineSlice(source, startLine)
   let codeMsg = codeMessage(err.code)
   let location =
-    if filename.len > 0: filename & ":" & $pos
-    else: $pos
-  let gutter = $pos.line
+    if filename.len > 0: filename & ":" & $startLine & ":" & $startCol
+    else: $startLine & ":" & $startCol
+  let gutter = $startLine
   let pad = " ".repeat(gutter.len)
 
-  # Caret width: clamp to the line's bounds, default to 1 for zero-width spans.
-  let caretStart = max(0, pos.col - 1)
-  let caretEnd = if err.span.finish.line == pos.line:
-                   max(caretStart + 1, err.span.finish.col - 1)
+  let caretStart = max(0, startCol - 1)
+  let caretEnd = if finishLine == startLine:
+                   max(caretStart + 1, finishCol - 1)
                  else:
                    max(caretStart + 1, lineText.len)
   let caretWidth = max(1, caretEnd - caretStart)
@@ -220,16 +273,15 @@ func formatError*(err: ParseError, source: string, filename = ""): string =
   buf.add("\n")
   buf
 
+
 # ---------------------------------------------------------------------------
-# Result helpers — generic, inline, no-overhead
+# Result helpers
 # ---------------------------------------------------------------------------
 
 func ok*[T, E](value: T): Result[T, E] {.inline.} =
   Result[T, E](kind: rkOk, value: value)
 
 func ok*[E](_: typedesc[void]; _: typedesc[E]): Result[void, E] {.inline.} =
-  ## Construct `Result[void, E].Ok` — for procs that signal "success
-  ## without a payload, or this error". Use as `ok(void, MyErr)`.
   Result[void, E](kind: rkOk)
 
 func err*[T, E](error: E): Result[T, E] {.inline.} =
@@ -238,46 +290,21 @@ func err*[T, E](error: E): Result[T, E] {.inline.} =
 func isOk*[T, E](r: Result[T, E]): bool {.inline.} = r.kind == rkOk
 func isErr*[T, E](r: Result[T, E]): bool {.inline.} = r.kind == rkErr
 
-func get*[T, E](r: Result[T, E]): T {.inline.} =
-  ## Unwrap. Caller is responsible for checking `isOk` first; misuse is
-  ## a programmer error (FieldDefect from the variant access).
-  r.value
-
-func getErr*[T, E](r: Result[T, E]): E {.inline.} =
-  r.error
-
-# ---------------------------------------------------------------------------
-# Combinators on Result — the applicative-style ergonomics that callers
-# previously had to write inline. `try?` is the workhorse: it turns
-# `if r.isErr: return err[U, E](r.getErr); ... use r.get ...` into one
-# line. `map` / `flatMap` / `mapErr` cover the rest.
-# ---------------------------------------------------------------------------
+func get*[T, E](r: Result[T, E]): T {.inline.} = r.value
+func getErr*[T, E](r: Result[T, E]): E {.inline.} = r.error
 
 func map*[T, U, E](r: Result[T, E], fn: proc(v: T): U {.noSideEffect.}):
     Result[U, E] {.inline.} =
-  ## Apply `fn` to the Ok payload; pass Err through unchanged.
   if r.isErr: err[U, E](r.error)
   else: ok[U, E](fn(r.value))
 
 func mapErr*[T, E, F](r: Result[T, E], fn: proc(e: E): F {.noSideEffect.}):
     Result[T, F] {.inline.} =
-  ## Apply `fn` to the Err payload; pass Ok through unchanged.
   if r.isOk: ok[T, F](r.value)
   else: err[T, F](fn(r.error))
 
 func flatMap*[T, U, E](r: Result[T, E],
                        fn: proc(v: T): Result[U, E] {.noSideEffect.}):
     Result[U, E] {.inline.} =
-  ## Sequence two Result-returning steps; aka `andThen` in some
-  ## ecosystems.
   if r.isErr: err[U, E](r.error)
   else: fn(r.value)
-
-# Note: a `?`-style early-return template (e.g. `let v = tryGet
-# someCall()`) was considered. Nim's template hygiene around `result`-
-# typed inference made the void / non-void cases require two separate
-# templates with different signatures — more complexity than the
-# explicit `if r.isErr: return err(...)` form, which is also more
-# greppable. Keeping the explicit form; `map` / `flatMap` / `mapErr`
-# above cover the chained-pure-functions case where you don't want
-# to early-return.
