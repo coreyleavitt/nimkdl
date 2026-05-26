@@ -1,0 +1,186 @@
+// Realistic dense config that exercises KDL v2 language features in
+// proportions a human-edited service-deployment config actually uses.
+//
+// Coverage:
+//   - all 6 keywords (#true, #false, #null, #inf, #-inf, #nan)
+//   - type annotations on args + props
+//   - mixed args + props on the same node
+//   - multi-line strings + raw strings
+//   - all number bases (decimal, hex, octal, binary)
+//   - inline + block comments + slashdash
+//   - 3-4 levels of children-block nesting
+//   - repeated property keys (later wins per v2 spec)
+//   - multi-script identifiers in node names
+//
+// Modeled after a hypothetical service-mesh deployment config — that
+// domain pushes most language features through naturally.
+
+(version) "1.2.0"
+generated-at "2026-05-26T14:30:00Z"
+
+/*
+  Cluster-level defaults. Inherited by every service unless overridden
+  at the service level. Numbers use mixed bases intentionally —
+  bitmasks in hex, durations in decimal, port ranges in decimal.
+*/
+defaults {
+    timeout-ms (ms) 30000
+    retry-attempts 3
+    retry-backoff-ms 250
+    max-connections 0x100              // hex literal
+    keepalive #true
+    debug-flags 0b1011_0010            // binary literal
+    file-mode 0o755                    // octal literal
+    use-tls #true
+    tls-min-version "1.3"
+    accept-self-signed #false
+    nan-sentinel #nan                  // NaN keyword
+    infinity-marker #inf
+    neg-infinity-marker #-inf
+    placeholder #null
+}
+
+env-vars {
+    HTTPS_PROXY "https://proxy.internal.corp:8443"
+    HTTP_PROXY "https://proxy.internal.corp:8443"
+    NO_PROXY ".internal.corp,.local,127.0.0.1,::1"
+    PYTHONDONTWRITEBYTECODE "1"
+    JAVA_OPTS "-Xmx4g -Xms2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+}
+
+// Service definitions — most config bulk lives here.
+services {
+    api-gateway (deployment) "gateway" {
+        image (oci) "registry.internal.corp/gateway:v2.34.7"
+        replicas 4
+        port (tcp) 8080
+        port (tcp) 9090   // metrics — second port arg, common pattern
+        cpu-request "500m"
+        cpu-limit "2000m"
+        memory-request "512Mi"
+        memory-limit "2Gi"
+
+        env {
+            LOG_LEVEL "info"
+            LOG_FORMAT "json"
+            TRACING_ENABLED #true
+            METRICS_PATH "/metrics"
+            // common pattern: same key set twice (last wins per spec)
+            FEATURE_FLAG_X #false
+            FEATURE_FLAG_X #true
+        }
+
+        health {
+            liveness {
+                path "/healthz"
+                port 8080
+                initial-delay-sec 10
+                period-sec 5
+                timeout-sec 3
+                failure-threshold 5
+            }
+            readiness {
+                path "/readyz"
+                port 8080
+                initial-delay-sec 3
+                period-sec 2
+                timeout-sec 1
+                failure-threshold 2
+            }
+            // slashdash — startup probe disabled, kept for reference
+            /-startup {
+                path "/startup"
+                port 8080
+                period-sec 1
+                failure-threshold 30
+            }
+        }
+
+        rollout {
+            strategy "rolling"
+            max-surge "25%"
+            max-unavailable 0
+            progress-deadline-sec 600
+            auto-rollback #true
+        }
+
+        annotations {
+            "deployment.coreyleavitt.io/owner" "platform-team"
+            "deployment.coreyleavitt.io/oncall" "platform-oncall@coreyleavitt.io"
+            // Raw string for regex with backslashes — no escape processing.
+            log-redact-pattern #"(?i)\bpassword=\S+|secret=\S+|token=\S+"#
+            description """
+                The api-gateway routes external traffic to internal
+                services based on Host header and path prefix.
+                See https://wiki.internal.corp/gateway for routing rules.
+            """
+        }
+    }
+
+    auth-service (deployment) "auth" {
+        image (oci) "registry.internal.corp/auth:v3.1.2"
+        replicas 2
+        port (tcp) 8443
+        cpu-request "250m"
+        memory-request "256Mi"
+
+        env {
+            JWT_ISSUER "https://auth.internal.corp"
+            JWT_AUDIENCE "internal-services"
+            SESSION_TTL-sec 3600
+            REFRESH_TTL-sec 604800
+        }
+
+        depends-on (service) "postgres-primary"
+        depends-on (service) "redis-cache"
+    }
+
+    αlpha-σervice (canary) "alpha" {
+        // multi-script ident in node name (exercises unicode lex path)
+        image (oci) "registry.internal.corp/alpha:0.1.0-rc.4"
+        replicas 1
+        traffic-weight 0.05
+        enabled #false
+    }
+}
+
+// Storage backends — exercises mostly leaf-style nodes.
+storage {
+    postgres-primary {
+        engine "postgresql"
+        version "16.2"
+        replicas 1
+        storage-class "ssd-premium"
+        storage-size "500Gi"
+        backup {
+            enabled #true
+            schedule "0 3 * * *"
+            retention-days 30
+            encryption-key-id (kms) "alias/postgres-backup"
+        }
+    }
+    redis-cache {
+        engine "redis"
+        version "7.2"
+        replicas 3
+        max-memory "8gb"
+        eviction-policy "allkeys-lru"
+    }
+}
+
+// Network policies — mostly small flat nodes.
+policies {
+    policy "allow-internal" {
+        from (cidr) "10.0.0.0/8"
+        to (port-range) "0-65535"
+        protocol "tcp"
+        action "allow"
+    }
+    policy "deny-external-egress" {
+        from (cidr) "0.0.0.0/0"
+        to (cidr) "0.0.0.0/0"
+        protocol "any"
+        action "deny"
+        exceptions (cidr) "10.0.0.0/8" (cidr) "172.16.0.0/12"
+    }
+}
