@@ -37,7 +37,8 @@
 ## possible without escape hatches.
 
 import ./ast
-import ./encode  # hashNodeContent (parser seeds n.parseHash for emPreserve)
+import ./encode  # hashNodeFromChildHashes (parser seeds n.parseHash for emPreserve)
+import ./fnv     # Hash128
 import ./intern
 import ./lexer
 import ./numlit
@@ -478,7 +479,16 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   node.span = initSpan(startSpan.start, lastTokEnd)
   node.parseEntryCount = int32(node.entries.len)
   node.parseChildCount = int32(node.children.len)
-  node.parseHash = hashNodeContent(node, p.doc.interner)
+  # Bottom-up: children's parseHash is already populated by the recursive
+  # nodeRule calls above, so we can assemble this node's hash in O(1) by
+  # combining stored child hashes — instead of re-hashing the whole
+  # subtree via `hashNodeContent`, which would make parsing O(N·d).
+  # The two formulations are algebraically equivalent on unmutated trees;
+  # `tests/test_hash_complexity.nim` pins both the linearity and the
+  # equivalence.
+  var childHashes = newSeq[Hash128](node.children.len)
+  for i, c in node.children: childHashes[i] = c.parseHash
+  node.parseHash = hashNodeFromChildHashes(node, p.doc.interner, childHashes)
   ok[KdlNode, ParseError](node)
 
 proc skipToBlockBoundary(p: var Parser) {.noSideEffect.} =

@@ -111,6 +111,10 @@ proc main() =
     ("Cargo.kdl (small)",       fixtures / "Cargo.kdl",   10_000),
     ("ci.kdl (medium)",         fixtures / "ci.kdl",       5_000),
     ("website.kdl (medium)",    fixtures / "website.kdl",  5_000),
+    # Multi-script identifier stress (Greek/Cyrillic/CJK/RTL/combining
+    # marks/emoji ZWJ sequences). Exercises the UTF-8 fast-path in the
+    # bare-ident lexer; ours-only — greenm01 fails to parse these.
+    ("unicode-heavy.kdl",       fixtures / "unicode-heavy.kdl", 5_000),
     ("all_node_fields.kdl",     conf / "all_node_fields.kdl", 20_000),
     ("all_escapes.kdl",         conf / "all_escapes.kdl",     20_000),
   ]

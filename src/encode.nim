@@ -306,36 +306,30 @@ func hashEntry*(e: KdlEntry, interner: Interner): Hash128 =
     fnv128Update(result, 0x3d'u8)             # '=' — name/value separator
     feedValue(result, e.propValue, interner)
 
+func hashNodeFromChildHashes*(n: KdlNode, interner: Interner,
+                              childHashes: openArray[Hash128]): Hash128
+
 func hashNodeContent*(n: KdlNode, interner: Interner): Hash128 =
-  ## Canonical-content fingerprint of `n` (recursively over children).
-  ## Same function called at parse time (to seed `n.parseHash`) and at
-  ## encode time (to compare against `n.parseHash`). Equal hashes ⇒
-  ## subtree unmodified ⇒ emit source bytes in `emPreserve`.
-  when defined(kdlHashStats):
-    {.cast(noSideEffect).}:
-      kdlHashCallCount.inc
-  result = fnv128Init()
-  if n.typeAnnotation != InvalidInterned:
-    fnv128Update(result, 0x02'u8)
-    interner.feedHash(n.typeAnnotation, result)
-    fnv128Update(result, 0x03'u8)
-  interner.feedHash(n.name, result)
-  for e in n.entries:
-    # `\x1f` (US — unit separator) framing keeps adjacent entries from
-    # collision-aliasing (e.g. `a=1 b` vs `a=1b` produce different bytes).
-    fnv128Update(result, 0x1f'u8)
-    case e.kind
-    of keArgument:
-      fnv128Update(result, 0x00'u8)
-      feedValue(result, e.argValue, interner)
-    of keProperty:
-      fnv128Update(result, 0x01'u8)
-      interner.feedHash(e.propName, result)
-      fnv128Update(result, 0x3d'u8)
-      feedValue(result, e.propValue, interner)
-  for c in n.children:
-    fnv128Update(result, 0x1e'u8)             # RS — record separator
-    fnv128Mix(result, hashNodeContent(c, interner))
+  ## **Ground-truth** fingerprint of `n` — recursively recomputes every
+  ## descendant's hash from current AST state, IGNORING any stored
+  ## `parseHash`. Cost is O(N·d) over the subtree.
+  ##
+  ## Distinct contract from `hashNodeFromChildHashes`, which TRUSTS
+  ## children's stored `parseHash` and is O(1) per node (the bottom-up
+  ## form used by the parser and by the preserving encoder).
+  ##
+  ## Only intended caller is the `emPreserve` debug guard at
+  ## `encode.nim:522` — that's where we explicitly cannot trust stored
+  ## hashes because the whole point is to detect raw-field mutations
+  ## that bypassed `markMutated`.
+  ##
+  ## On unmutated trees the two forms produce identical hashes by
+  ## construction (this func IS `hashNodeFromChildHashes` recursively
+  ## fed with ground-truth child hashes). Conformance byte-equivalence
+  ## (243/338 fixtures) pins that invariant end-to-end.
+  var childHashes = newSeq[Hash128](n.children.len)
+  for i, c in n.children: childHashes[i] = hashNodeContent(c, interner)
+  hashNodeFromChildHashes(n, interner, childHashes)
 
 func emitNamePart(n: KdlNode, interner: Interner): string =
   ## The "head" of a node — type annotation + name + entries — without
@@ -371,8 +365,8 @@ func feedEntryInto(h: var Hash128, e: KdlEntry, interner: Interner) =
     fnv128Update(h, 0x3d'u8)
     feedValue(h, e.propValue, interner)
 
-func hashNodeFromChildHashes(n: KdlNode, interner: Interner,
-                             childHashes: openArray[Hash128]): Hash128 =
+func hashNodeFromChildHashes*(n: KdlNode, interner: Interner,
+                              childHashes: openArray[Hash128]): Hash128 =
   ## Bottom-up sibling of `hashNodeContent`. Computes `n`'s fingerprint
   ## using already-computed `childHashes` instead of recursing into the
   ## children subtree. Lets the preserving encoder hash each node

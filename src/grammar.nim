@@ -58,7 +58,8 @@
 import std/[strutils, tables]
 
 import ./ast
-import ./encode  # hashNodeContent
+import ./encode  # hashNodeFromChildHashes
+import ./fnv     # Hash128
 import ./intern
 import ./lexer
 import ./numlit
@@ -781,7 +782,11 @@ proc buildNode(node: ParseNode, doc: var KdlDoc, stream: TokenStream,
   # in the encoder.
   result.parseEntryCount = int32(result.entries.len)
   result.parseChildCount = int32(result.children.len)
-  result.parseHash = hashNodeContent(result, doc.interner)
+  # Bottom-up — children's parseHash is already populated by recursive
+  # buildNode calls above. See parser.nim:481 for the equivalence rationale.
+  var childHashes = newSeq[Hash128](result.children.len)
+  for i, c in result.children: childHashes[i] = c.parseHash
+  result.parseHash = hashNodeFromChildHashes(result, doc.interner, childHashes)
 
 proc buildDoc(root: ParseNode, doc: var KdlDoc, stream: TokenStream,
               errs: var seq[ParseError]) =
