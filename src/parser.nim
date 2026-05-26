@@ -487,7 +487,12 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   # `tests/test_hash_complexity.nim` pins both the linearity and the
   # equivalence.
   var childHashes = newSeq[Hash128](node.children.len)
-  for i, c in node.children: childHashes[i] = c.parseHash
+  # Index directly — `for i, c in node.children` binds `c` by value-copy,
+  # which deep-copies each KdlNode's children subtree. Direct indexing
+  # reads via `lent` so we just touch the parseHash field. Caught by
+  # `proc =copy(KdlNode) {.error.}` probe at ast.nim under -d:probeKdlNodeCopy.
+  for i in 0 ..< node.children.len:
+    childHashes[i] = node.children[i].parseHash
   node.parseHash = hashNodeFromChildHashes(node, p.doc.interner, childHashes)
   ok[KdlNode, ParseError](node)
 
@@ -637,10 +642,10 @@ proc parse*(source: string, sourcePath = "<input>"):
   # quoted property keys) into its local copy of the doc's interner.
   # Reach into p.doc rather than the original `doc` so those interns
   # are preserved.
-  p.doc.nodes = dRes.get
+  p.doc.nodes = dRes.take    # sink-move; non-sink .get deep-copies the tree
   p.doc.sourceText = source
   p.doc.parseTopLevelCount = int32(p.doc.nodes.len)
-  ok[KdlDoc, ParseError](p.doc)
+  ok[KdlDoc, ParseError](move p.doc)   # explicit move out of p
 
 proc parseAll*(source: string, sourcePath = "<input>"):
     tuple[doc: KdlDoc, errors: seq[ParseError]] {.noSideEffect.} =

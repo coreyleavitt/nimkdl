@@ -150,6 +150,9 @@ type
     interner*: Interner
     nodes*: seq[KdlNode]
 
+when defined(probeKdlNodeCopy):
+  proc `=copy`*(dst: var KdlNode, src: KdlNode) {.error: "KdlNode copy detected".}
+
 # ---------------------------------------------------------------------------
 # Constructors
 # ---------------------------------------------------------------------------
