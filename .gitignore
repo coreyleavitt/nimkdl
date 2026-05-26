@@ -5,3 +5,4 @@ tests/test_*
 
 # Conformance failure log (regenerated)
 tests/.last-conformance-failures.log
+benchmarks/bench

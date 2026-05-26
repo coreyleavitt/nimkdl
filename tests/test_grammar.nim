@@ -215,8 +215,9 @@ suite "Reference interpreter: defensive paths":
     var bad = Grammar(rules: initTable[string, GrammarRule](), startRule: "root")
     bad.rules["root"] = seqOf(refTo("missing"), eof())
     var doc = newDoc("<test>")
-    let tokens = lex("anything", doc.interner)
-    var s = InterpState(tokens: tokens, pos: 0, grammar: bad, haveError: false)
+    let stream = lex("anything", doc.interner)
+    var s = InterpState(tokens: stream.tokens, stream: stream,
+                        pos: 0, grammar: bad, haveError: false)
     let res = interpRule(s, "root", 0)
     check res.isErr
     if res.isErr:
