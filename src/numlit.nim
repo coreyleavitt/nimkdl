@@ -55,18 +55,19 @@ func decodeIntFromToken*(n: NumberPayload, span: Span): Result[int64, ParseError
   ##
   ## Returns `peLexInvalidNumber` on any digit-character mismatch or
   ## true overflow.
-  var s = n.text
-  if s.len > 0 and (s[0] == '+' or s[0] == '-'):
-    s = s[1 .. ^1]
-  if n.base != nbDecimal and s.len >= 2:
-    s = s[2 .. ^1]
+  # Index-based iteration to avoid the 3 string allocs the slice form
+  # would do (see decodeIntPromoting for the same fix).
+  var start = 0
+  if n.text.len > 0 and (n.text[0] == '+' or n.text[0] == '-'): start = 1
+  if n.base != nbDecimal and n.text.len >= start + 2: start += 2
   let radix = radixOf(n.base)
   let radixU = uint64(radix)
   let limit =
     if n.negative: Int64LowMagU
     else: Int64HighU
   var acc: uint64 = 0
-  for c in s:
+  for i in start ..< n.text.len:
+    let c = n.text[i]
     if c == '_': continue
     let d =
       case c
@@ -142,15 +143,17 @@ func decodeIntPromoting*(n: NumberPayload, span: Span): Result[IntDecode, ParseE
   ## cased like `decodeIntFromToken`); otherwise produces a 128-bit
   ## magnitude in (bigHi, bigLo) with sign in `negative`. 128-bit
   ## overflow still errors with `peLexInvalidNumber`.
-  var s = n.text
-  if s.len > 0 and (s[0] == '+' or s[0] == '-'):
-    s = s[1 .. ^1]
-  if n.base != nbDecimal and s.len >= 2:
-    s = s[2 .. ^1]
+  # Iterate by index over n.text — `var s = n.text; s = s[1..^1]` triggers
+  # 3 string allocations per int decode (caught by perf record: 1.2% of
+  # CPU on deep workloads).
+  var start = 0
+  if n.text.len > 0 and (n.text[0] == '+' or n.text[0] == '-'): start = 1
+  if n.base != nbDecimal and n.text.len >= start + 2: start += 2
   let radix = uint64(radixOf(n.base))
   var hi: uint64 = 0
   var lo: uint64 = 0
-  for c in s:
+  for i in start ..< n.text.len:
+    let c = n.text[i]
     if c == '_': continue
     let d =
       case c
