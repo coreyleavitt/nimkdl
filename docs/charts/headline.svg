@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 280" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+  <style>
+    .axis { fill: #94a3b8; font-size: 13px; }
+    .label { fill: #cbd5e1; font-size: 14px; font-weight: 500; }
+    .value { fill: #f1f5f9; font-size: 13px; font-family: ui-monospace, monospace; }
+    .title { fill: #f1f5f9; font-size: 16px; font-weight: 600; }
+    .subtitle { fill: #94a3b8; font-size: 12px; }
+    .bar-ours { fill: #14b8a6; }
+    .bar-other { fill: #475569; }
+    .grid { stroke: #1e293b; stroke-width: 1; }
+  </style>
+  <rect width="760" height="280" fill="#0b1220"/>
+
+  <text x="40" y="32" class="title">realistic-config.kdl (5.6KB)</text>
+  <text x="40" y="50" class="subtitle">parses per second, same container, release+LTO</text>
+
+  <line x1="160" y1="80"  x2="160" y2="240" class="grid"/>
+  <line x1="280" y1="80"  x2="280" y2="240" class="grid"/>
+  <line x1="400" y1="80"  x2="400" y2="240" class="grid"/>
+  <line x1="520" y1="80"  x2="520" y2="240" class="grid"/>
+  <line x1="640" y1="80"  x2="640" y2="240" class="grid"/>
+  <line x1="160" y1="240" x2="700" y2="240" class="grid"/>
+
+  <text x="160" y="262" class="axis" text-anchor="middle">0</text>
+  <text x="280" y="262" class="axis" text-anchor="middle">5K</text>
+  <text x="400" y="262" class="axis" text-anchor="middle">10K</text>
+  <text x="520" y="262" class="axis" text-anchor="middle">15K</text>
+  <text x="640" y="262" class="axis" text-anchor="middle">20K</text>
+
+  <text x="150" y="110" class="label" text-anchor="end">nimkdl</text>
+  <rect x="160" y="92"  width="464" height="28" class="bar-ours"/>
+  <text x="632" y="111" class="value">19,300</text>
+
+  <text x="150" y="160" class="label" text-anchor="end">greenm01</text>
+  <rect x="160" y="142" width="30" height="28" class="bar-other"/>
+  <text x="198" y="161" class="value">1,250  (15.4x slower)</text>
+
+  <text x="150" y="210" class="label" text-anchor="end">kdl-rs</text>
+  <rect x="160" y="192" width="28" height="28" class="bar-other"/>
+  <text x="198" y="211" class="value">1,186  (16.3x slower)</text>
+</svg>

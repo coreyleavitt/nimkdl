@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 380" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+  <style>
+    .axis { fill: #94a3b8; font-size: 11px; }
+    .step { fill: #cbd5e1; font-size: 11px; }
+    .value { fill: #f1f5f9; font-size: 11px; font-family: ui-monospace, monospace; }
+    .title { fill: #f1f5f9; font-size: 16px; font-weight: 600; }
+    .subtitle { fill: #94a3b8; font-size: 12px; }
+    .bar { fill: #14b8a6; }
+    .bar-start { fill: #64748b; }
+    .grid { stroke: #1e293b; stroke-width: 1; }
+  </style>
+  <rect width="800" height="380" fill="#0b1220"/>
+
+  <text x="40" y="32" class="title">the perf hunt, step by step</text>
+  <text x="40" y="50" class="subtitle">real-world throughput after each landed fix (MB/s)</text>
+
+  <line x1="320" y1="80"  x2="320" y2="320" class="grid"/>
+  <line x1="440" y1="80"  x2="440" y2="320" class="grid"/>
+  <line x1="560" y1="80"  x2="560" y2="320" class="grid"/>
+  <line x1="680" y1="80"  x2="680" y2="320" class="grid"/>
+  <line x1="320" y1="320" x2="760" y2="320" class="grid"/>
+
+  <text x="320" y="342" class="axis" text-anchor="middle">0</text>
+  <text x="440" y="342" class="axis" text-anchor="middle">25</text>
+  <text x="560" y="342" class="axis" text-anchor="middle">50</text>
+  <text x="680" y="342" class="axis" text-anchor="middle">75</text>
+  <text x="760" y="342" class="axis" text-anchor="middle">100</text>
+
+  <text x="310" y="100" class="step" text-anchor="end">starting point</text>
+  <rect x="320" y="86" width="61" height="14" class="bar-start"/>
+  <text x="385" y="98" class="value">12.7</text>
+
+  <text x="310" y="130" class="step" text-anchor="end">hash recursion fix</text>
+  <rect x="320" y="116" width="182" height="14" class="bar"/>
+  <text x="506" y="128" class="value">38</text>
+
+  <text x="310" y="160" class="step" text-anchor="end">sink-Result + for-loop fix</text>
+  <rect x="320" y="146" width="237" height="14" class="bar"/>
+  <text x="561" y="158" class="value">49.4</text>
+
+  <text x="310" y="190" class="step" text-anchor="end">opt-in parseHash</text>
+  <rect x="320" y="176" width="339" height="14" class="bar"/>
+  <text x="663" y="188" class="value">70.7</text>
+
+  <text x="310" y="220" class="step" text-anchor="end">numlit string allocs</text>
+  <rect x="320" y="206" width="351" height="14" class="bar"/>
+  <text x="675" y="218" class="value">73.1</text>
+
+  <text x="310" y="250" class="step" text-anchor="end">openArray-based intern</text>
+  <rect x="320" y="236" width="401" height="14" class="bar"/>
+  <text x="725" y="248" class="value">83.5</text>
+
+  <text x="310" y="280" class="step" text-anchor="end">SWAR bare-ident</text>
+  <rect x="320" y="266" width="485" height="14" class="bar"/>
+  <text x="752" y="278" class="value" fill="#0b1220" font-weight="600">101</text>
+
+  <text x="320" y="372" class="axis" text-anchor="start">MB/s on real-world configs (higher is better)</text>
+</svg>
