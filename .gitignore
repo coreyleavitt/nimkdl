@@ -8,3 +8,5 @@ tests/.last-conformance-failures.log
 benchmarks/bench
 benchmarks/profile_deep
 benchmarks/perf_deep_chain
+src/reserved
+src/spans
