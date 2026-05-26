@@ -504,6 +504,15 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
   ## line + indented; `emCompact` is single-line with `;` separators.
   case mode
   of emPreserve:
+    # emPreserve requires parseHash fields populated at parse time.
+    # The default `parse(src)` skips that work (~18% perf win) so
+    # consumers opting into preservation must parse with the flag.
+    # Fail loud rather than silently emitting reformatted output.
+    if doc.sourceText.len > 0 and not doc.preserveHashes:
+      raise newException(AssertionDefect,
+        "encode(doc, emPreserve) requires parse(src, preserveHashes = true). " &
+        "The default parse() skips parseHash computation for ~18% perf — " &
+        "opt in if you need byte-lossless round-trip.")
     if doc.sourceText.len > 0 and not doc.mutated:
       when not defined(release):
         # Catch raw-field mutation that bypassed the builder API (which

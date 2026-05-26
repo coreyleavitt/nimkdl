@@ -444,7 +444,8 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
       # KDL v2: when a property key repeats, the later assignment wins.
       # Replace any earlier entry with the same key before appending.
       var newEntry = eRes.get
-      newEntry.parseHash = hashEntry(newEntry, p.doc.interner)
+      if p.doc.preserveHashes:
+        newEntry.parseHash = hashEntry(newEntry, p.doc.interner)
       if newEntry.kind == keProperty:
         var i = 0
         while i < node.entries.len:
@@ -486,14 +487,15 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   # The two formulations are algebraically equivalent on unmutated trees;
   # `tests/test_hash_complexity.nim` pins both the linearity and the
   # equivalence.
-  var childHashes = newSeq[Hash128](node.children.len)
-  # Index directly — `for i, c in node.children` binds `c` by value-copy,
-  # which deep-copies each KdlNode's children subtree. Direct indexing
-  # reads via `lent` so we just touch the parseHash field. Caught by
-  # `proc =copy(KdlNode) {.error.}` probe at ast.nim under -d:probeKdlNodeCopy.
-  for i in 0 ..< node.children.len:
-    childHashes[i] = node.children[i].parseHash
-  node.parseHash = hashNodeFromChildHashes(node, p.doc.interner, childHashes)
+  if p.doc.preserveHashes:
+    var childHashes = newSeq[Hash128](node.children.len)
+    # Index directly — `for i, c in node.children` binds `c` by value-copy,
+    # which deep-copies each KdlNode's children subtree. Direct indexing
+    # reads via `lent` so we just touch the parseHash field. Caught by
+    # `proc =copy(KdlNode) {.error.}` probe at ast.nim under -d:probeKdlNodeCopy.
+    for i in 0 ..< node.children.len:
+      childHashes[i] = node.children[i].parseHash
+    node.parseHash = hashNodeFromChildHashes(node, p.doc.interner, childHashes)
   ok[KdlNode, ParseError](node)
 
 proc skipToBlockBoundary(p: var Parser) {.noSideEffect.} =
@@ -623,11 +625,21 @@ proc parseDocumentAccumulating(p: var Parser, errors: var seq[ParseError]):
 # Public entry point
 # ---------------------------------------------------------------------------
 
-proc parse*(source: string, sourcePath = "<input>"):
+proc parse*(source: string, sourcePath = "<input>",
+            preserveHashes: bool = false):
     Result[KdlDoc, ParseError] {.noSideEffect.} =
   ## Parse `source` into a `KdlDoc`. Returns the first error encountered
   ## (lexer or parser). The doc owns its interner.
+  ##
+  ## `preserveHashes` (default false) — when true, the parser populates
+  ## per-node and per-entry parseHash fields needed by
+  ## `encode(doc, emPreserve)` for byte-lossless round-trip. Opt-in
+  ## because hashing is ~18% of parse cost; the common case (typed
+  ## decode via `embed[T]`, validation-and-discard) doesn't need it.
+  ## `encode(doc, emPreserve)` fails loud if called on a doc that
+  ## wasn't parsed with this flag set.
   var doc = newDoc(sourcePath)
+  doc.preserveHashes = preserveHashes
   let tokens = lex(source, doc.interner)
   # Early-exit on any inline lex errors so callers get the lex diagnostic,
   # not a downstream parser-confusion diagnostic.
@@ -647,7 +659,8 @@ proc parse*(source: string, sourcePath = "<input>"):
   p.doc.parseTopLevelCount = int32(p.doc.nodes.len)
   ok[KdlDoc, ParseError](move p.doc)   # explicit move out of p
 
-proc parseAll*(source: string, sourcePath = "<input>"):
+proc parseAll*(source: string, sourcePath = "<input>",
+               preserveHashes: bool = false):
     tuple[doc: KdlDoc, errors: seq[ParseError]] {.noSideEffect.} =
   ## Multi-error variant of `parse`. Collects every lex- and node-level
   ## error into `errors` while continuing to parse the rest of the
@@ -663,6 +676,7 @@ proc parseAll*(source: string, sourcePath = "<input>"):
   ## `parse()` continues to return only the first error and matches
   ## `parseAll(source).errors[0]` when failures exist.
   result.doc = newDoc(sourcePath)
+  result.doc.preserveHashes = preserveHashes
   let tokens = lex(source, result.doc.interner)
   for t in tokens.tokens:
     if t.kind == tkError:

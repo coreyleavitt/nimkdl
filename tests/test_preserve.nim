@@ -16,7 +16,7 @@ import ../src/spans
 suite "trivia preservation — phase A (sourceText capture)":
   test "parse populates doc.sourceText with the original bytes":
     let src = "a 1\nb \"hello\"\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       check r.get.sourceText == src
@@ -28,7 +28,7 @@ suite "trivia preservation — phase A (sourceText capture)":
 suite "trivia preservation — phase B (emPreserve encoder)":
   test "parsed doc encodes byte-for-byte in emPreserve":
     let src = "rule \"compaction\" {\n    enabled #true\n}\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       check encode(r.get, emPreserve) == src
@@ -44,28 +44,28 @@ suite "trivia preservation — phase B (emPreserve encoder)":
 
   test "preserves comments and exact whitespace":
     let src = "// leading comment\na 1   2  // trailing\n/* block */\nb"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       check encode(r.get, emPreserve) == src
 
   test "preserves original number bases":
     let src = "n 0xff 0b1010 0o777"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       check encode(r.get, emPreserve) == src
 
   test "preserves string escape forms":
     let src = "n \"foo\\u{0a}bar\""
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       check encode(r.get, emPreserve) == src
 
   test "preserves raw string `#` count":
     let src = "n ##\"hello \"#\"##"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       check encode(r.get, emPreserve) == src
@@ -73,7 +73,7 @@ suite "trivia preservation — phase B (emPreserve encoder)":
 suite "trivia preservation — phase B (mutation falls back to canonical)":
   test "mutated parsed doc emits canonical, not original":
     let src = "n a=1 b=2"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -85,7 +85,7 @@ suite "trivia preservation — phase B (mutation falls back to canonical)":
 suite "trivia preservation — per-node freshness (FNV-1a 128)":
   test "editing one top-level node preserves the others byte-for-byte":
     let src = "// header comment\nrule \"compaction\" enabled=#true\nrule \"permission-deny\" default=\"ask\"\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -99,7 +99,7 @@ suite "trivia preservation — per-node freshness (FNV-1a 128)":
 
   test "editing deep child preserves sibling subtree":
     let src = "outer {\n    rule \"a\" {\n        threshold 0.7\n        enabled #true\n    }\n    other-rule {\n        keep-me #true\n    }\n}\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -116,7 +116,7 @@ suite "trivia preservation — per-node freshness (FNV-1a 128)":
 
   test "adding a new top-level node leaves existing nodes verbatim":
     let src = "rule \"a\" enabled=#true\nrule \"b\" enabled=#false\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -133,7 +133,7 @@ suite "trivia preservation — per-node freshness (FNV-1a 128)":
 
   test "hash mismatch correctly identifies edited subtree":
     let src = "a { b 1 }\nc { d 2 }"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -150,7 +150,7 @@ suite "trivia preservation — surgical splice (B1: in-place entry edit)":
     # Edit just one entry; the rest must survive byte-for-byte
     # including any non-canonical spacing.
     let src = "n  a=1   b=2     c=3\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -167,7 +167,7 @@ suite "trivia preservation — surgical splice (B1: in-place entry edit)":
     # source bytes (between the last entry's end and the node
     # terminator). Surgical splice must not touch them.
     let src = "n a=1 b=2 // important context here\nother"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -182,7 +182,7 @@ suite "trivia preservation — surgical splice (B1: in-place entry edit)":
     # and the rule's source-bytes around the edited entry must
     # survive verbatim.
     let src = "// top-level header\nrule \"compaction\" {\n  // inner note\n  enabled #true\n  threshold 0.7\n}\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -199,7 +199,7 @@ suite "trivia preservation — surgical splice (B2: shape-change fallback)":
     # New entry → shape change → that node goes canonical. Siblings
     # of THAT NODE (other top-level nodes) preserve verbatim.
     let src = "// header\nrule \"a\" enabled=#true\nrule \"b\" enabled=#false\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -213,7 +213,7 @@ suite "trivia preservation — surgical splice (B2: shape-change fallback)":
 
   test "removing an entry falls back to canonical for that node only":
     let src = "// keep this comment\nrule a=1 b=2 c=3\nother thing\n"
-    let r = parse(src)
+    let r = parse(src, preserveHashes = true)
     check r.isOk
     if r.isOk:
       var doc = r.get
@@ -240,7 +240,7 @@ when defined(kdlHashStats):
         rule "b" key="v"
         rule "c"
       """
-      let r = parse(src)
+      let r = parse(src, preserveHashes = true)
       check r.isOk
       var doc = r.get
       # Force a mutation so the encoder takes the per-node freshness
@@ -263,7 +263,7 @@ when not defined(release):
   # rather than silently producing stale source bytes.
   suite "trivia preservation — raw-field-mutation detection (debug)":
     test "raw mutation that doesn't call markMutated panics in debug":
-      let r = parse("rule \"original\"")
+      let r = parse("rule \"original\"", preserveHashes = true)
       check r.isOk
       var doc = r.get
       # Bypass the builder API: mutate a value field directly.
@@ -275,7 +275,7 @@ when not defined(release):
         discard encode(doc, emPreserve)
 
     test "clean parsed doc still fast-paths without panic":
-      let r = parse("rule \"a\"\nrule \"b\"")
+      let r = parse("rule \"a\"\nrule \"b\"", preserveHashes = true)
       check r.isOk
       let text = encode(r.get, emPreserve)
       check text.contains("rule")
@@ -285,7 +285,7 @@ when not defined(release):
     test "explicit markMutated after raw mutation skips the assertion":
       # Strings that look like bare idents canonical-emit unquoted, so
       # we use one that requires quoting to keep the round-trip visible.
-      let r = parse("rule \"x with space\"")
+      let r = parse("rule \"x with space\"", preserveHashes = true)
       check r.isOk
       var doc = r.get
       doc.nodes[0].entries[0].argValue.strVal = "y with space"

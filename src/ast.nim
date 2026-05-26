@@ -140,6 +140,13 @@ type
     sourcePath*: string
     sourceText*: string
     mutated*: bool
+    preserveHashes*: bool
+      ## Whether `parseHash` fields on every entry + node were populated
+      ## at parse time. Required by `encode(doc, emPreserve)` to detect
+      ## which subtrees are unmodified vs mutated. Default `false` —
+      ## opt in by passing `parse(src, preserveHashes = true)`. Skipping
+      ## the FNV-128 work is ~18% faster for the common case (typed
+      ## decode, validation-and-discard, codegen) that never preserves.
     parseTopLevelCount*: int32
       ## Count of top-level nodes at parse time. The encoder's doc-level
       ## surgical-splice path uses `nodes.len == parseTopLevelCount` to
