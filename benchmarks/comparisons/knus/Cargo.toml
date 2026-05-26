@@ -1,0 +1,10 @@
+[package]
+name = "knus-bench"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+knus = "3"
+miette = "5"
+[profile.release]
+lto = true
+codegen-units = 1

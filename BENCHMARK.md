@@ -112,34 +112,24 @@ These are pathological shapes. Each corresponds to a real bug we've fixed and st
 
 ## How to reproduce
 
+All four bench harnesses (nimkdl, ckdl, knus, kdl-rs) are vendored
+into this repo at `benchmarks/comparisons/`. One script runs them
+all back-to-back in matched containers.
+
 ```bash
-# nimkdl (this repo)
-podman run --rm -v "$PWD:/work:Z" -w /work docker.io/nimlang/nim:2.2.0 \
-  nim c -r -d:release -p:src benchmarks/bench.nim
-
-# ckdl comparison (clone, build, write bench.c)
-git clone https://github.com/tjol/ckdl /tmp/ckdl-bench/ckdl
-cd /tmp/ckdl-bench/ckdl && cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_KDL_SHARED_LIBRARY=OFF -DBUILD_KDLPP=OFF \
-  -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF && cmake --build build
-# bench.c uses kdl_create_string_parser + kdl_parser_next_event loop
-gcc -O3 -DNDEBUG -I ckdl/include -o bench bench.c \
-    ckdl/build/libkdl.a -lm
-
-# kdl-rs comparison
-cargo new --bin kdlrs-bench
-# Cargo.toml: kdl = "6", [profile.release] lto = true, codegen-units = 1
-# main.rs uses kdl::KdlDocument::parse_v2
-cargo run --release
-
-# knus comparison (needs Rust >= 1.85 for edition2024)
-cargo new --bin knus-bench
-# Cargo.toml: knus = "3", miette = "5"
-# main.rs uses knus::parse::<Vec<GenericNode>>
-cargo run --release
+benchmarks/comparisons/run.sh           # all four
+benchmarks/comparisons/run.sh nimkdl    # one specific
+benchmarks/comparisons/run.sh ckdl knus # multiple
 ```
 
-Run all four back-to-back in the same set of containers to eliminate host variance.
+Requires `podman` (or set `CONTAINER_RUNTIME=docker`).
+
+See [benchmarks/comparisons/README.md](benchmarks/comparisons/README.md)
+for per-harness details, fixture provenance, and notes on each library's
+idiomatic API. If you find an issue with how we're calling one of the
+other libraries, please open a PR. The "this benchmark is dishonest"
+critique is the most damaging one, and we'd rather correct it than
+ship inflated numbers.
 
 ## Regression protection
 

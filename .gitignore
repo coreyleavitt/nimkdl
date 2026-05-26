@@ -8,5 +8,16 @@ tests/.last-conformance-failures.log
 benchmarks/bench
 benchmarks/profile_deep
 benchmarks/perf_deep_chain
+benchmarks/typed_decode
 src/reserved
 src/spans
+
+# Comparison benchmark build artifacts
+benchmarks/comparisons/ckdl/ckdl/
+benchmarks/comparisons/ckdl/bench
+benchmarks/comparisons/knus/target/
+benchmarks/comparisons/knus/Cargo.lock
+benchmarks/comparisons/knus/src/
+benchmarks/comparisons/kdl-rs/target/
+benchmarks/comparisons/kdl-rs/Cargo.lock
+benchmarks/comparisons/kdl-rs/src/
