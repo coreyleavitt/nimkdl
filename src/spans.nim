@@ -278,13 +278,17 @@ func formatError*(err: ParseError, source: string, filename = ""): string =
 # Result helpers
 # ---------------------------------------------------------------------------
 
-func ok*[T, E](value: T): Result[T, E] {.inline.} =
+proc ok*[T, E](value: sink T): Result[T, E] {.inline.} =
+  ## Sink parameter — the producer is at last-use of `value` here (it's
+  ## almost always a freshly-built AST node) so we move it in. Without
+  ## `sink`, every `ok(node)` deep-copied a KdlNode + its children
+  ## subtree. Pair with `take` on the consumer side for end-to-end move.
   Result[T, E](kind: rkOk, value: value)
 
 func ok*[E](_: typedesc[void]; _: typedesc[E]): Result[void, E] {.inline.} =
   Result[void, E](kind: rkOk)
 
-func err*[T, E](error: E): Result[T, E] {.inline.} =
+proc err*[T, E](error: sink E): Result[T, E] {.inline.} =
   Result[T, E](kind: rkErr, error: error)
 
 func isOk*[T, E](r: Result[T, E]): bool {.inline.} = r.kind == rkOk
@@ -292,6 +296,16 @@ func isErr*[T, E](r: Result[T, E]): bool {.inline.} = r.kind == rkErr
 
 func get*[T, E](r: Result[T, E]): T {.inline.} = r.value
 func getErr*[T, E](r: Result[T, E]): E {.inline.} = r.error
+
+# Sink-explicit unwrap — caller asserts last-use of `r` so we move the
+# payload out instead of copying. The discriminant on `case object`
+# blocks ORC's automatic move-elision for `r.value`, so without this
+# the parser's `nodes.add(nRes.get)` deep-copied the entire children
+# subtree at every depth level — Σ N = O(N²) on a deep chain. Caught
+# by perf record + flamegraph showing `eqcopy_(seq<KdlNode>)` at 19%
+# of CPU on a deep-chain workload.
+proc take*[T, E](r: sink Result[T, E]): T {.inline.} = move r.value
+proc takeErr*[T, E](r: sink Result[T, E]): E {.inline.} = move r.error
 
 func map*[T, U, E](r: Result[T, E], fn: proc(v: T): U {.noSideEffect.}):
     Result[U, E] {.inline.} =

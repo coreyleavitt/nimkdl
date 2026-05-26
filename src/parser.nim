@@ -409,7 +409,7 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
         if realChildrenSeen:
           return err[KdlNode, ParseError](initError(peParseUnexpected,
             p.peek.span, "a node may have at most one real children block"))
-        node.children = cRes.get
+        node.children = cRes.take    # sink-move, avoids deep-copy of subtree
         realChildrenSeen = true
       continue
     # An entry. Spec disallows entries after any children block has been
@@ -535,7 +535,7 @@ proc parseChildren(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffe
         continue
       return err[seq[KdlNode], ParseError](nRes.getErr)
     if not skipNode:
-      nodes.add(nRes.get)
+      nodes.add(nRes.take)   # sink-move, see spans.nim::take docs
     p.skipNewlines()
   if not p.check(tkRBrace):
     return err[seq[KdlNode], ParseError](initError(peParseExpected,
@@ -572,7 +572,7 @@ proc parseDocument(p: var Parser): Result[seq[KdlNode], ParseError] {.noSideEffe
     let nRes = p.parseNode()
     if nRes.isErr: return err[seq[KdlNode], ParseError](nRes.getErr)
     if not skipNode:
-      nodes.add(nRes.get)
+      nodes.add(nRes.take)   # sink-move, see spans.nim::take docs
     p.skipNewlines()
   ok[seq[KdlNode], ParseError](nodes)
 
