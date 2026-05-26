@@ -6,17 +6,17 @@
     .value { fill: #f1f5f9; font-size: 11px; font-family: ui-monospace, monospace; }
     .title { fill: #f1f5f9; font-size: 16px; font-weight: 600; }
     .subtitle { fill: #94a3b8; font-size: 12px; }
-    .bar-ours { fill: #14b8a6; }
-    .bar-ckdl { fill: #64748b; }
-    .bar-knus { fill: #475569; }
-    .bar-rs { fill: #334155; }
+    .bar-ours  { fill: #14b8a6; }
+    .bar-ckdl  { fill: #f59e0b; }
+    .bar-knus  { fill: #a78bfa; }
+    .bar-rs    { fill: #64748b; }
     .grid { stroke: #1e293b; stroke-width: 1; }
     .legend { font-size: 12px; }
   </style>
   <rect width="820" height="540" fill="#0b1220"/>
 
-  <text x="40" y="32" class="title">per-fixture comparison</text>
-  <text x="40" y="50" class="subtitle">throughput as a percentage of nimkdl (always 100%)</text>
+  <text x="40" y="32" class="title">parse throughput, all fixtures, all parsers</text>
+  <text x="40" y="50" class="subtitle">bars normalized to nimkdl on each row (always 100%)</text>
 
   <rect x="380" y="20" width="14" height="14" class="bar-ours"/>
   <text x="398" y="32" class="legend" fill="#cbd5e1">nimkdl</text>
@@ -39,41 +39,41 @@
   <text x="520" y="502" class="axis" text-anchor="middle">50%</text>
   <text x="650" y="502" class="axis" text-anchor="middle">75%</text>
   <text x="780" y="502" class="axis" text-anchor="middle">100%</text>
-  <text x="520" y="522" class="axis" text-anchor="middle">throughput vs nimkdl</text>
+  <text x="520" y="522" class="axis" text-anchor="middle">throughput vs nimkdl (parse, ops/s)</text>
 
   <text x="250" y="100" class="label" text-anchor="end">realistic-config.kdl</text>
   <text x="250" y="113" class="sublabel" text-anchor="end">5.6KB, language-dense</text>
   <rect x="260" y="86"  width="520" height="9" class="bar-ours"/>
-  <rect x="260" y="98"  width="376" height="9" class="bar-ckdl"/>
-  <rect x="260" y="110" width="61"  height="9" class="bar-knus"/>
-  <rect x="260" y="122" width="29"  height="9" class="bar-rs"/>
+  <rect x="260" y="98"  width="464" height="9" class="bar-ckdl"/>
+  <rect x="260" y="110" width="80"  height="9" class="bar-knus"/>
+  <rect x="260" y="122" width="33"  height="9" class="bar-rs"/>
 
   <text x="250" y="180" class="label" text-anchor="end">Cargo.kdl</text>
   <text x="250" y="193" class="sublabel" text-anchor="end">238B, strings only</text>
   <rect x="260" y="166" width="520" height="9" class="bar-ours"/>
-  <rect x="260" y="178" width="427" height="9" class="bar-ckdl"/>
-  <rect x="260" y="190" width="26"  height="9" class="bar-knus"/>
-  <rect x="260" y="202" width="44"  height="9" class="bar-rs"/>
+  <rect x="260" y="178" width="436" height="9" class="bar-ckdl"/>
+  <rect x="260" y="190" width="33"  height="9" class="bar-knus"/>
+  <rect x="260" y="202" width="50"  height="9" class="bar-rs"/>
 
   <text x="250" y="260" class="label" text-anchor="end">ci.kdl</text>
   <text x="250" y="273" class="sublabel" text-anchor="end">1KB, mixed</text>
   <rect x="260" y="246" width="520" height="9" class="bar-ours"/>
-  <rect x="260" y="258" width="380" height="9" class="bar-ckdl"/>
-  <rect x="260" y="270" width="21"  height="9" class="bar-knus"/>
+  <rect x="260" y="258" width="417" height="9" class="bar-ckdl"/>
+  <rect x="260" y="270" width="24"  height="9" class="bar-knus"/>
   <rect x="260" y="282" width="36"  height="9" class="bar-rs"/>
 
   <text x="250" y="340" class="label" text-anchor="end">website.kdl</text>
   <text x="250" y="353" class="sublabel" text-anchor="end">2KB, HTML-ish</text>
   <rect x="260" y="326" width="520" height="9" class="bar-ours"/>
-  <rect x="260" y="338" width="350" height="9" class="bar-ckdl"/>
-  <rect x="260" y="350" width="25"  height="9" class="bar-knus"/>
-  <rect x="260" y="362" width="33"  height="9" class="bar-rs"/>
+  <rect x="260" y="338" width="412" height="9" class="bar-ckdl"/>
+  <rect x="260" y="350" width="31"  height="9" class="bar-knus"/>
+  <rect x="260" y="362" width="34"  height="9" class="bar-rs"/>
 
   <text x="250" y="420" class="label" text-anchor="end">unicode-heavy.kdl</text>
   <text x="250" y="433" class="sublabel" text-anchor="end">1KB, multi-script</text>
   <rect x="260" y="406" width="494" height="9" class="bar-ours"/>
   <rect x="260" y="418" width="520" height="9" class="bar-ckdl"/>
-  <rect x="260" y="430" width="25"  height="9" class="bar-knus"/>
-  <rect x="260" y="442" width="48"  height="9" class="bar-rs"/>
+  <rect x="260" y="430" width="27"  height="9" class="bar-knus"/>
+  <rect x="260" y="442" width="47"  height="9" class="bar-rs"/>
   <text x="600" y="442" class="value" font-size="10">(ckdl edges us by 4% here, dead heat)</text>
 </svg>

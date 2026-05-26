@@ -6,17 +6,16 @@
     .value { fill: #f1f5f9; font-size: 13px; font-family: ui-monospace, monospace; }
     .title { fill: #f1f5f9; font-size: 16px; font-weight: 600; }
     .subtitle { fill: #94a3b8; font-size: 12px; }
-    .bar-ours  { fill: #14b8a6; }   /* nimkdl teal */
-    .bar-ckdl  { fill: #f59e0b; }   /* ckdl amber */
-    .bar-knus  { fill: #a78bfa; }   /* knus violet */
-    .bar-facet { fill: #f472b6; }   /* facet-kdl pink */
-    .bar-rs    { fill: #64748b; }   /* kdl-rs slate */
+    .bar-ours  { fill: #14b8a6; }
+    .bar-knus  { fill: #a78bfa; }
+    .bar-facet { fill: #f472b6; }
+    .bar-rs    { fill: #64748b; }
     .grid { stroke: #1e293b; stroke-width: 1; }
   </style>
   <rect width="760" height="360" fill="#0b1220"/>
 
-  <text x="40" y="32" class="title">realistic-config.kdl (5.6KB)</text>
-  <text x="40" y="50" class="subtitle">parses per second, same container, release+LTO equivalent</text>
+  <text x="40" y="32" class="title">typed decode (parse + populate typed structures)</text>
+  <text x="40" y="50" class="subtitle">homogeneous-services-100.kdl (~5KB, 100 Service nodes)</text>
 
   <line x1="180" y1="80"  x2="180" y2="320" class="grid"/>
   <line x1="300" y1="80"  x2="300" y2="320" class="grid"/>
@@ -31,28 +30,28 @@
   <text x="540" y="342" class="axis" text-anchor="middle">15K</text>
   <text x="660" y="342" class="axis" text-anchor="middle">20K</text>
 
-  <text x="170" y="103" class="label" text-anchor="end">nimkdl</text>
-  <text x="170" y="119" class="sublabel" text-anchor="end">Nim, hand-written</text>
-  <rect x="180" y="86"  width="420" height="32" class="bar-ours"/>
-  <text x="608" y="108" class="value">17,500</text>
+  <text x="170" y="103" class="label" text-anchor="end">knus</text>
+  <text x="170" y="119" class="sublabel" text-anchor="end">parse::&lt;Vec&lt;Service&gt;&gt;</text>
+  <rect x="180" y="86"  width="557" height="32" class="bar-knus"/>
+  <text x="745" y="108" class="value" text-anchor="end">23,200</text>
 
-  <text x="170" y="153" class="label" text-anchor="end">ckdl</text>
-  <text x="170" y="169" class="sublabel" text-anchor="end">C, event-drain</text>
-  <rect x="180" y="136" width="372" height="32" class="bar-ckdl"/>
-  <text x="560" y="158" class="value">15,500</text>
+  <text x="170" y="153" class="label" text-anchor="end">nimkdl</text>
+  <text x="170" y="169" class="sublabel" text-anchor="end">decode[seq[Service]]</text>
+  <rect x="180" y="136" width="262" height="32" class="bar-ours"/>
+  <text x="450" y="158" class="value">10,900</text>
 
-  <text x="170" y="203" class="label" text-anchor="end">knus</text>
-  <text x="170" y="219" class="sublabel" text-anchor="end">Rust, parse_ast</text>
-  <rect x="180" y="186" width="65" height="32" class="bar-knus"/>
+  <text x="170" y="203" class="label" text-anchor="end">knus parse_ast</text>
+  <text x="170" y="219" class="sublabel" text-anchor="end">Rust, untyped baseline</text>
+  <rect x="180" y="186" width="65" height="32" class="bar-knus" opacity="0.5"/>
   <text x="253" y="208" class="value">2,700</text>
 
   <text x="170" y="253" class="label" text-anchor="end">facet-kdl</text>
-  <text x="170" y="269" class="sublabel" text-anchor="end">Rust, typed via facet</text>
+  <text x="170" y="269" class="sublabel" text-anchor="end">from_str&lt;ServiceDoc&gt;</text>
   <rect x="180" y="236" width="24" height="32" class="bar-facet"/>
   <text x="212" y="258" class="value">1,000</text>
 
   <text x="170" y="303" class="label" text-anchor="end">kdl-rs</text>
-  <text x="170" y="319" class="sublabel" text-anchor="end">Rust, canonical</text>
-  <rect x="180" y="286" width="26" height="32" class="bar-rs"/>
-  <text x="214" y="308" class="value">1,100</text>
+  <text x="170" y="319" class="sublabel" text-anchor="end">parse_v2 (no typed path)</text>
+  <rect x="180" y="286" width="24" height="32" class="bar-rs"/>
+  <text x="212" y="308" class="value">1,000</text>
 </svg>

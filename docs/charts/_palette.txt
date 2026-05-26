@@ -1,0 +1,19 @@
+Color palette for benchmark charts.
+
+Same parser = same color across every chart in the repo. Picked so
+the bars are distinguishable on the #0b1220 chart background AND
+distinguishable from each other in grayscale fallback (each hue is
+at a different luminance level).
+
+  nimkdl     #14b8a6   teal   (cool, light)
+  ckdl       #f59e0b   amber  (warm, light)
+  knus       #a78bfa   violet (cool, medium)
+  facet-kdl  #f472b6   pink   (warm, medium)
+  kdl-rs     #64748b   slate  (neutral, dark)
+
+Accent green for journey-chart positive deltas: #22d3ee (cyan).
+Error/fail red: #f87171.
+
+Background: #0b1220 (slate-950, near-black).
+Grid: #1e293b (slate-800).
+Text: #cbd5e1 / #94a3b8 / #f1f5f9 (slate-300/400/100).
