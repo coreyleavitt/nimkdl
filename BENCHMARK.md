@@ -26,22 +26,43 @@ knus and kdl-rs are both 10-20x behind ckdl and nimkdl across the board. Both pr
 
 The headline bench measures parse-to-AST. Most consumers actually want parse-then-decode-into-typed-structures in one shot. This is what `nimkdl decode[T]`, `knus parse::<Vec<T>>`, and `serde_json::from_str::<T>` all promise.
 
-A small fixture of 100 homogeneous service nodes (~5KB).
+A homogeneous fixture of 100 service nodes (~5KB,
+`benchmarks/fixtures/homogeneous-services-100.kdl`).
 
-| Parser           | Path                                | ops/s   | vs nimkdl |
+| Parser           | Path                                | ops/s   | vs leader |
 |------------------|-------------------------------------|--------:|----------:|
-| **nimkdl**       | `decode[seq[Service]]`              | 12,800  | 1.0x      |
-| knus             | `parse_ast` (AST, untyped)          | 2,600   | 4.9x slower |
-| facet-kdl        | `from_str::<ServiceDoc>`            | 900     | 14.2x slower |
-| knus             | `parse::<Vec<Service>>` (typed)     | 720     | 17.9x slower |
+| **knus**         | `parse::<Vec<Service>>` (typed)     | 23,200  | 1.0x      |
+| **nimkdl**       | `decode[seq[Service]]`              | 10,900  | 2.1x slower |
+| knus             | `parse_ast` (AST, untyped)          | 2,700   | 8.6x slower |
+| facet-kdl        | `from_str::<ServiceDoc>`            | 1,000   | 23x slower |
+| kdl-rs           | `KdlDocument::parse_v2` (AST)       | 1,000   | 23x slower |
 
-Two surprising findings.
+Two findings worth noting honestly.
 
-First, knus typed decode is **slower than knus's own untyped `parse_ast`**. That inverts the serde-style pitch. serde-json's typed path is faster than `Value` because the schema lets the parser skip intermediate allocations. knus appears to parse to an internal representation first and then validate against the schema, which adds work rather than removing it.
+knus typed decode is the leader. Faster than knus's own `parse_ast`,
+which is the serde-style story working as advertised. Schema knowledge
+lets knus skip AST construction and write directly into the typed
+fields. nimkdl is 2x behind on this benchmark; the `deriveDecode`
+macro currently builds an intermediate `KdlDoc` and then decodes
+out of it, which doubles the work. There's a real optimization
+opportunity here (drive the decoder directly from the parser like
+knus does) that we haven't taken yet.
 
-Second, facet-kdl (advertised as knus's successor) is barely faster than knus on the typed path. The reason is structural. facet-kdl is built on top of kdl-rs (it depends on `kdl ^6.5.0`), so its perf is bounded by kdl-rs's parser plus the facet deserialize layer. The "successor" framing is about the typed-decode interface improvements, not about being a faster parser.
+facet-kdl is 23x slower than knus on the typed path despite being
+advertised as knus's successor. The structural reason is that
+facet-kdl is built on top of kdl-rs (it depends on `kdl ^6.5.0`),
+so its perf is bounded by kdl-rs's parser plus the facet deserialize
+layer. The "successor" framing is about the typed-decode interface
+improvements (a more general derive system), not about being a faster
+parser.
 
-nimkdl's typed decode is faster than its own untyped parse for the same reason serde-json's typed path is fast. Knowing the schema at compile time means `deriveDecode` generates a decoder that writes directly into the target fields. No `KdlDoc` allocation, no entry/property indirection. The compile-time-eval discipline gets to amortize across the typed code path too.
+Earlier versions of this section claimed knus typed was the slowest
+of the bunch. That was wrong — the test fixture used bare `true`
+instead of KDL v2's required `#true`, which sent knus into expensive
+error-recovery paths on every parse. With a spec-valid fixture, knus
+typed is the fastest typed path measured. The mistake is preserved
+in git history as a warning about why fixture bytes need to be
+spec-correct across every harness.
 
 ## Why ckdl is fast (and why we still beat it)
 

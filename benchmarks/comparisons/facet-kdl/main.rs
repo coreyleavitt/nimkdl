@@ -8,6 +8,7 @@
 // The crate-rename `use facet_kdl as kdl;` is how the `#[facet(kdl::*)]`
 // attribute namespace resolves; pattern lifted from facet-kdl's own
 // test suite (tests/basic.rs).
+use std::fs;
 use std::time::Instant;
 use facet::Facet;
 use facet_kdl as kdl;
@@ -49,13 +50,11 @@ fn report(name: &str, content_len: usize, iters: u64, elapsed: f64) {
 
 fn main() {
     println!("=== facet-kdl typed ServiceDoc on homogeneous services fixture ===\n");
-    let mut services = String::new();
-    for i in 0..100 {
-        services.push_str(&format!("service \"svc-{}\" port={} replicas={} enabled=true\n",
-            i, 8000 + i, (i % 5) + 1));
-    }
+    let content = match fs::read_to_string("/fixtures/homogeneous-services-100.kdl") {
+        Ok(c) => c, Err(_) => { eprintln!("homogeneous-services-100.kdl missing"); return; }
+    };
     let el = time(5_000, || {
-        let _: Result<ServiceDoc, _> = from_str(&services);
+        let _: Result<ServiceDoc, _> = from_str(&content);
     });
-    report("typed ServiceDoc (~100 nodes)", services.len(), 5_000, el);
+    report("typed ServiceDoc (~100 nodes)", content.len(), 5_000, el);
 }

@@ -57,10 +57,18 @@ static void bench(const char *name, const char *path, int iters) {
 
 int main(void) {
     printf("=== ckdl (C, event-drain, -O3) ===\n\n");
-    bench("realistic-config.kdl", "/fixtures/realistic-config.kdl",  5000);
-    bench("Cargo.kdl",            "/fixtures/Cargo.kdl",            10000);
-    bench("ci.kdl",               "/fixtures/ci.kdl",                5000);
-    bench("website.kdl",          "/fixtures/website.kdl",           5000);
-    bench("unicode-heavy.kdl",    "/fixtures/unicode-heavy.kdl",     5000);
+    /* Real-world */
+    bench("realistic-config.kdl",      "/fixtures/realistic-config.kdl",        5000);
+    bench("Cargo.kdl",                 "/fixtures/Cargo.kdl",                  10000);
+    bench("ci.kdl",                    "/fixtures/ci.kdl",                      5000);
+    bench("website.kdl",               "/fixtures/website.kdl",                 5000);
+    /* Large */
+    bench("flat-deps-100.kdl",         "/fixtures/flat-deps-100.kdl",           2000);
+    bench("tree-d8-b3.kdl",            "/fixtures/tree-d8-b3.kdl",               200);
+    /* Regression guards */
+    bench("deep-chain-100.kdl",        "/fixtures/deep-chain-100.kdl",          1000);
+    bench("unicode-heavy.kdl",         "/fixtures/unicode-heavy.kdl",           2000);
+    /* Typed-decode comparison input (ckdl has no typed path; still bench parse) */
+    bench("homogeneous-services-100.kdl", "/fixtures/homogeneous-services-100.kdl", 5000);
     return 0;
 }

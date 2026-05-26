@@ -1,6 +1,6 @@
 ## Typed-decode bench. Matches the knus typed path so we have a fair
 ## "parse + decode into a typed Vec<T>" head-to-head.
-import std/[times, strformat, monotimes, strutils]
+import std/[os, times, strformat, monotimes]
 import kdl
 
 type Service {.kdlNode: "service".} = object
@@ -12,13 +12,12 @@ type Service {.kdlNode: "service".} = object
 deriveDecode(Service)
 
 proc main() =
-  var src = ""
-  for i in 0 ..< 100:
-    src.add(&"service \"svc-{i}\" port={8000 + i} replicas={(i mod 5) + 1}\n")
-
+  # Read the vendored homogeneous-services fixture so every harness
+  # (knus, facet-kdl, ours) consumes byte-identical input.
+  let path = currentSourcePath().parentDir() / "fixtures" / "homogeneous-services-100.kdl"
+  let src = readFile(path)
   const iters = 5_000
 
-  # Warmup
   for _ in 1..100: discard decode[seq[Service]](src)
 
   let start = getMonoTime()

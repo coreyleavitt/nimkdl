@@ -21,6 +21,8 @@ FIXTURE_DIR="$REPO_ROOT/benchmarks/fixtures"
 # Rust/C harnesses, which expect them at /fixtures/.
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
+# Stage every committed fixture so each harness sees byte-identical
+# inputs at the same paths.
 cp "$FIXTURE_DIR"/*.kdl "$STAGE/"
 # The two small conformance fixtures live alongside the corpus; vendor
 # in if present so old comparison tables can still be reproduced.

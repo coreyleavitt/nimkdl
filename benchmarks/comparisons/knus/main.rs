@@ -5,7 +5,8 @@
 //    public `parse_ast` function is for.
 //
 // 2. typed Vec<T>: schema-driven decode of a homogeneous node list.
-//    The serde-style sweet spot.
+//    Reads the vendored homogeneous-services-100.kdl fixture so
+//    every harness consumes byte-identical input.
 //
 // 3. typed enum: discriminated union for heterogeneous top-level
 //    nodes — the pattern the knus docs recommend for parsing real
@@ -67,10 +68,17 @@ fn report(name: &str, content_len: usize, iters: u64, elapsed: f64) {
 
 fn main() {
     let cases: Vec<(&str, &str, u64)> = vec![
-        ("realistic-config.kdl", "/fixtures/realistic-config.kdl", 5_000),
-        ("Cargo.kdl",            "/fixtures/Cargo.kdl",           10_000),
-        ("ci.kdl",               "/fixtures/ci.kdl",               5_000),
-        ("website.kdl",          "/fixtures/website.kdl",          5_000),
+        // Real-world
+        ("realistic-config.kdl",          "/fixtures/realistic-config.kdl",            5_000),
+        ("Cargo.kdl",                     "/fixtures/Cargo.kdl",                      10_000),
+        ("ci.kdl",                        "/fixtures/ci.kdl",                          5_000),
+        ("website.kdl",                   "/fixtures/website.kdl",                     5_000),
+        // Large
+        ("flat-deps-100.kdl",             "/fixtures/flat-deps-100.kdl",               2_000),
+        ("tree-d8-b3.kdl",                "/fixtures/tree-d8-b3.kdl",                    200),
+        // Regression / stress
+        ("deep-chain-100.kdl",            "/fixtures/deep-chain-100.kdl",              1_000),
+        ("unicode-heavy.kdl",             "/fixtures/unicode-heavy.kdl",               2_000),
     ];
 
     println!("=== knus parse_ast (AST only, no schema) ===\n");
@@ -84,13 +92,13 @@ fn main() {
     }
 
     println!("\n=== knus typed Vec<Service> on homogeneous services fixture ===\n");
-    let mut services = String::new();
-    for i in 0..100 {
-        services.push_str(&format!("service \"svc-{}\" port={} replicas={}\n",
-            i, 8000 + i, (i % 5) + 1));
-    }
-    let el = time(5_000, || { let _ = knus::parse::<Vec<Service>>("svc", &services); });
-    report("typed Vec<Service> (~100 nodes)", services.len(), 5_000, el);
+    let content = match fs::read_to_string("/fixtures/homogeneous-services-100.kdl") {
+        Ok(c) => c, Err(_) => { eprintln!("homogeneous-services-100.kdl missing"); return; }
+    };
+    let el = time(5_000, || {
+        let _ = knus::parse::<Vec<Service>>("homogeneous-services-100.kdl", &content);
+    });
+    report("typed Vec<Service> (~100 nodes)", content.len(), 5_000, el);
 
     println!("\n=== knus typed enum (discriminated union, idiomatic) ===\n");
     let content = match fs::read_to_string("/fixtures/realistic-config.kdl") {
