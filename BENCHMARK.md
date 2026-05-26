@@ -22,6 +22,22 @@ ckdl is consistently the closest competitor. On `unicode-heavy.kdl` it actually 
 
 knus and kdl-rs are both 10-20x behind ckdl and nimkdl across the board. Both prioritize features we deferred (knus is serde-style typed decode in one shot; kdl-rs carries per-token whitespace storage and BigInt-by-default), so this isn't a clean comparison of "parser quality." It's a comparison of "how fast does parse-to-AST run in this library, with the defaults that ship."
 
+## Typed decode
+
+The headline bench measures parse-to-AST. Most consumers actually want parse-then-decode-into-typed-structures in one shot. This is what `nimkdl decode[T]`, `knus parse::<Vec<T>>`, and `serde_json::from_str::<T>` all promise.
+
+A small fixture of 100 homogeneous service nodes (~3.8KB).
+
+| Parser           | Path                                | ops/s   | vs nimkdl |
+|------------------|-------------------------------------|--------:|----------:|
+| **nimkdl**       | `decode[seq[Service]]`              | 12,800  | 1.0x      |
+| knus             | `parse::<Vec<GenericNode>>` (catch-all) | 2,600 | 4.9x slower |
+| knus             | `parse::<Vec<Service>>` (typed)     | 720     | 17.9x slower |
+
+Surprising finding. knus typed decode is **slower than knus generic decode**. That inverts the serde-style pitch. serde-json's typed path is faster than `Value` because the schema lets the parser skip intermediate allocations. knus appears to parse to an internal representation first and then validate against the schema, which adds work instead of removing it.
+
+nimkdl's typed decode is faster than its own untyped parse for the same reason serde-json's typed path is fast. Knowing the schema at compile time means `deriveDecode` generates a decoder that writes directly into the target fields. No `KdlDoc` allocation, no entry/property indirection. The compile-time-eval discipline gets to amortize across the typed code path too.
+
 ## Why ckdl is fast (and why we still beat it)
 
 ckdl is a SAX-style parser. It emits events (start-node, argument, property, end-node, etc.) as it walks the input, never constructing an AST. The bench harness drains events into nothing. This is the absolute floor for "parse cost in C" because nothing is allocated downstream.
