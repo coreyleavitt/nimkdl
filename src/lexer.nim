@@ -69,6 +69,21 @@ func isReservedBareword*(s: openArray[char]): bool {.inline.} =
     if matches: return true
   false
 
+func isReservedBareword*(interner: Interner, handle: InternedStr): bool {.inline.} =
+  ## Alloc-free version that scans the interned bytes directly. Saves
+  ## one string allocation per `tkIdent` token on the parser's hot path
+  ## (previously had to call `lookup(handle)` just to feed the openArray
+  ## version, allocating ~10-20 bytes per call).
+  let n = interner.entryByteLenOf(handle)
+  if n > MaxReservedBarewordLen: return false
+  for kw in ReservedBarewords:
+    if kw.len != n: continue
+    var matches = true
+    for i in 0 ..< n:
+      if kw[i] != interner.entryByteAtOf(handle, i): matches = false; break
+    if matches: return true
+  false
+
 type
   TokenKind* = enum
     # Punctuation

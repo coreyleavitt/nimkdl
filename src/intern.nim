@@ -179,6 +179,22 @@ func lookup*(interner: Interner, handle: InternedStr): string =
   of ekHeap:
     result = entry.payload
 
+func entryByteLenOf*(interner: Interner, handle: InternedStr): int {.inline.} =
+  ## Length of the interned bytes — zero alloc.
+  let idx = int(uint32(handle))
+  if handle == InvalidInterned or idx >= interner.entries.len: return 0
+  case interner.entries[idx].kind
+  of ekInline: int(interner.entries[idx].length)
+  of ekHeap:   interner.entries[idx].payload.len
+
+func entryByteAtOf*(interner: Interner, handle: InternedStr,
+                    i: int): char {.inline.} =
+  ## Byte at index `i` — zero alloc.
+  let idx = int(uint32(handle))
+  case interner.entries[idx].kind
+  of ekInline: interner.entries[idx].data[i]
+  of ekHeap:   interner.entries[idx].payload[i]
+
 func len*(interner: Interner): int {.inline.} =
   ## Number of distinct interned strings.
   interner.entries.len

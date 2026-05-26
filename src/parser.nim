@@ -218,8 +218,8 @@ proc parseEntry(p: var Parser): Result[KdlEntry, ParseError] {.noSideEffect.} =
   # Reject bare idents that look like reserved keywords (true/false/null
   # /inf/-inf/nan). v2 forbids these in key position even without `#`.
   if p.peek.kind == tkIdent and p.peek(1).kind == tkEquals:
-    let kw = p.doc.interner.lookup(p.peek.ident)
-    if isReservedBareword(kw):
+    if isReservedBareword(p.doc.interner, p.peek.ident):
+      let kw = p.doc.interner.lookup(p.peek.ident)
       return err[KdlEntry, ParseError](initError(peLexReservedKeyword,
         p.peek.span,
         "reserved keyword '" & kw & "' cannot be used as a property key"))
@@ -316,8 +316,8 @@ proc parseNode(p: var Parser): Result[KdlNode, ParseError] {.noSideEffect.} =
   case p.peek.kind
   of tkIdent:
     let tok = p.advance()
-    let identStr = p.doc.interner.lookup(tok.ident)
-    if isReservedBareword(identStr):
+    if isReservedBareword(p.doc.interner, tok.ident):
+      let identStr = p.doc.interner.lookup(tok.ident)
       return err[KdlNode, ParseError](initError(peLexReservedKeyword,
         tok.span,
         "reserved keyword '" & identStr & "' cannot be used as a bare " &
