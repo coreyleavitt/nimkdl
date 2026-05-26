@@ -6,3 +6,5 @@ tests/test_*
 # Conformance failure log (regenerated)
 tests/.last-conformance-failures.log
 benchmarks/bench
+benchmarks/profile_deep
+benchmarks/perf_deep_chain
