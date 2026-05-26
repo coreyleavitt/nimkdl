@@ -1,0 +1,29 @@
+name: publish
+
+# Canary publish workflow — proves the tianguis end-to-end chain:
+# pack → push OCI → cosign sign → POST dispatch → commit-entry workflow
+# verifies + commits to index.kdl.
+#
+# Triggered by tag push (v*). The first push of a vX.Y.Z-canary tag
+# runs with dry-run=true (full chain short of index commit). Pushing
+# a real v* tag without -canary suffix lands a real entry.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    uses: coreyleavitt/tianguis/.github/workflows/publish.yaml@main
+    permissions:
+      id-token: write   # cosign keyless signing
+      contents: read    # checkout
+      packages: write   # push OCI artifact to GHCR
+    with:
+      name: nimkdl
+      version: ${{ github.ref_name }}
+      # Canary suffix triggers dry-run; real tags publish for real.
+      dry-run: ${{ contains(github.ref_name, '-canary') }}
+    secrets:
+      milpa-install-token: ${{ secrets.MILPA_READ_PAT }}
