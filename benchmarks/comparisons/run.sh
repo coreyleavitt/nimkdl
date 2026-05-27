@@ -48,7 +48,7 @@ run_nimkdl() {
     docker.io/nimlang/nim:2.2.0 \
     sh -c '
       set -e
-      nim c --hints:off -d:release -d:nimCallDepthLimit=20000 \
+      nim c --hints:off -d:release -d:lto \
         -p:/work/src -o:/tmp/nimkdl-bench \
         benchmarks/comparisons/nimkdl/bench.nim 2>&1 | tail -3
       /tmp/nimkdl-bench
@@ -65,7 +65,7 @@ run_nimkdl_legacy() {
   $CONTAINER_RUNTIME run --rm \
     -v "$REPO_ROOT:/work:Z" -w /work \
     docker.io/nimlang/nim:2.2.0 \
-    sh -c 'nim c --hints:off -d:release -d:nimCallDepthLimit=20000 -p:src benchmarks/bench.nim 2>&1 | tail -1 && ./benchmarks/bench'
+    sh -c 'nim c --hints:off -d:release -d:lto -p:src benchmarks/bench.nim 2>&1 | tail -1 && ./benchmarks/bench'
   echo ""
 }
 

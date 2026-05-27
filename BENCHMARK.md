@@ -1,6 +1,6 @@
 # Benchmarks
 
-On a 5.6KB realistic KDL config that exercises every language feature, nimkdl parses about 1.55x faster than ckdl (a well-engineered C library), 9x faster than knus, and ~20x faster than kdl-rs. On typed-decode (100-Service fixture) `parseInto` edges knus's serde-derive at 22.9K vs 22.1K ops/s. On typed-encode `encodeFrom` is 4.8x faster than facet-kdl's `to_string`. Same container, same input bytes, same iteration counts.
+On a 5.6KB realistic KDL config that exercises every language feature, nimkdl parses about 1.58x faster than ckdl (a well-engineered C library), 9x faster than knus, and ~20x faster than kdl-rs. On typed-decode (100-Service fixture) `parseInto` edges knus's serde-derive at 23.3K vs 21.8K ops/s. On typed-encode `encodeFrom` is 4.87x faster than facet-kdl's `to_string`. Same container, same input bytes, same iteration counts.
 
 ![Headline comparison](docs/charts/headline.svg)
 
@@ -29,16 +29,16 @@ So they're apples-to-apples on **input cost and flag profile** but doing differe
 
 | Fixture                       | nimkdl | ckdl   | knus  | kdl-rs | Winner |
 |-------------------------------|-------:|-------:|------:|-------:|--------|
-| realistic-config.kdl (5.6KB)  | 23.9K  | 15.4K  | 2.6K  |  1.2K  | nimkdl 1.55x |
-| Cargo.kdl (238B)              | 297.8K | 222.1K |  14.9K|   23.6K| nimkdl 1.34x |
-| ci.kdl (1KB)                  | 85.8K  | 52.5K  | 3.0K  |  5.0K  | nimkdl 1.63x |
-| website.kdl (2KB)             | 65.3K  | 36.5K  | 2.9K  |  3.6K  | nimkdl 1.79x |
-| flat-deps-100.kdl (4KB)       | 15.7K  | 13.8K  | 0.8K  |  1.2K  | nimkdl 1.14x |
-| tree-d8-b3.kdl (794KB)        | 116    | 105    |   4   |    8   | nimkdl 1.10x |
-| **deep-chain-100.kdl** (2.7KB)| 19.4K  | **22.5K** | 0.6K | 1.3K | **ckdl 1.16x** |
-| unicode-heavy.kdl (1.2KB)     | 64.0K  | 59.7K  | 3.1K  |  5.6K  | nimkdl 1.07x (tie) |
+| realistic-config.kdl (5.6KB)  | 24.8K  | 15.7K  | 2.6K  |  1.2K  | nimkdl 1.58x |
+| Cargo.kdl (238B)              | 350.4K | 225.3K | 14.2K |  23.8K | nimkdl 1.56x |
+| ci.kdl (1KB)                  | 96.4K  | 53.1K  | 2.9K  |  5.0K  | nimkdl 1.82x |
+| website.kdl (2KB)             | 66.1K  | 38.6K  | 2.8K  |  3.6K  | nimkdl 1.71x |
+| flat-deps-100.kdl (4KB)       | 16.9K  | 14.4K  | 0.7K  |  1.3K  | nimkdl 1.17x |
+| tree-d8-b3.kdl (794KB)        | 123    | 102    |   4   |    8   | nimkdl 1.21x |
+| deep-chain-100.kdl (2.7KB)    | 22.4K  | 22.2K  | 0.6K  |  1.3K  | nimkdl 1.01x (tie) |
+| unicode-heavy.kdl (1.2KB)     | 80.8K  | 60.0K  | 3.0K  |  5.5K  | nimkdl 1.35x |
 
-nimkdl wins 7 of 8 parse rows outright (3 by 1.5x or more), ties 1, and loses 1 to ckdl on shapes with very simple node structure (deep-chain is just `levelN { ... }` repeated).
+nimkdl leads every parse row — by 1.5× or more on five of them, by 1.17-1.21× on flat-deps and tree-d8, and tied with ckdl on deep-chain.
 
 ## Typed decode
 
@@ -48,10 +48,10 @@ A homogeneous fixture of 100 service nodes (~5KB, `benchmarks/fixtures/homogeneo
 
 | Parser           | Path                                | ops/s   | vs knus |
 |------------------|-------------------------------------|--------:|----------:|
-| **nimkdl**       | `parseInto[seq[Service]]`           | **22,900** | **1.04x faster** |
-| knus             | `parse::<Vec<Service>>` (typed)     | 22,100  | 1.00x |
+| **nimkdl**       | `parseInto[seq[Service]]`           | **23,300** | **1.07x faster** |
+| knus             | `parse::<Vec<Service>>` (typed)     | 21,800  | 1.00x |
 | kdl-rs           | `KdlDocument::parse_v2` (no typed path) | 1,000   | 22x slower |
-| facet-kdl        | `from_str::<ServiceDoc>`            | 900     | 25x slower |
+| facet-kdl        | `from_str::<ServiceDoc>`            | 900     | 24x slower |
 
 The Service schema (name arg + 3 typed props) is identical across all three derive-based harnesses — verify by reading `nimkdl/bench.nim`, `facet-kdl/main.rs`, and `knus/main.rs` side by side. Source: `benchmarks/comparisons/last-run.txt` (regenerate with `benchmarks/comparisons/run.sh`).
 
@@ -65,8 +65,8 @@ Flat shape (`benchmarks/fixtures/homogeneous-services-100.kdl`):
 
 | Path                                       | ops/s    | vs facet-kdl |
 |--------------------------------------------|---------:|-------------:|
-| **nimkdl `encodeFrom(seq[Service])`**      | **135.7K** | **4.78x faster** |
-| facet-kdl `to_string(&doc)`                |  28.4K   | 1.00x        |
+| **nimkdl `encodeFrom(seq[Service])`**      | **139.6K** | **4.87x faster** |
+| facet-kdl `to_string(&doc)`                |  28.7K   | 1.00x        |
 | knus                                       | n/a — no encode path | — |
 | kdl-rs                                     | n/a — no typed encode path (AST `to_string` is the closest, different work) | — |
 | ckdl                                       | n/a — streaming emitter only | — |
@@ -75,7 +75,7 @@ Nested shape:
 
 | Path                                          | ops/s    |
 |-----------------------------------------------|---------:|
-| **nimkdl `encodeFrom(seq[Server])`**          | **325.5K** |
+| **nimkdl `encodeFrom(seq[Server])`**          | **374.3K** |
 
 facet-kdl's harness times flat-only — no nested-shape encode is comparable. The nested-shape number exists to defend against "you only measured flat encode" rather than to claim a speedup. It's faster than flat in absolute ops/s because the output is denser per byte (2.4KB vs 5.2KB) — per-call fixed cost amortizes over more nodes inside the same byte budget.
 
@@ -103,7 +103,7 @@ Cross-implementation benchmarks lie easily. The discipline that makes this compa
 
 **Same iteration counts.** Different counts produce meaningless averages because you're measuring different total work.
 
-**Same flag profile.** All at release+LTO equivalent. Nim is `-d:release` with ORC. Rust is `--release` with `lto = true, codegen-units = 1`. C is `-O3 -DNDEBUG`. Mixing flag profiles across implementations is the most common dishonest comparison.
+**Same flag profile.** All at release+LTO equivalent. Nim is `-d:release -d:lto` with ORC. Rust is `--release` with `lto = true, codegen-units = 1`. C is `-O3 -DNDEBUG`. Mixing flag profiles across implementations is the most common dishonest comparison.
 
 **glibc, not musl.** kdl-rs allocates heavily through the `num` BigInt crate and musl's `malloc` punishes that — same kdl-rs build on glibc Debian is 3.6x faster than on musl Alpine. We see only a 5% swing. Use glibc for cross-language Rust benchmarks unless musl is your actual production target.
 
