@@ -324,19 +324,19 @@ proc hasPropInterned*(n: KdlNode, key: InternedStr): bool =
     if k == key: return true
   return false
 
-proc findChildInterned*(n: KdlNode, name: InternedStr): KdlNode =
+proc findChildInterned*(n: KdlNode, nameHandle: InternedStr): KdlNode =
   for c in n.children:
-    if c.name == name: return c
+    if c.name == nameHandle: return c
   return KdlNode(name: InvalidInterned)
 
-proc hasChildInterned*(n: KdlNode, name: InternedStr): bool =
+proc hasChildInterned*(n: KdlNode, nameHandle: InternedStr): bool =
   for c in n.children:
-    if c.name == name: return true
+    if c.name == nameHandle: return true
   return false
 
-proc childrenNamedInterned*(n: KdlNode, name: InternedStr): seq[KdlNode] =
+proc childrenNamedInterned*(n: KdlNode, nameHandle: InternedStr): seq[KdlNode] =
   for c in n.children:
-    if c.name == name: result.add(c)
+    if c.name == nameHandle: result.add(c)
 
 # ---------------------------------------------------------------------------
 # Type introspection at compile time
@@ -1640,6 +1640,26 @@ macro deriveVisitor*(typ: typedesc): untyped =
   let nameStrIdent = ident("nameStr")
   let idxIdent = ident("idx")
 
+  # Collect kdlChild fields. For seq[T], record the element type so we
+  # can wire up a child SeqBuilder slot per field. For non-seq, the
+  # singular builder is used directly.
+  type ChildField = object
+    nimName: string
+    kdlName: string         ## name to match in child position (Action's kdlNode)
+    elemTypeName: string    ## element type for instantiation (Action / Server / etc.)
+    isSeq: bool
+  var children: seq[ChildField]
+  for f in shape.shared:
+    if f.kind == fkChild:
+      let isSeq = typeNodeIsSeq(f.typeNode)
+      let elemTypeNode = if isSeq: f.typeNode[1] else: f.typeNode
+      children.add ChildField(
+        nimName: f.nimName,
+        kdlName: f.kdlName,
+        elemTypeName: $elemTypeNode,
+        isSeq: isSeq,
+      )
+
   # Track required fields (no defaultExpr → required).
   # Assigns each required field a unique uint8 id used as a set element.
   # Map: nimName -> id. Used by arg/prop to mark "seen" and by endNode
@@ -1657,21 +1677,28 @@ macro deriveVisitor*(typ: typedesc): untyped =
     error("deriveVisitor: type `" & typName & "` has " &
           $requiredNames.len & " required fields; max is 256.")
 
-  # 1. Hidden builder type — adds `seen` set if any required fields exist
-  # and `nodeSpan` for error reporting (PhD review caught pointSpan(StartPosition)
-  # was making every err point at byte 0).
-  let builderType =
-    if requiredNames.len > 0:
-      quote do:
-        type `builderName` = object
-          result: `typSym`
-          seen: set[uint8]
-          nodeSpan: Span
-    else:
-      quote do:
-        type `builderName` = object
-          result: `typSym`
-          nodeSpan: Span
+  # 1. Hidden builder type. Per-child-field slots are appended for
+  # any kdlChild fields. The slot type is <ElemType>VBuilderSeq for
+  # seq[T] children and <ElemType>VBuilder for single. inChildren +
+  # curChildName track the dispatch state during child traversal.
+  let builderFields = newNimNode(nnkRecList)
+  builderFields.add newIdentDefs(ident("result"), typSym)
+  if requiredNames.len > 0:
+    builderFields.add newIdentDefs(ident("seen"),
+      newNimNode(nnkBracketExpr).add(ident("set"), ident("uint8")))
+  builderFields.add newIdentDefs(ident("nodeSpan"), ident("Span"))
+  if children.len > 0:
+    builderFields.add newIdentDefs(ident("inChildren"), ident("bool"))
+    builderFields.add newIdentDefs(ident("curChildName"), ident("string"))
+    for c in children:
+      let slotName = ident(c.nimName & "_b")
+      let slotType = ident(c.elemTypeName &
+        (if c.isSeq: "VBuilderSeq" else: "VBuilder"))
+      builderFields.add newIdentDefs(slotName, slotType)
+  let builderType = newNimNode(nnkTypeSection).add(
+    newNimNode(nnkTypeDef).add(builderName, newEmptyNode(),
+      newNimNode(nnkObjectTy).add(newEmptyNode(), newEmptyNode(),
+        builderFields)))
 
   # 2. visitBeginNode: name match + apply field defaults.
   var defaultsBody = newStmtList()
@@ -1683,24 +1710,62 @@ macro deriveVisitor*(typ: typedesc): untyped =
         `bIdent`.result.`nimName` = `defExpr`
   let nodeLit = newLit(nodeName)
   let spanIdent = ident("nodeSpan")
-  let beginNodeProc = quote do:
-    proc visitBeginNode(`bIdent`: var `builderName`,
-                   name: InternedStr,
-                   `nameStrIdent`: openArray[char],
-                   `spanIdent`: Span):
-        Result[void, ParseError] {.noSideEffect.} =
-      `bIdent`.nodeSpan = `spanIdent`
-      var match = `nameStrIdent`.len == `nodeLit`.len
-      if match:
-        for i in 0 ..< `nameStrIdent`.len:
-          if `nameStrIdent`[i] != `nodeLit`[i]:
-            match = false; break
-      if not match:
-        return err[void, ParseError](initError(peTypeMismatch,
-          `spanIdent`,
-          "expected node `" & `nodeLit` & "`"))
-      `defaultsBody`
-      ok(void, ParseError)
+
+  # Child-dispatch body for visitBeginNode when inChildren is true.
+  # Routes the child node name to the right per-field builder slot.
+  var childBeginDispatch = newNimNode(nnkCaseStmt).add(quote do:
+    openArrayToString(`nameStrIdent`))
+  for c in children:
+    let kdlLit = newLit(c.kdlName)
+    let slot = ident(c.nimName & "_b")
+    childBeginDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
+      `bIdent`.curChildName = `kdlLit`
+      return visitBeginNode(`bIdent`.`slot`, `nameStrIdent`, `spanIdent`))
+  if children.len > 0:
+    childBeginDispatch.add(newNimNode(nnkElse).add quote do:
+      return err[void, ParseError](initError(peTypeUnknownField, `spanIdent`,
+        "`" & `nodeLit` & "` has no child kind `" &
+        openArrayToString(`nameStrIdent`) & "`")))
+
+  let beginNodeProc =
+    if children.len > 0:
+      quote do:
+        proc visitBeginNode(`bIdent`: var `builderName`,
+                       `nameStrIdent`: openArray[char],
+                       `spanIdent`: Span):
+            Result[void, ParseError] {.noSideEffect.} =
+          if `bIdent`.inChildren:
+            `childBeginDispatch`
+          `bIdent`.nodeSpan = `spanIdent`
+          var match = `nameStrIdent`.len == `nodeLit`.len
+          if match:
+            for i in 0 ..< `nameStrIdent`.len:
+              if `nameStrIdent`[i] != `nodeLit`[i]:
+                match = false; break
+          if not match:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `spanIdent`,
+              "expected node `" & `nodeLit` & "`"))
+          `defaultsBody`
+          ok(void, ParseError)
+    else:
+      quote do:
+        proc visitBeginNode(`bIdent`: var `builderName`,
+                       `nameStrIdent`: openArray[char],
+                       `spanIdent`: Span):
+            Result[void, ParseError] {.noSideEffect.} =
+          `bIdent`.nodeSpan = `spanIdent`
+          var match = `nameStrIdent`.len == `nodeLit`.len
+          if match:
+            for i in 0 ..< `nameStrIdent`.len:
+              if `nameStrIdent`[i] != `nodeLit`[i]:
+                match = false; break
+          if not match:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `spanIdent`,
+              "expected node `" & `nodeLit` & "`"))
+          `defaultsBody`
+          ok(void, ParseError)
 
   # 3. visitArg: dispatch by positional index.
   var argCase = newNimNode(nnkCaseStmt).add(idxIdent)
@@ -1762,12 +1827,35 @@ macro deriveVisitor*(typ: typedesc): untyped =
   argCase.add(newNimNode(nnkElse).add quote do:
     return err[void, ParseError](initError(peParseUnexpected, `tokIdent`.span,
       "too many positional args for `" & `nodeLit` & "`")))
-  let argProc = quote do:
-    proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
-             `tokIdent`: Token, `streamIdent`: TokenStream):
-        Result[void, ParseError] {.noSideEffect.} =
-      `argCase`
-      ok(void, ParseError)
+  # When inChildren, forward visitArg to the right child slot.
+  var childArgDispatch = newNimNode(nnkCaseStmt).add(quote do:
+    `bIdent`.curChildName)
+  for c in children:
+    let kdlLit = newLit(c.kdlName)
+    let slot = ident(c.nimName & "_b")
+    childArgDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
+      return visitArg(`bIdent`.`slot`, `idxIdent`, `tokIdent`, `streamIdent`))
+  if children.len > 0:
+    childArgDispatch.add(newNimNode(nnkElse).add quote do:
+      return err[void, ParseError](initError(peParseUnexpected, `tokIdent`.span,
+        "unrecognized active child")))
+  let argProc =
+    if children.len > 0:
+      quote do:
+        proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
+                 `tokIdent`: Token, `streamIdent`: TokenStream):
+            Result[void, ParseError] {.noSideEffect.} =
+          if `bIdent`.inChildren:
+            `childArgDispatch`
+          `argCase`
+          ok(void, ParseError)
+    else:
+      quote do:
+        proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
+                 `tokIdent`: Token, `streamIdent`: TokenStream):
+            Result[void, ParseError] {.noSideEffect.} =
+          `argCase`
+          ok(void, ParseError)
 
   # 4. visitProp: dispatch by property key string.
   var propCase = newNimNode(nnkCaseStmt).add(quote do:
@@ -1830,13 +1918,38 @@ macro deriveVisitor*(typ: typedesc): untyped =
       "`" & `nodeLit` & "` has no field `" &
       openArrayToString(`keyStrIdent`) &
       "`")))
-  let propProc = quote do:
-    proc visitProp(`bIdent`: var `builderName`, key: InternedStr,
-              `keyStrIdent`: openArray[char],
-              `tokIdent`: Token, `streamIdent`: TokenStream):
-        Result[void, ParseError] {.noSideEffect.} =
-      `propCase`
-      ok(void, ParseError)
+  # When inChildren, forward visitProp to the right child slot.
+  var childPropDispatch = newNimNode(nnkCaseStmt).add(quote do:
+    `bIdent`.curChildName)
+  for c in children:
+    let kdlLit = newLit(c.kdlName)
+    let slot = ident(c.nimName & "_b")
+    childPropDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
+      return visitProp(`bIdent`.`slot`, `keyStrIdent`,
+                       `tokIdent`, `streamIdent`))
+  if children.len > 0:
+    childPropDispatch.add(newNimNode(nnkElse).add quote do:
+      return err[void, ParseError](initError(peParseUnexpected, `tokIdent`.span,
+        "unrecognized active child")))
+  let propProc =
+    if children.len > 0:
+      quote do:
+        proc visitProp(`bIdent`: var `builderName`,
+                  `keyStrIdent`: openArray[char],
+                  `tokIdent`: Token, `streamIdent`: TokenStream):
+            Result[void, ParseError] {.noSideEffect.} =
+          if `bIdent`.inChildren:
+            `childPropDispatch`
+          `propCase`
+          ok(void, ParseError)
+    else:
+      quote do:
+        proc visitProp(`bIdent`: var `builderName`,
+                  `keyStrIdent`: openArray[char],
+                  `tokIdent`: Token, `streamIdent`: TokenStream):
+            Result[void, ParseError] {.noSideEffect.} =
+          `propCase`
+          ok(void, ParseError)
 
   # 5/6/7. Children: no-op for flat case (cycle 7 adds children).
   # visitEndNode: required-field check fires here.
@@ -1850,17 +1963,65 @@ macro deriveVisitor*(typ: typedesc): untyped =
           return err[void, ParseError](initError(peTypeMissingRequired,
             `bIdent`.nodeSpan,
             "required field `" & `nameLit` & "` was not set"))
-  let restProcs = quote do:
-    proc visitBeginChildren(`bIdent`: var `builderName`):
-        Result[void, ParseError] {.noSideEffect.} =
-      ok(void, ParseError)
-    proc visitEndChildren(`bIdent`: var `builderName`):
-        Result[void, ParseError] {.noSideEffect.} =
-      ok(void, ParseError)
-    proc visitEndNode(`bIdent`: var `builderName`):
-        Result[void, ParseError] {.noSideEffect.} =
-      `requiredCheckBody`
-      ok(void, ParseError)
+  # End-children: commit each child slot's accumulated results into
+  # the matching parent.result.<nimName> field, then clear the
+  # inChildren flag.
+  var endChildrenBody = newStmtList()
+  for c in children:
+    let slot = ident(c.nimName & "_b")
+    let nimField = ident(c.nimName)
+    if c.isSeq:
+      endChildrenBody.add quote do:
+        `bIdent`.result.`nimField` = `bIdent`.`slot`.results
+    else:
+      endChildrenBody.add quote do:
+        `bIdent`.result.`nimField` = `bIdent`.`slot`.result
+  if children.len > 0:
+    endChildrenBody.add quote do:
+      `bIdent`.inChildren = false
+
+  # End-node: forward to active child when inChildren, otherwise run
+  # the required-field check on self.
+  var childEndDispatch = newNimNode(nnkCaseStmt).add(quote do:
+    `bIdent`.curChildName)
+  for c in children:
+    let kdlLit = newLit(c.kdlName)
+    let slot = ident(c.nimName & "_b")
+    childEndDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
+      return visitEndNode(`bIdent`.`slot`))
+  if children.len > 0:
+    childEndDispatch.add(newNimNode(nnkElse).add quote do:
+      return ok(void, ParseError))
+
+  let restProcs =
+    if children.len > 0:
+      quote do:
+        proc visitBeginChildren(`bIdent`: var `builderName`):
+            Result[void, ParseError] {.noSideEffect.} =
+          `bIdent`.inChildren = true
+          ok(void, ParseError)
+        proc visitEndChildren(`bIdent`: var `builderName`):
+            Result[void, ParseError] {.noSideEffect.} =
+          `endChildrenBody`
+          ok(void, ParseError)
+        proc visitEndNode(`bIdent`: var `builderName`):
+            Result[void, ParseError] {.noSideEffect.} =
+          if `bIdent`.inChildren:
+            `childEndDispatch`
+          `requiredCheckBody`
+          ok(void, ParseError)
+    else:
+      quote do:
+        proc visitBeginChildren(`bIdent`: var `builderName`):
+            Result[void, ParseError] {.noSideEffect.} =
+          ok(void, ParseError)
+        proc visitEndChildren(`bIdent`: var `builderName`):
+            Result[void, ParseError] {.noSideEffect.} =
+          ok(void, ParseError)
+        proc visitEndNode(`bIdent`: var `builderName`):
+            Result[void, ParseError] {.noSideEffect.} =
+          `requiredCheckBody`
+          ok(void, ParseError)
 
   # 8. kdlBuildVisitor — the macro-emitted entry the generic parseInto[T]
   # mixins into for the singular case.
@@ -1881,21 +2042,21 @@ macro deriveVisitor*(typ: typedesc): untyped =
       results: seq[`typSym`]
       cur: `builderName`
   let seqWrapProcs = quote do:
-    proc visitBeginNode(`bIdent`: var `seqBuilderName`, name: InternedStr,
+    proc visitBeginNode(`bIdent`: var `seqBuilderName`,
                    `nameStrIdent`: openArray[char],
                    `spanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
       `bIdent`.cur = `builderName`()
-      visitBeginNode(`bIdent`.cur, name, `nameStrIdent`, `spanIdent`)
+      visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
     proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
              `tokIdent`: Token, `streamIdent`: TokenStream):
         Result[void, ParseError] {.noSideEffect.} =
       visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`)
-    proc visitProp(`bIdent`: var `seqBuilderName`, key: InternedStr,
+    proc visitProp(`bIdent`: var `seqBuilderName`,
               `keyStrIdent`: openArray[char],
               `tokIdent`: Token, `streamIdent`: TokenStream):
         Result[void, ParseError] {.noSideEffect.} =
-      visitProp(`bIdent`.cur, key, `keyStrIdent`, `tokIdent`, `streamIdent`)
+      visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`, `streamIdent`)
     proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
       visitBeginChildren(`bIdent`.cur)

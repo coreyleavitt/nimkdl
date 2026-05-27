@@ -30,7 +30,7 @@ type ServiceBuilder = object
   inNode: bool
   nodeSpan: Span
 
-proc visitBeginNode(b: var ServiceBuilder, name: InternedStr,
+proc visitBeginNode(b: var ServiceBuilder,
                nameStr: openArray[char], nodeSpan: Span):
     Result[void, ParseError] =
   b.nodeSpan = nodeSpan
@@ -53,7 +53,7 @@ proc visitArg(b: var ServiceBuilder, idx: int, tok: Token,
     err[void, ParseError](initError(peParseExpected, tok.span,
       "expected string visitArg for Service.name"))
 
-proc visitProp(b: var ServiceBuilder, key: InternedStr, keyStr: openArray[char],
+proc visitProp(b: var ServiceBuilder, keyStr: openArray[char],
           tok: Token, stream: TokenStream): Result[void, ParseError] =
   case keyStr.toString
   of "port":
@@ -216,3 +216,36 @@ suite "typed parser — unknown property strict (cycle 6)":
     check r.isErr
     check r.getErr.code == peTypeMismatch
     check "service" in r.getErr.hint
+
+# Cycle 7b: nested children. Server has a `kdlChild` field of seq[Action].
+type Action {.kdlNode: "action".} = object
+  kind {.kdlArg.}: string
+
+type Server {.kdlNode: "server".} = object
+  name {.kdlArg.}: string
+  actions {.kdlChild.}: seq[Action]
+
+deriveVisitor(Action)
+deriveVisitor(Server)
+
+suite "typed parser — nested children (cycle 7b)":
+  test "Server with seq[Action] children decodes":
+    let src = """
+server "deploy-svc" {
+  action "deploy"
+  action "rollback"
+}
+"""
+    let r = parseInto[Server](src)
+    check r.isOk
+    check r.get.name == "deploy-svc"
+    check r.get.actions.len == 2
+    check r.get.actions[0].kind == "deploy"
+    check r.get.actions[1].kind == "rollback"
+
+  test "Server with empty children block":
+    let src = "server \"empty\" {}"
+    let r = parseInto[Server](src)
+    check r.isOk
+    check r.get.name == "empty"
+    check r.get.actions.len == 0

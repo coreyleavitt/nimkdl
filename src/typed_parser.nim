@@ -17,12 +17,12 @@
 ##
 ## A type `V` is a parse visitor if it implements:
 ##
-##   proc visitBeginNode(v: var V, name: InternedStr,
+##   proc visitBeginNode(v: var V,
 ##                       nameStr: openArray[char],
 ##                       nodeSpan: Span): Result[void, ParseError]
 ##   proc visitArg(v: var V, idx: int, tok: Token,
 ##                 stream: TokenStream): Result[void, ParseError]
-##   proc visitProp(v: var V, key: InternedStr, keyStr: openArray[char],
+##   proc visitProp(v: var V, keyStr: openArray[char],
 ##                  tok: Token, stream: TokenStream): Result[void, ParseError]
 ##   proc visitBeginChildren(v: var V): Result[void, ParseError]
 ##   proc visitEndChildren(v: var V): Result[void, ParseError]
@@ -84,17 +84,83 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
     inc cursor
 
     let nameStr = interner.lookup(nameTok.ident)
-    let bRes = visitor.visitBeginNode(nameTok.ident,
-                                  nameStr.toOpenArray(0, nameStr.high),
+    let bRes = visitor.visitBeginNode(nameStr.toOpenArray(0, nameStr.high),
                                   nameTok.span)
     if bRes.isErr: return bRes
 
     var argIdx = 0
-    while true:
+    var done = false
+    while not done:
       let t = peek()
       case t.kind
       of tkNewline, tkSemicolon, tkEof, tkRBrace:
         break
+      of tkLBrace:
+        # children block. Bracket the inner-node walk with
+        # visitBeginChildren / visitEndChildren. Each inner node fires
+        # the same begin/arg/prop/end protocol on the SAME parent
+        # visitor; the visitor's macro-emitted dispatch routes to the
+        # right child-field builder based on its inChildren state.
+        inc cursor   # consume `{`
+        let bcRes = visitor.visitBeginChildren()
+        if bcRes.isErr: return bcRes
+        while true:
+          while peek().kind == tkNewline: inc cursor
+          if peek().kind == tkRBrace: break
+          if peek().kind == tkEof:
+            return err[void, ParseError](initError(peParseExpected, peek().span,
+              "expected `}` to close children block"))
+          # recursive walk of one child node
+          let childTok = peek()
+          if childTok.kind != tkIdent:
+            return err[void, ParseError](initError(peParseExpected, childTok.span,
+              "expected child node name"))
+          inc cursor
+          let childName = interner.lookup(childTok.ident)
+          let cbRes = visitor.visitBeginNode(childName.toOpenArray(0, childName.high),
+                                             childTok.span)
+          if cbRes.isErr: return cbRes
+          var cArgIdx = 0
+          while true:
+            let ct = peek()
+            case ct.kind
+            of tkNewline, tkSemicolon, tkEof, tkRBrace:
+              break
+            of tkIdent, tkString, tkRawString:
+              if peek(1).kind == tkEquals:
+                let cKeyTok = peek()
+                let cKeyHandle =
+                  case cKeyTok.kind
+                  of tkIdent: cKeyTok.ident
+                  of tkString: interner.intern(stream.stringPayloads[cKeyTok.strIdx])
+                  of tkRawString: interner.intern(stream.rawStringPayloads[cKeyTok.rawIdx])
+                  else: InvalidInterned
+                cursor += 2
+                let cValTok = peek()
+                inc cursor
+                let cKeyStr = interner.lookup(cKeyHandle)
+                let cpRes = visitor.visitProp(cKeyStr.toOpenArray(0, cKeyStr.high),
+                                              cValTok, stream)
+                if cpRes.isErr: return cpRes
+              else:
+                inc cursor
+                let caRes = visitor.visitArg(cArgIdx, ct, stream)
+                if caRes.isErr: return caRes
+                inc cArgIdx
+            of tkNumber, tkKeyword:
+              inc cursor
+              let caRes = visitor.visitArg(cArgIdx, ct, stream)
+              if caRes.isErr: return caRes
+              inc cArgIdx
+            else:
+              return err[void, ParseError](initError(peParseUnexpected, ct.span,
+                "unexpected token in child node entries"))
+          let ceRes = visitor.visitEndNode()
+          if ceRes.isErr: return ceRes
+        inc cursor  # consume `}`
+        let ecRes = visitor.visitEndChildren()
+        if ecRes.isErr: return ecRes
+        done = true
       of tkIdent, tkString, tkRawString:
         if peek(1).kind == tkEquals:
           let keyTok = peek()
@@ -108,8 +174,7 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
           let valueTok = peek()
           inc cursor
           let keyStr = interner.lookup(keyHandle)
-          let pRes = visitor.visitProp(keyHandle,
-                                   keyStr.toOpenArray(0, keyStr.high),
+          let pRes = visitor.visitProp(keyStr.toOpenArray(0, keyStr.high),
                                    valueTok, stream)
           if pRes.isErr: return pRes
         else:
@@ -132,81 +197,9 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
   ok(void, ParseError)
 
 proc parseWith*[V](source: string, visitor: var V,
-                   sourcePath = "<input>"): Result[void, ParseError] =
-  ## Walk `source` through `visitor`. Returns Ok on success, or the first
-  ## structural / visitor error encountered.
-  var interner = initInterner()
-  let stream = lex(source, interner)
-
-  # Lex-error short-circuit (matches parser.parse() semantics).
-  for t in stream.tokens:
-    if t.kind == tkError:
-      return err[void, ParseError](stream.errorPayloads[t.errIdx])
-
-  # Minimal walk: skip leading newlines, parse ONE node (no children for
-  # the tracer bullet; cycle 7 adds children).
-  var cursor = 0
-  template peek(off = 0): Token =
-    if cursor + off < stream.tokens.len: stream.tokens[cursor + off]
-    else: Token(kind: tkEof, span: pointSpan(StartPosition))
-
-  while peek().kind == tkNewline: inc cursor
-
-  # Node name (must be bare ident for the tracer; quoted-name comes later)
-  let nameTok = peek()
-  if nameTok.kind != tkIdent:
-    return err[void, ParseError](initError(peParseExpected, nameTok.span,
-      "expected node name"))
-  inc cursor
-
-  let nameStr = interner.lookup(nameTok.ident)
-  let bRes = visitor.visitBeginNode(nameTok.ident,
-                                     nameStr.toOpenArray(0, nameStr.high),
-                                     nameTok.span)
-  if bRes.isErr: return bRes
-
-  # Entries (args + props) until newline / EOF / RBrace
-  var argIdx = 0
-  while true:
-    let t = peek()
-    case t.kind
-    of tkNewline, tkSemicolon, tkEof, tkRBrace:
-      break
-    of tkIdent, tkString, tkRawString:
-      # Could be a property (X=...) or an visitArg (just the value).
-      if peek(1).kind == tkEquals:
-        # property
-        let keyTok = peek()
-        let keyHandle =
-          case keyTok.kind
-          of tkIdent: keyTok.ident
-          of tkString: interner.intern(stream.stringPayloads[keyTok.strIdx])
-          of tkRawString: interner.intern(stream.rawStringPayloads[keyTok.rawIdx])
-          else: InvalidInterned
-        cursor += 2  # consume key + =
-        let valueTok = peek()
-        inc cursor
-        let keyStr = interner.lookup(keyHandle)
-        let pRes = visitor.visitProp(keyHandle, keyStr.toOpenArray(0, keyStr.high),
-                                valueTok, stream)
-        if pRes.isErr: return pRes
-      else:
-        # visitArg
-        inc cursor
-        let aRes = visitor.visitArg(argIdx, t, stream)
-        if aRes.isErr: return aRes
-        inc argIdx
-    of tkNumber, tkKeyword:
-      # bare visitArg (number or keyword)
-      inc cursor
-      let aRes = visitor.visitArg(argIdx, t, stream)
-      if aRes.isErr: return aRes
-      inc argIdx
-    else:
-      return err[void, ParseError](initError(peParseUnexpected, t.span,
-        "unexpected token in node entries"))
-
-  let eRes = visitor.visitEndNode()
-  if eRes.isErr: return eRes
-
-  ok(void, ParseError)
+                   sourcePath = "<input>"): Result[void, ParseError]
+    {.noSideEffect.} =
+  ## Single-node convenience. Delegates to parseDocumentWith so the
+  ## LBrace/children/recovery logic lives in one place. The visitor
+  ## sees the same begin/arg/prop/end protocol either way.
+  parseDocumentWith(source, visitor, sourcePath)
