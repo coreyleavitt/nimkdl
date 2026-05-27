@@ -199,22 +199,38 @@ proc parseNodeWith[V](source: string, visitor: var V,
   # Bare ident → read from source (skips interner roundtrip).
   # Quoted/raw → use the lexer's payload table (escapes already
   # resolved). The visitor sees the SAME unescaped bytes either way.
-  if not skip:
-    let bRes =
-      case nameTok.kind
-      of tkIdent:
-        let nameStart = nameTok.span.start.offset
-        let nameLast = nameTok.span.finish.offset - 1
-        visitor.visitBeginNode(source.toOpenArray(nameStart, nameLast),
-                                nameTok.span)
-      of tkString:
-        let p = stream.stringPayloads[nameTok.strIdx]
-        visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
-      of tkRawString:
-        let p = stream.rawStringPayloads[nameTok.rawIdx]
-        visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
-      else: ok(void, ParseError)   # unreachable
-    if bRes.isErr: return bRes
+  # Validate node-name shape (reject reserved barewords + bidi controls)
+  # whether or not we'll emit — KDL v2 forbids these regardless.
+  case nameTok.kind
+  of tkIdent:
+    let s = nameTok.span.start.offset
+    let l = nameTok.span.finish.offset - 1
+    if isReservedBareword(source.toOpenArray(s, l)):
+      let name = source[s .. l]
+      return err[void, ParseError](initError(peLexReservedKeyword, nameTok.span,
+        "reserved keyword '" & name &
+        "' cannot be used as a bare node name; quote it or use '#" &
+        name & "'"))
+    if not skip:
+      let bRes = visitor.visitBeginNode(source.toOpenArray(s, l), nameTok.span)
+      if bRes.isErr: return bRes
+  of tkString:
+    let p = stream.stringPayloads[nameTok.strIdx]
+    if containsBidiControl(p):
+      return err[void, ParseError](initError(peLexInvalidIdentifier, nameTok.span,
+        "bidi control codepoint in node name"))
+    if not skip:
+      let bRes = visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
+      if bRes.isErr: return bRes
+  of tkRawString:
+    let p = stream.rawStringPayloads[nameTok.rawIdx]
+    if containsBidiControl(p):
+      return err[void, ParseError](initError(peLexInvalidIdentifier, nameTok.span,
+        "bidi control codepoint in node name"))
+    if not skip:
+      let bRes = visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
+      if bRes.isErr: return bRes
+  else: discard   # unreachable
 
   var argIdx = 0
   while true:
@@ -283,25 +299,67 @@ proc parseNodeWith[V](source: string, visitor: var V,
         handleValueAnno(entrySkip)
         let valueTok = peek()
         inc cursor
-        when vcProps in caps:
-          if not entrySkip:
-            if keyTok.kind == tkIdent:
-              let ks = keyTok.span.start.offset
-              let kl = keyTok.span.finish.offset - 1
-              let pRes = visitor.visitProp(
-                            source.toOpenArray(ks, kl), valueTok, stream)
+        # Validate key shape unconditionally — bare reserved keywords +
+        # bidi-tainted quoted/raw keys are grammar-level errors that
+        # apply to every visitor, even those without vcProps.
+        case keyTok.kind
+        of tkIdent:
+          let ks = keyTok.span.start.offset
+          let kl = keyTok.span.finish.offset - 1
+          if isReservedBareword(source.toOpenArray(ks, kl)):
+            return err[void, ParseError](initError(peLexReservedKeyword,
+              keyTok.span,
+              "reserved keyword '" & source[ks .. kl] &
+              "' cannot be used as a property key"))
+          when vcProps in caps:
+            if not entrySkip:
+              let pRes = visitor.visitProp(source.toOpenArray(ks, kl),
+                                          valueTok, stream)
               if pRes.isErr: return pRes
-            else:
-              let payload =
-                if keyTok.kind == tkString:
-                  stream.stringPayloads[keyTok.strIdx]
-                else:
-                  stream.rawStringPayloads[keyTok.rawIdx]
-              let pRes = visitor.visitProp(
-                            payload.toOpenArray(0, payload.high),
-                            valueTok, stream)
+        of tkString:
+          let p = stream.stringPayloads[keyTok.strIdx]
+          if containsBidiControl(p):
+            return err[void, ParseError](initError(peLexInvalidIdentifier,
+              keyTok.span, "bidi control codepoint in property key"))
+          when vcProps in caps:
+            if not entrySkip:
+              let pRes = visitor.visitProp(p.toOpenArray(0, p.high),
+                                          valueTok, stream)
               if pRes.isErr: return pRes
+        of tkRawString:
+          let p = stream.rawStringPayloads[keyTok.rawIdx]
+          if containsBidiControl(p):
+            return err[void, ParseError](initError(peLexInvalidIdentifier,
+              keyTok.span, "bidi control codepoint in property key"))
+          when vcProps in caps:
+            if not entrySkip:
+              let pRes = visitor.visitProp(p.toOpenArray(0, p.high),
+                                          valueTok, stream)
+              if pRes.isErr: return pRes
+        else: discard   # unreachable
       else:
+        # Arg value. tkIdent as arg is a bare-id string per KDL v2,
+        # but must not be a reserved keyword.
+        if t.kind == tkIdent:
+          let s = t.span.start.offset
+          let l = t.span.finish.offset - 1
+          if isReservedBareword(source.toOpenArray(s, l)):
+            let name = source[s .. l]
+            return err[void, ParseError](initError(peLexReservedKeyword,
+              t.span,
+              "reserved keyword '" & name &
+              "' cannot be used as a bare value; quote it or use '#" &
+              name & "'"))
+        elif t.kind == tkString:
+          let p = stream.stringPayloads[t.strIdx]
+          if containsBidiControl(p):
+            return err[void, ParseError](initError(peLexInvalidIdentifier,
+              t.span, "bidi control codepoint in string value"))
+        elif t.kind == tkRawString:
+          let p = stream.rawStringPayloads[t.rawIdx]
+          if containsBidiControl(p):
+            return err[void, ParseError](initError(peLexInvalidIdentifier,
+              t.span, "bidi control codepoint in string value"))
         inc cursor
         when vcArgs in caps:
           if not entrySkip:

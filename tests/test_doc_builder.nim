@@ -147,3 +147,44 @@ suite "DocBuilder slashdash (cycle 9'.4)":
   test "/- arg=correct then /- arg=wrong (repeated-prop interaction)":
     let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_repeated_prop.kdl")
     assertEquivalent(viaP, viaV)
+
+suite "DocBuilder reserved-bareword + keyword-as-key + bidi (cycle 9'.5)":
+
+  proc bothReject(src: string) =
+    let pRes = parse(src)
+    check pRes.isErr
+    var b = newDocBuilder(src, "test")
+    let vRes = parseDocumentWith(src, b)
+    check vRes.isErr
+
+  test "true as bare prop key rejected (true_prop_key_fail)":
+    bothReject(readFile(CorpusRoot / "input" / "true_prop_key_fail.kdl"))
+
+  test "null as bare prop key rejected":
+    bothReject(readFile(CorpusRoot / "input" / "null_prop_key_fail.kdl"))
+
+  test "bare inf/-inf/nan as arg values rejected":
+    bothReject(readFile(CorpusRoot / "input" / "floating_point_keyword_identifier_strings_fail.kdl"))
+
+  test "true as bare node name rejected":
+    bothReject("true\n")
+
+  test "null as bare node name rejected":
+    bothReject("null\n")
+
+  test "tkKeyword #true used as prop key rejected":
+    bothReject("node #true=1\n")
+
+  test "bidi codepoint U+202E in quoted node name rejected":
+    bothReject("\"a‮b\"\n")
+
+  test "bidi codepoint in quoted prop key rejected":
+    bothReject("node \"a‮b\"=1\n")
+
+  test "bare-id with `true` PREFIX is accepted (trueish)":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "true_prefix_in_bare_id.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "bare-id with `null` PREFIX is accepted (nulled)":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "null_prefix_in_bare_id.kdl")
+    assertEquivalent(viaP, viaV)
