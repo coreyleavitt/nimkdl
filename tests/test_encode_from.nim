@@ -225,6 +225,53 @@ suite "encodeFrom: type-level kdlReserved emits (tag) prefix (round-2 H1)":
     check back.isOk
     check back.get.field == "ok"
 
+## emCompact mode in the direct path. Cycle 1 of the encode collapse:
+## the direct path learns to emit single-line `;`-separated output so
+## the typed-encode story can converge on one entry point that handles
+## both modes. New behavior — adds tests; existing emPretty behavior
+## stays unchanged.
+
+suite "encodeFrom: emCompact mode":
+  test "flat type encodes as single line, no trailing newline":
+    let s = Service(name: "web", port: 80, replicas: 1, enabled: true)
+    let r = encodeFrom(s, emCompact)
+    check r.isOk
+    check '\n' notin r.get
+    check r.get.startsWith("service")
+
+  test "direct emCompact matches legacy encode emCompact byte-for-byte":
+    let s = Service(name: "api", port: 8080, replicas: 2, enabled: false)
+    let viaDirect = encodeFrom(s, emCompact)
+    let viaLegacy = encode(s, emCompact)
+    check viaDirect.isOk
+    check viaLegacy.isOk
+    check viaDirect.get == viaLegacy.get
+
+  test "nested children (Server with Action seq) compact form":
+    let srv = Server(name: "web", actions: @[
+      Action(tmpl: "log"), Action(tmpl: "alert")])
+    let r = encodeFrom(srv, emCompact)
+    check r.isOk
+    check '\n' notin r.get
+    check "{" in r.get
+    check "}" in r.get
+
+  test "nested children: direct compact == legacy compact":
+    let srv = Server(name: "web", actions: @[
+      Action(tmpl: "log"), Action(tmpl: "alert")])
+    check encodeFrom(srv, emCompact).get == encode(srv, emCompact).get
+
+  test "emPretty default unchanged":
+    let s = Service(name: "ok", port: 1, replicas: 1, enabled: true)
+    # encodeFrom(s) without mode = encodeFrom(s, emPretty) = current behavior
+    check encodeFrom(s).get == encodeFrom(s, emPretty).get
+
+  test "emPreserve on typed value degrades to emPretty":
+    # No source bytes available for a built-from-scratch value;
+    # emPreserve falls through to canonical (emPretty) emit.
+    let s = Service(name: "ok", port: 1, replicas: 1, enabled: true)
+    check encodeFrom(s, emPreserve).get == encodeFrom(s, emPretty).get
+
 suite "encodeFrom: uint64 bigint promotion (H1 regression)":
   test "uint64 within int64.high encodes as plain int":
     let r = encodeFrom(BigU(n: 12345'u64))

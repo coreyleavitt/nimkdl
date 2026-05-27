@@ -933,6 +933,7 @@ macro deriveEncode(typ: typedesc): untyped =
   # uniform across types; later slices replace the fallback per feature.
   let bufIdent = ident("buf")
   let indentIdent = ident("indent")
+  let modeIdent = ident("mode")
   var hasUnsupported = shape.hasVariant
   for f in shape.shared:
     # Option[T] supported only on kdlProp fields in E.4 scope. On kdlArg
@@ -956,10 +957,10 @@ macro deriveEncode(typ: typedesc): untyped =
       let nRes = kdlEncodeImpl(`vIdent`, legacyDoc)
       if nRes.isErr: return err[void, ParseError](nRes.getErr)
       legacyDoc.nodes.add(nRes.get)
-      appendIndent(`bufIdent`, `indentIdent`)
-      let s = kdlEncode.encode(legacyDoc, emPretty)
-      # Legacy emit already includes trailing newline; strip-and-re-add
-      # if our caller is nesting (indent > 0) — but for now just append.
+      if `modeIdent` != emCompact:
+        appendIndent(`bufIdent`, `indentIdent`)
+      let effective = if `modeIdent` == emPreserve: emPretty else: `modeIdent`
+      let s = kdlEncode.encode(legacyDoc, effective)
       `bufIdent`.add(s)
       ok(void, ParseError)
   else:
@@ -969,16 +970,21 @@ macro deriveEncode(typ: typedesc): untyped =
     # divergence from encode(v, emPretty) and a real round-trip break
     # (round-2 review H1).
     let typeReservedLit = newLit(typeReserved)
+    # Indent + tag + name. Compact mode suppresses the leading indent
+    # (the caller, e.g. encode[seq[T]] or the children-block emit, is
+    # responsible for between-node separators in compact mode).
     if typeReserved.len > 0:
       directBody.add quote do:
-        appendIndent(`bufIdent`, `indentIdent`)
+        if `modeIdent` != emCompact:
+          appendIndent(`bufIdent`, `indentIdent`)
         `bufIdent`.add('(')
         `bufIdent`.add(`typeReservedLit`)
         `bufIdent`.add(')')
         `bufIdent`.add(`nodeNameLit`)
     else:
       directBody.add quote do:
-        appendIndent(`bufIdent`, `indentIdent`)
+        if `modeIdent` != emCompact:
+          appendIndent(`bufIdent`, `indentIdent`)
         `bufIdent`.add(`nodeNameLit`)
     # Helper: emit one value with optional kdlReserved validation and
     # `(tag)` prefix. Used by BOTH the arg and prop loops so kdlReserved
@@ -1054,29 +1060,49 @@ macro deriveEncode(typ: typedesc): untyped =
         let access = newDotExpr(vIdent, ident(f.nimName))
         let lenExpr = quote do: `access`.len > 0
         anyNonEmpty = infix(anyNonEmpty, "or", lenExpr)
+      # Children-block open: pretty = " {\n" then indent each child;
+      # compact = " { " then "; "-separated children, no indent.
       directBody.add quote do:
         if `anyNonEmpty`:
-          `bufIdent`.add(" {\n")
+          if `modeIdent` == emCompact: `bufIdent`.add(" {")
+          else: `bufIdent`.add(" {\n")
+      # Emit each child via its own kdlEncodeIntoImpl. In compact mode
+      # we need "; " between siblings; track that with `__firstChild`.
+      let firstChildIdent = genSym(nskVar, "firstChild")
+      directBody.add quote do:
+        var `firstChildIdent` = true
       for f in childFields:
         let access = newDotExpr(vIdent, ident(f.nimName))
         directBody.add quote do:
           for child in `access`:
-            let cRes = kdlEncodeIntoImpl(child, `bufIdent`, `indentIdent` + 1)
+            if `modeIdent` == emCompact:
+              if not `firstChildIdent`: `bufIdent`.add("; ")
+              `firstChildIdent` = false
+            let cRes = kdlEncodeIntoImpl(child, `bufIdent`, `modeIdent`,
+                                         `indentIdent` + 1)
             if cRes.isErr: return cRes
+      # Children-block close + node terminator.
+      # Pretty:  indent + "}\n"    (or just "\n" when no block was opened)
+      # Compact: "}"                (no leading space, no trailing newline —
+      #          the caller handles "; " between sibling nodes)
       directBody.add quote do:
         if `anyNonEmpty`:
-          appendIndent(`bufIdent`, `indentIdent`)
-          `bufIdent`.add("}\n")
+          if `modeIdent` == emCompact:
+            `bufIdent`.add("}")
+          else:
+            appendIndent(`bufIdent`, `indentIdent`)
+            `bufIdent`.add("}\n")
         else:
-          `bufIdent`.add('\n')
+          if `modeIdent` != emCompact: `bufIdent`.add('\n')
     else:
       directBody.add quote do:
-        `bufIdent`.add('\n')
+        if `modeIdent` != emCompact: `bufIdent`.add('\n')
     directBody.add quote do:
       ok(void, ParseError)
 
   let encodeIntoProc = quote do:
     proc kdlEncodeIntoImpl*(`vIdent`: `typ`, `bufIdent`: var string,
+                            `modeIdent`: EncodeMode = emPretty,
                             `indentIdent`: int = 0):
         Result[void, ParseError] {.noSideEffect.} =
       `directBody`
@@ -1130,32 +1156,35 @@ proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
   doc.nodes.add(nRes.get)
   ok[string, ParseError](kdlEncode.encode(doc, mode))
 
-proc encodeFrom*[T: object](v: T): Result[string, ParseError] =
-  ## Typed-direct encode (cycle E). Skips KdlNode + KdlDoc construction;
-  ## the macro-emitted `kdlEncodeIntoImpl` writes KDL bytes straight into
-  ## a string buffer in one pass. Symmetric with `parseInto[T]` on the
-  ## decode side.
-  ##
-  ## Output matches `encode(v, emPretty).get` byte-for-byte. Returns Err
-  ## on kdlReserved validation failure (mirrors `encode[T]`).
+proc encodeFrom*[T: object](v: T, mode = emPretty):
+    Result[string, ParseError] =
+  ## Typed-direct encode. Skips KdlNode + KdlDoc construction; the
+  ## macro-emitted `kdlEncodeIntoImpl` writes KDL bytes straight into a
+  ## string buffer in one pass. Output matches `encode(v, mode).get`
+  ## byte-for-byte for emPretty and emCompact. emPreserve degrades to
+  ## emPretty (no source bytes to preserve for a built-from-scratch
+  ## value).
   ##
   ## `T` must be declared inside a `kdl:` block.
   mixin kdlEncodeIntoImpl
   var buf = newStringOfCap(64)
-  let r = kdlEncodeIntoImpl(v, buf)
+  let r = kdlEncodeIntoImpl(v, buf, mode)
   if r.isErr: return err[string, ParseError](r.getErr)
   ok[string, ParseError](buf)
 
-proc encodeFrom*[T: object](vs: seq[T]): Result[string, ParseError] =
-  ## seq[T] variant — each element becomes one top-level node, newline-
-  ## separated. Symmetric with `parseInto[seq[T]]`. Stops at the first
-  ## kdlReserved validation failure.
+proc encodeFrom*[T: object](vs: seq[T], mode = emPretty):
+    Result[string, ParseError] =
+  ## seq[T] variant — each element becomes one top-level node.
+  ## emPretty: newline-separated. emCompact: `; `-separated, single
+  ## line. Stops at the first kdlReserved validation failure.
   ##
   ## `T` must be declared inside a `kdl:` block.
   mixin kdlEncodeIntoImpl
   var buf = newStringOfCap(64 * vs.len + 32)
-  for v in vs:
-    let r = kdlEncodeIntoImpl(v, buf)
+  for i, v in vs:
+    if mode == emCompact and i > 0:
+      buf.add("; ")
+    let r = kdlEncodeIntoImpl(v, buf, mode)
     if r.isErr: return err[string, ParseError](r.getErr)
   ok[string, ParseError](buf)
 
