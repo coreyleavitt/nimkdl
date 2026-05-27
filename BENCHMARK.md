@@ -211,6 +211,31 @@ suite exercises.
 Source: `benchmarks/comparisons/last-corpus.txt` (regenerate with
 `benchmarks/comparisons/run.sh corpus`).
 
+## Edit-then-encode
+
+The editor/formatter workflow: open file → mutate one node → save.
+Both nimkdl and kdl-rs explicitly designed for this (byte-lossless
+preservation of unmutated regions). Other parsers don't have a
+mutable AST + encode path, so this is a 2-way comparison.
+
+Full cycle per iteration (parse + mutate one prop on the first node +
+encode) on `realistic-config.kdl`:
+
+| Parser  | μs / cycle | cycles / sec | vs kdl-rs |
+|---------|-----------:|-------------:|----------:|
+| **nimkdl** (`parse(preserveFormat=true)` + `setProp` + `encode(emPreserve)`) | **98** | **10.2K** | **8.5× faster** |
+| kdl-rs (`parse_v2` + `KdlNode::push` + `to_string`) | 860 | 1.2K | 1.0× |
+
+The architectural difference: nimkdl carries a per-node `parseHash`,
+so on encode the mutated subtree emits canonical text while every
+unmutated subtree splices source bytes verbatim — the encode cost is
+bounded by the size of the *change*, not the size of the document.
+kdl-rs stores per-token whitespace on every node and walks all of it
+on `to_string`, paying the full tree's emit cost whether or not
+anything changed.
+
+Source: `benchmarks/comparisons/run.sh edit`.
+
 ## Methodology
 
 Cross-implementation benchmarks lie easily. The discipline that makes this comparison hold up to outside scrutiny.

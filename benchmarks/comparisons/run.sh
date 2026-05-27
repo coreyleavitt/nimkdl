@@ -332,6 +332,41 @@ run_corpus() {
   echo ""
 }
 
+run_edit() {
+  echo "================================================================"
+  echo "  Edit-then-encode (full parse → mutate one node → encode cycle)"
+  echo "  Only nimkdl + kdl-rs — others have no mutable AST + encode path."
+  echo "================================================================"
+
+  # nimkdl
+  $CONTAINER_RUNTIME run --rm \
+    -v "$REPO_ROOT:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/nimlang/nim:2.2.0 \
+    sh -c '
+      set -e
+      nim c --hints:off -d:release -d:lto \
+        -p:/work/src -o:/tmp/nimkdl-edit \
+        benchmarks/comparisons/nimkdl/edit.nim 2>&1 | tail -1 >&2
+      /tmp/nimkdl-edit /fixtures/realistic-config.kdl
+    '
+
+  # kdl-rs
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/kdl-rs:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/library/rust:1.83 \
+    sh -c '
+      set -e
+      cargo build --release --bin kdlrs-edit 2>&1 | tail -1 >&2
+      ./target/release/kdlrs-edit /fixtures/realistic-config.kdl
+    '
+
+  echo ""
+}
+
 if [ $# -eq 0 ]; then
   run_nimkdl
   run_ckdl
@@ -340,6 +375,7 @@ if [ $# -eq 0 ]; then
   run_kdl_rs
   run_memory
   run_corpus
+  run_edit
   exit 0
 fi
 
@@ -353,6 +389,7 @@ for target in "$@"; do
     kdl-rs)        run_kdl_rs ;;
     memory)        run_memory ;;
     corpus)        run_corpus ;;
-    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs|memory|corpus)" >&2; exit 1 ;;
+    edit)          run_edit ;;
+    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs|memory|corpus|edit)" >&2; exit 1 ;;
   esac
 done

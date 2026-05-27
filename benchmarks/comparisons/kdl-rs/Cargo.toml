@@ -19,3 +19,7 @@ path = "mem.rs"
 [[bin]]
 name = "kdlrs-corpus"
 path = "corpus.rs"
+
+[[bin]]
+name = "kdlrs-edit"
+path = "edit.rs"
