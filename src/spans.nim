@@ -74,6 +74,12 @@ type
     peTypeMissingRequired
     peTypeEnumInvalid
     peTypeDiscriminatorBad
+    peEncodeUnsupported    ## the typed encoder doesn't support this
+                           ## Nim shape (e.g. variant case-object types,
+                           ## Option[T] on a kdlArg). Distinct from
+                           ## peTypeMismatch (which means a value's KDL
+                           ## kind doesn't match its Nim field type) —
+                           ## here the shape itself is the issue.
     peOther
 
   ParseError* = object
@@ -225,6 +231,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peTypeMissingRequired:  "required field missing"
   of peTypeEnumInvalid:      "value not in declared enum"
   of peTypeDiscriminatorBad: "unrecognized variant discriminator"
+  of peEncodeUnsupported:    "typed encoder does not support this Nim shape"
   of peOther:                "parse error"
 
 func lineSlice(source: string, line: int): string =

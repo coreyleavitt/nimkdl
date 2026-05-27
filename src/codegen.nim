@@ -743,8 +743,16 @@ macro deriveEncode(typ: typedesc): untyped =
   if hasUnsupported:
     let reasonLit = newLit(unsupportedReason)
     let typeNameLit = newLit(typeNameStr)
+    # peEncodeUnsupported is the dedicated code for "this Nim shape
+    # isn't implemented in the typed encoder yet." Distinct from
+    # peTypeMismatch (which means a value's KDL kind doesn't match
+    # its Nim field type) — callers branching on the error code can
+    # tell "I picked a shape the encoder can't render" apart from "I
+    # tried to encode an int into a string field."
+    # Transitional: replace with proper variant / Option[kdlArg] emit
+    # when a real consumer needs it.
     directBody.add quote do:
-      err[void, ParseError](initError(peTypeMismatch,
+      err[void, ParseError](initError(peEncodeUnsupported,
         pointSpan(StartPosition),
         "encode[" & `typeNameLit` & "]: " & `reasonLit` &
         " are not supported by the typed encoder. Build the KdlDoc " &

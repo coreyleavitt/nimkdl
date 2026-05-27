@@ -605,6 +605,13 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
   template safeSpliceBounds(spanS, spanE: int): bool =
     spanS >= 0 and spanE >= spanS and spanE <= output.len
 
+  # Track bad-bounds separately from anySpliced. If ANY child/entry has
+  # malformed spans, the partial splices we'd return would interleave
+  # spliced bytes with stale source bytes for the malformed slot —
+  # silent wrong output. Force canonicalEmit in that case even if
+  # other splices succeeded (round-4 H2).
+  var anyBadBounds = false
+
   for i in countdown(n.children.high, 0):
     let c = n.children[i]
     if not validSpanInto(c.span, doc.sourceText): continue
@@ -612,7 +619,9 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
     if childResults[i].hash == c.parseHash: continue
     let s = c.span.start.offset - base
     let e = c.span.finish.offset - base
-    if not safeSpliceBounds(s, e): continue
+    if not safeSpliceBounds(s, e):
+      anyBadBounds = true
+      continue
     output = output[0 ..< s] & childResults[i].text & output[e ..< output.len]
     anySpliced = true
 
@@ -622,16 +631,18 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
     if hashEntry(entry, doc.interner) == entry.parseHash: continue
     let s = entry.span.start.offset - base
     let e = entry.span.finish.offset - base
-    if not safeSpliceBounds(s, e): continue
+    if not safeSpliceBounds(s, e):
+      anyBadBounds = true
+      continue
     output = output[0 ..< s] & emitEntry(entry, doc.interner) &
              output[e ..< output.len]
     anySpliced = true
 
-  if not anySpliced:
-    # Node-level hash mismatched but no per-element splice fired —
-    # the change must be in the node's name or type annotation. We
-    # don't store a separate localHash for that; fall back to
-    # canonical for this node. (Siblings still preserve.)
+  if anyBadBounds or not anySpliced:
+    # Either no splice fired (the node-level hash mismatch must be in
+    # the node's name or type annotation — fall back), or some splice
+    # was skipped due to malformed spans (the partial result would
+    # interleave fresh + stale bytes silently — fall back too).
     canonicalEmit()
     return
 
@@ -687,15 +698,34 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
     let topShape = int(doc.parseTopLevelCount) == doc.nodes.len
     if doc.sourceText.len > 0 and topShape:
       result = doc.sourceText
+      # `result` is progressively mutated in reverse-index order. Each
+      # iteration's span values came from the parser against the
+      # ORIGINAL sourceText length, but the splice writes into the
+      # current (mutated) `result`. After an earlier splice changed
+      # the buffer length, a later span MAY now overshoot `result.len`
+      # — or, for programmatically-constructed ASTs with overlapping
+      # top-level spans, the splice indices could land in already-
+      # rewritten territory. Nim's string slicing doesn't crash on
+      # out-of-range bounds; it silently returns the wrong substring,
+      # producing doubled / missing bytes. Detect that and fall back
+      # to canonical per-node emit for the whole doc (round-4 H1,
+      # mirrors the per-child safeSpliceBounds guard added round 2).
+      var docBadBounds = false
       for i in countdown(doc.nodes.high, 0):
         let n = doc.nodes[i]
         if not validSpanInto(n.span, doc.sourceText): continue
+        let s = n.span.start.offset
+        let e = n.span.finish.offset
+        if s < 0 or e < s or e > result.len:
+          docBadBounds = true
+          break
         let nodeOut = emitNodePreserve(n, doc, 0)
-        let nodeSource = doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
+        let nodeSource = doc.sourceText[s ..< e]
         if nodeOut != nodeSource:
-          result = result[0 ..< n.span.start.offset] & nodeOut &
-                   result[n.span.finish.offset ..< result.len]
-      return result
+          result = result[0 ..< s] & nodeOut & result[e ..< result.len]
+      if not docBadBounds:
+        return result
+      # Otherwise fall through to the per-node canonical emit below.
     # Structural change at the top level OR no sourceText to splice
     # into. Fall back to per-node emit joined by newlines.
     var parts: seq[string] = @[]

@@ -239,13 +239,20 @@ suite "encode: emCompact mode":
     check '\n' notin r.get
     check r.get.startsWith("service")
 
-  test "direct emCompact matches legacy encode emCompact byte-for-byte":
+  test "compact matches the AST emitter for the same data (flat)":
+    # encode[T] writes via the macro-emitted direct path; encode(doc, ...)
+    # writes via emitNode (encode.nim). They're independent implementations
+    # of the same compact spec — pin them against each other, not against
+    # `encode[T] == encode[T]` which is a tautology.
     let s = Service(name: "api", port: 8080, replicas: 2, enabled: false)
-    let viaDirect = encode(s, emCompact)
-    let viaLegacy = encode(s, emCompact)
-    check viaDirect.isOk
-    check viaLegacy.isOk
-    check viaDirect.get == viaLegacy.get
+    var doc = newDoc()
+    var n = newNode(doc, "service")
+    n.addArg(doc, newStringValue("api"))
+    n.setProp(doc, "port", newIntValue(8080))
+    n.setProp(doc, "replicas", newIntValue(2))
+    n.setProp(doc, "enabled", newBoolValue(false))
+    doc.add(n)
+    check encode(s, emCompact).get == encode(doc, emCompact)
 
   test "nested children (Server with Action seq) compact form":
     let srv = Server(name: "web", actions: @[
@@ -256,10 +263,18 @@ suite "encode: emCompact mode":
     check "{" in r.get
     check "}" in r.get
 
-  test "nested children: direct compact == legacy compact":
+  test "compact matches the AST emitter for the same data (nested)":
     let srv = Server(name: "web", actions: @[
       Action(tmpl: "log"), Action(tmpl: "alert")])
-    check encode(srv, emCompact).get == encode(srv, emCompact).get
+    var doc = newDoc()
+    var server = newNode(doc, "server")
+    server.addArg(doc, newStringValue("web"))
+    for tmpl in ["log", "alert"]:
+      var action = newNode(doc, "action")
+      action.addArg(doc, newStringValue(tmpl))
+      server.children.add(action)
+    doc.add(server)
+    check encode(srv, emCompact).get == encode(doc, emCompact)
 
   test "emPretty default unchanged":
     let s = Service(name: "ok", port: 1, replicas: 1, enabled: true)
@@ -287,3 +302,102 @@ suite "encode: uint64 bigint promotion (H1 regression)":
   test "encode value matches legacy for the same big uint64":
     let v = BigU(n: 18446744073709551614'u64)
     check encode(v).get == encode(v, emPretty).get
+
+# forcedTag plumbing: kdlReserved on a kdlChild slot (field-level tag
+# propagates through to the child's emit via the kdlEncodeIntoImpl
+# forcedTag parameter — closes a coverage gap flagged in round 4).
+
+kdl:
+  type
+    SubInner {.kdlNode: "sub".} = object
+      flag {.kdlProp.}: bool
+    OuterTagged {.kdlNode: "outer".} = object
+      sub {.kdlChild, kdlReserved: "version".}: SubInner
+
+suite "encode: field-level kdlReserved on a single kdlChild (forcedTag)":
+  test "child node carries (version) tag from the parent slot":
+    let v = OuterTagged(sub: SubInner(flag: true))
+    let r = encode(v)
+    check r.isOk
+    check "(version)sub" in r.get
+  test "round-trips through decode":
+    let v = OuterTagged(sub: SubInner(flag: true))
+    let back = decode[OuterTagged](encode(v).get)
+    check back.isOk
+    check back.get.sub.flag == true
+
+# Option[Tagged] kdlChild: an optional child whose type carries a
+# type-level kdlReserved. Exercises csOption path with non-empty
+# forcedTag-fallthrough (no field-level tag, child's own typeReserved
+# kicks in).
+
+kdl:
+  type
+    VTagged {.kdlNode: "vt", kdlReserved: "v2".} = object
+      f {.kdlProp.}: string
+    HoldsOpt {.kdlNode: "holds".} = object
+      maybe {.kdlChild.}: Option[VTagged]
+
+suite "encode: Option[T] kdlChild where T has type-level kdlReserved":
+  test "present child emits (v2)vt":
+    let v = HoldsOpt(maybe: some(VTagged(f: "ok")))
+    let r = encode(v)
+    check r.isOk
+    check "(v2)vt" in r.get
+  test "absent child emits no block":
+    let v = HoldsOpt(maybe: none(VTagged))
+    let r = encode(v)
+    check r.isOk
+    check "{" notin r.get
+  test "present child round-trips":
+    let v = HoldsOpt(maybe: some(VTagged(f: "ok")))
+    let back = decode[HoldsOpt](encode(v).get)
+    check back.isOk
+    check back.get.maybe.isSome
+    check back.get.maybe.get.f == "ok"
+
+# seq[Tagged] kdlChild: each element gets the type-level kdlReserved
+# annotation via its own kdlEncodeIntoImpl. csSeq path with type-level
+# tag in the child type.
+
+kdl:
+  type
+    HoldsSeq {.kdlNode: "holds-seq".} = object
+      items {.kdlChild.}: seq[VTagged]
+
+suite "encode: seq[T] kdlChild where T has type-level kdlReserved":
+  test "each element carries (v2)vt":
+    let v = HoldsSeq(items: @[
+      VTagged(f: "a"), VTagged(f: "b"), VTagged(f: "c")])
+    let r = encode(v)
+    check r.isOk
+    check r.get.count("(v2)vt") == 3
+  test "round-trips through decode":
+    let v = HoldsSeq(items: @[VTagged(f: "a"), VTagged(f: "b")])
+    let back = decode[HoldsSeq](encode(v).get)
+    check back.isOk
+    check back.get.items.len == 2
+    check back.get.items[0].f == "a"
+
+# Runtime-error stub: variant types return peEncodeUnsupported via the
+# transitional stub. Asserts the stub fires AND uses the right code.
+
+kdl:
+  type
+    Kind = enum
+      kFoo = "foo"
+      kBar = "bar"
+    V {.kdlNode: "v".} = object
+      case kind {.kdlArg.}: Kind
+      of kFoo:
+        a {.kdlProp.}: string
+      of kBar:
+        b {.kdlProp.}: int
+
+suite "encode: variant types fail cleanly with peEncodeUnsupported":
+  test "variant value returns peEncodeUnsupported (not peTypeMismatch)":
+    let v = V(kind: kFoo, a: "x")
+    let r = encode(v)
+    check r.isErr
+    check r.getErr.code == peEncodeUnsupported
+    check "variant" in r.getErr.hint
