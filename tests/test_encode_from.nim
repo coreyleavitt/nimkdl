@@ -119,3 +119,39 @@ suite "encodeFrom[T] kdlReserved (cycle E.6)":
     let r = encodeFrom(bad)
     check r.isErr
     check r.getErr.code == peReservedTypeInvalid
+
+suite "encodeFrom[T] string escaping (cycle E.3)":
+
+  proc roundTripsEqual(s: Service) =
+    let viaLegacy = encode(s, emPretty)
+    check viaLegacy.isOk
+    let viaDirect = encodeFrom(s)
+    check viaDirect.isOk
+    check viaDirect.get == viaLegacy.get
+
+  test "name with embedded quote — escapes match legacy":
+    roundTripsEqual(Service(name: "with \"quote\"", port: 1))
+
+  test "name with backslash":
+    roundTripsEqual(Service(name: "back\\slash", port: 2))
+
+  test "name with newline":
+    roundTripsEqual(Service(name: "two\nlines", port: 3))
+
+  test "name with tab + cr":
+    roundTripsEqual(Service(name: "tab\there\rand cr", port: 4))
+
+  test "name with control byte (\\x07 bell)":
+    roundTripsEqual(Service(name: "bell\x07char", port: 5))
+
+  test "name with NUL byte":
+    roundTripsEqual(Service(name: "with\x00nul", port: 6))
+
+  test "empty string":
+    roundTripsEqual(Service(name: "", port: 7))
+
+  test "name that looks like a reserved keyword (#true literal text)":
+    roundTripsEqual(Service(name: "true", port: 8))
+
+  test "name with non-ASCII utf8 (☃ snowman)":
+    roundTripsEqual(Service(name: "snow☃man", port: 9))

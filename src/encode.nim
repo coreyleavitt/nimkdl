@@ -155,9 +155,11 @@ func appendEscapedBody*(buf: var string, s: string) {.noSideEffect, inline.} =
     of '\x00'..'\x07', '\x0B', '\x0E'..'\x1F', '\x7F':
       const Hex = "0123456789abcdef"
       buf.add('\\'); buf.add('u'); buf.add('{')
+      # Always two hex digits — matches legacy emit's `escapeStringBody`
+      # output. Single-digit form is also valid KDL but byte-equivalence
+      # tests pin the two-digit shape.
       let v = uint8(ch)
-      if v >= 0x10:
-        buf.add(Hex[int(v shr 4)])
+      buf.add(Hex[int(v shr 4)])
       buf.add(Hex[int(v and 0xF)])
       buf.add('}')
     else:      buf.add(ch)
