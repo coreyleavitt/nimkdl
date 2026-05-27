@@ -1299,6 +1299,13 @@ import ./numlit
 #   - kdlChild on any shared or branch field: not implemented
 #   - kdlProp discriminator: not implemented (the disc could arrive after
 #     branch props, requiring buffering; punt until needed in practice)
+
+# ---------------------------------------------------------------------------
+# Shared visitor codegen helpers — used by BOTH the flat (deriveVisitor)
+# and variant (emitVariantVisitor) emitters. Lifted out of either site
+# so a change to the validation/comparison/hint semantics lands once.
+# ---------------------------------------------------------------------------
+
 proc emitNameMatchCheck(nameStrIdent, nodeLit: NimNode): NimNode {.compileTime.} =
   ## Emit a "is the openArray[char] `nameStrIdent` byte-equal to the
   ## compile-time string literal `nodeLit`" check returning a `bool`.
@@ -1314,6 +1321,23 @@ proc emitNameMatchCheck(nameStrIdent, nodeLit: NimNode): NimNode {.compileTime.}
           if `nameStrIdent`[i] != `nodeLit`[i]:
             match = false; break
       match
+
+proc emitAnnoSnapshot(bIdent: NimNode): (NimNode, NimNode) {.compileTime.} =
+  ## Emit the snapshot+clear pair used at the top of every primitive
+  ## decode. The snapshot stmt captures `bIdent.pendingValueAnno` into a
+  ## fresh local (`annoSym`) and immediately clears the builder field —
+  ## so any early-Err return from the primitive decode leaves the
+  ## builder anno clean, which means accumulating-mode recovery can't
+  ## leak the annotation into the next field's reserved-tag check.
+  ##
+  ## Returns `(snapshotStmt, annoSym)`; caller splices the stmt at the
+  ## TOP of the per-field decode body and passes `annoSym` to
+  ## `emitReservedValidate`.
+  let annoSym = genSym(nskLet, "savedAnno")
+  let snapshot = quote do:
+    let `annoSym` = `bIdent`.pendingValueAnno
+    `bIdent`.pendingValueAnno = ""
+  (snapshot, annoSym)
 
 proc capAnnoForHint(s: string): string {.inline.} =
   ## Cap a user-controlled annotation string before embedding in an
@@ -1355,6 +1379,14 @@ proc emitReservedValidate(
   ##   2. annoSym present + doesn't match expectedReserved → err
   ##   3. annoSym present + matches → run validateReserved on a
   ##      transient KdlValue built from the decoded primitive
+  ##
+  ## A fourth case is **annoSym present but field has NO kdlReserved**
+  ## (the field declared no constraint, but the source happened to
+  ## supply an annotation anyway, e.g. `port=(ipv4)80`). This falls
+  ## through check 2 (expectedReservedLit.len == 0) and still runs
+  ## check 3's validateReserved — mirroring DocBuilder's behavior that
+  ## ANY source annotation must validate against its tag, regardless
+  ## of whether the receiving field cares about the tag's identity.
   ##
   ## User-controlled annotation bytes embedded in error hints are
   ## length-capped via `capAnnoForHint` to defeat log-amplification.
@@ -1565,16 +1597,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
     let fieldLabel = newLit(typName & "." & f.nimName)
     let kdlNameLit = newLit(f.kdlName)
     let expectedReservedLit = newLit(f.expectedReserved)
-    # Snapshot+clear pendingValueAnno at the TOP of every primitive decode.
-    # After this point, any early-Err return from the primitive decode
-    # (int kind-mismatch, decodeIntFromToken failure, etc.) sees a clean
-    # builder, so accumulating-mode recovery doesn't leak the annotation
-    # into the next field's reserved-tag check. validateBlock then reads
-    # the snapshot — not the cleared builder field. Round-2 review H1.
-    let annoSym = genSym(nskLet, "savedAnno")
-    let snapshot = quote do:
-      let `annoSym` = `bIdent`.pendingValueAnno
-      `bIdent`.pendingValueAnno = ""
+    let (snapshot, annoSym) = emitAnnoSnapshot(bIdent)
     proc validateBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
       emitReservedValidate(bIdent, tokIdent, kdlNameLit,
                            expectedReservedLit, annoSym,
@@ -1596,7 +1619,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         if not decodeEnumFromString(`outSym`, `strSym`):
           return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "invalid enum value for `" &
-            `fieldLabel` & "`: '" & `strSym` & "'"))
+            `fieldLabel` & "`: '" & capAnnoForHint(`strSym`) & "'"))
       let v = validateBlock(strSym, "newStringValue")
       let body = newStmtList()
       body.add(decodeBlock)
@@ -1827,9 +1850,18 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
   for branch in shape.variant.branches:
     let branchPrefix = $branch.discValue
     var branchBody = newStmtList()
-    # Required-field checks: shared first, then branch. Wording mirrors
-    # the AST-walk path's emitArgDecode / emitAttrDecode emit so the
-    # error hint is identical across both decode paths.
+    # Required-field checks: shared first, then branch.
+    #
+    # Deliberate divergence from the flat visitor (which uses
+    # `set[uint8]` + per-field bit indices on the builder): the
+    # variant visitor stores per-field bool `_seen` flags directly on
+    # the builder because each branch's required-field set is
+    # different and branch fields live as flat locals (one slot per
+    # field across all branches). A shared bitset doesn't compose
+    # across branches without a bit-allocation pass that the per-field
+    # bool sidesteps. Don't try to unify the two strategies before
+    # restructuring how the variant builder lays out its locals — it
+    # looks like duplication but it isn't.
     for f in shape.shared:
       if f.defaultExpr.kind == nnkEmpty:
         let seenFlag = ident(f.nimName & "_seen")
@@ -1997,6 +2029,14 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       let r = parseDocumentWith(source, sb, sourcePath)
       if r.isErr: return err[seq[`typSym`], ParseError](r.getErr)
       ok[seq[`typSym`], ParseError](sb.results)
+  # Both kdlBuildVisitorAll{,Seq} merge two independently-capped error
+  # buffers: `parserErrs` (lex/syntax errors bounded by
+  # MaxAccumulatedErrors inside parseDocumentWith) and `sb.errors`
+  # (per-node visitor failures bounded by MaxAccumulatedErrors at every
+  # add site in the seq wrapper). Combined output is therefore bounded
+  # at 2 × MaxAccumulatedErrors = ~2048 ParseErrors. The two buffers
+  # capture orthogonal failure modes — keeping them split lets callers
+  # distinguish "couldn't parse" from "parsed but didn't decode."
   let kvpAllSeqProc = quote do:
     proc kdlBuildVisitorAllSeq(_: typedesc[`typSym`], source: string,
                                sourcePath: string):
@@ -2271,7 +2311,7 @@ macro deriveVisitor(typ: typedesc): untyped =
     childBeginDispatch.add(newNimNode(nnkElse).add quote do:
       return err[void, ParseError](initError(peTypeUnknownField, `spanIdent`,
         "`" & `nodeLit` & "` has no child kind `" &
-        openArrayToString(`nameStrIdent`) & "`")))
+        capAnnoForHint(openArrayToString(`nameStrIdent`)) & "`")))
 
   let nameCheck = emitNameMatchCheck(nameStrIdent, nodeLit)
   let beginNodeProc =
@@ -2330,15 +2370,7 @@ macro deriveVisitor(typ: typedesc): untyped =
     # visitor + AST-walk paths agree on every input.
     let expectedReservedLit = newLit(f.expectedReserved)
     let kdlNameLit = newLit(f.kdlName)
-    # Snapshot+clear pendingValueAnno at the TOP of every primitive
-    # decode. Same fix as in emitPrimitiveDecode — after this point any
-    # early-Err return from the primitive decode leaves the builder anno
-    # clean, so accumulating-mode recovery doesn't leak it into the next
-    # field's reserved-tag check. validateBlock reads the snapshot.
-    let annoSym = genSym(nskLet, "savedAnno")
-    let snapshot = quote do:
-      let `annoSym` = `bIdent`.pendingValueAnno
-      `bIdent`.pendingValueAnno = ""
+    let (snapshot, annoSym) = emitAnnoSnapshot(bIdent)
     proc validateReservedBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
       emitReservedValidate(bIdent, tokIdent, kdlNameLit,
                            expectedReservedLit, annoSym,
@@ -2382,7 +2414,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         if not decodeEnumFromString(`outSym`, `strSym`):
           return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "invalid enum value for `" &
-            `fieldLabel` & "`: '" & `strSym` & "'"))
+            `fieldLabel` & "`: '" & capAnnoForHint(`strSym`) & "'"))
       let assignBody = newStmtList()
       assignBody.add(body)
       # Enum source is always a string token — validate via newStringValue
@@ -2564,12 +2596,12 @@ macro deriveVisitor(typ: typedesc): untyped =
     propDispatch = quote do:
       return err[void, ParseError](initError(peTypeUnknownField, `tokIdent`.span,
         "`" & `nodeLit` & "` has no field `" &
-        openArrayToString(`keyStrIdent`) & "`"))
+        capAnnoForHint(openArrayToString(`keyStrIdent`)) & "`"))
   else:
     let elseBranch = quote do:
       return err[void, ParseError](initError(peTypeUnknownField, `tokIdent`.span,
         "`" & `nodeLit` & "` has no field `" &
-        openArrayToString(`keyStrIdent`) & "`"))
+        capAnnoForHint(openArrayToString(`keyStrIdent`)) & "`"))
     # Build elif cascade from back to front
     propDispatch = elseBranch
     for i in countdown(propBranches.high, 0):
@@ -2871,6 +2903,14 @@ macro deriveVisitor(typ: typedesc): untyped =
   # lex / syntax / visitor errors at any node boundary push to the
   # error buffer and the parser resyncs at the next node terminator.
   # Surviving nodes still commit to `results`. Powers `decodeAll[T]`.
+  #
+  # Combined output bound: `parserErrs` and `sb.errors` are each
+  # independently capped at MaxAccumulatedErrors; the returned
+  # `errors` seq is therefore bounded at 2 × MaxAccumulatedErrors
+  # (~2048 ParseErrors, ~400 KB). Kept split rather than unified into
+  # one buffer because the two surfaces capture orthogonal failure
+  # modes — keeping them visible separately lets callers distinguish
+  # "didn't parse" from "parsed but didn't decode."
   let kvpAllSeqProc = quote do:
     proc kdlBuildVisitorAllSeq(_: typedesc[`typSym`], source: string,
                                sourcePath: string):

@@ -40,6 +40,33 @@
 ##
 ## All methods return `Result[void, ParseError]` so errors propagate
 ## without raising (preserves `embed[T]` compile-time-eval semantics).
+##
+## ## Sequencing guarantee
+##
+## Per-node call order (parser-emitted, visitor consumes):
+##
+##   (visitNodeTypeAnno?)        // fires iff source has `(tag)name`
+##   visitBeginNode               // always
+##   for each entry, in source order:
+##     (visitValueTypeAnno?)      // fires iff source has `(tag)value`
+##     visitArg | visitProp       // exactly one per entry
+##   (visitBeginChildren …)       // if `{ children }` block present
+##     // recursive per-child sequence
+##   (visitEndChildren …)
+##   visitEndNode                 // always; closes the node frame
+##
+## Codegen relies on this ordering: the `pendingNodeAnno` /
+## `pendingValueAnno` pattern in `codegen.nim`'s visitor builder stores
+## the most-recent annotation and consumes it on the very next
+## `visitBeginNode` / `visitArg` / `visitProp`. Any new parser path
+## that fires these events in a different order will silently misroute
+## annotations.
+##
+## Top-level: `visitBeginNode` / `visitEndNode` pairs are balanced (the
+## parser tracks depth) — visitors can rely on `visitEndNode` always
+## firing after a corresponding `visitBeginNode`, even on accumulating-
+## mode recovery (the seq wrapper resets per-node state from
+## visitEndNode).
 
 import ./[lexer, intern, spans]
 

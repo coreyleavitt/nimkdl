@@ -1,10 +1,26 @@
-## Regression tests for the code-review findings on the variant visitor:
-##   H1 — variant seq wrapper had no top-level name filter
-##   H2 — variant seq wrapper lacked accumulating-mode machinery
-##         (allMode / curFailed / errors), so a single bad node produced
-##         one error per remaining entry instead of one per node
-##   H3 — non-discriminator enum branch fields reported
-##         peTypeDiscriminatorBad instead of peTypeEnumInvalid
+## Behavior-level regression tests for decode[T] / decodeAll[T].
+##
+## Each suite below pins down a specific behavior that the visitor codegen
+## previously got wrong or could regress on. The tests are organized by
+## behavior topic (not by review-finding ID) so they remain meaningful
+## independent of the code-review history that originally prompted them.
+##
+## Topics covered:
+##   - Mixed-shape top-level documents: alien sibling nodes must be
+##     silently skipped, not surface as errors, even for variant types.
+##   - Per-node error recovery in accumulating mode: a single failing
+##     node must produce exactly one error, regardless of how many
+##     subsequent entries it had.
+##   - Enum-failure error code routing: discriminator failures use
+##     peTypeDiscriminatorBad; non-discriminator enum field failures
+##     use peTypeEnumInvalid. Applies to both flat and variant types.
+##   - Pending-annotation lifecycle: a type-mismatch on one field must
+##     not leak `(tag)` annotations into the next field's reserved-tag
+##     check (catches the snapshot+clear pattern getting reintroduced
+##     piecewise).
+##   - Error-hint amplification: user-controlled annotation strings
+##     embedded in error.hint must be length-capped so a giant `(tag)`
+##     in source can't produce a megabyte error message.
 
 import std/[strutils, unittest]
 import ../src/[codegen, nkdl, typed_parser]
@@ -28,7 +44,7 @@ kdl:
       of evKey:
         keyName {.kdlArg.}: string
 
-suite "variant seq wrapper: top-level name filter (H1)":
+suite "decode[seq[VariantType]]: alien top-level nodes are skipped":
 
   test "decode[seq[Event]] over mixed top-level: alien nodes skipped":
     let src = """
@@ -55,7 +71,7 @@ event "key" "tab"
     check r.errors.len == 0    # alien siblings must NOT raise errors
     check r.value.len == 2
 
-suite "variant seq wrapper: per-node failure swallow (H2)":
+suite "decodeAll[seq[VariantType]]: one error per failing node":
 
   test "bad-disc node with later entries produces ONE error, not N":
     # Discriminator "unrecognized" is invalid. The remaining `sev="high"`
@@ -88,7 +104,7 @@ event "click" sev="high"
     check r.errors[0].code == peTypeEnumInvalid  # H3: not Discriminator
     check r.value.len == 2
 
-suite "non-discriminator enum field error code (H3)":
+suite "variant enum error code routing (disc vs non-disc)":
 
   test "bad value on plain enum prop: peTypeEnumInvalid (strict mode)":
     let r = decode[Event]("event \"click\" sev=\"purple\"")
@@ -111,25 +127,24 @@ kdl:
     Paint {.kdlNode: "paint".} = object
       color {.kdlProp.}: Color
 
-suite "flat-type enum field error code (H3 cross-check)":
+suite "flat-type enum field error code":
   test "bad enum value on a flat type: peTypeEnumInvalid":
     let r = decode[Paint]("paint color=\"chartreuse\"")
     check r.isErr
     check r.getErr.code == peTypeEnumInvalid
 
-# Round-2 H1: pendingValueAnno must not leak across primitive-type
-# mismatches. Pre-fix, an early Err from int/bool/float/string
-# kind-check left builder.pendingValueAnno populated, so the next
-# field's reserved-tag check saw a stale tag. The snapshot+clear
-# pattern at the top of every primitive decode closes the leak
-# uniformly — this regression test catches reintroductions.
+# Pending-annotation lifecycle: a type-mismatch error on field A must
+# not leak A's `(tag)` annotation into field B's reserved-tag check.
+# The visitor's snapshot+clear pattern at the top of every primitive
+# decode closes this leak uniformly — this regression test catches it
+# getting reintroduced one site at a time.
 
 kdl:
   type Two {.kdlNode: "two".} = object
     a {.kdlProp.}: int      # plain int, no kdlReserved
     b {.kdlProp.}: string   # plain string, no kdlReserved
 
-suite "primitive-type-mismatch does NOT leak pendingValueAnno (H1)":
+suite "primitive-type-mismatch does not leak pendingValueAnno":
 
   test "(ipv4)\"x\" on int field then untagged b: b decodes cleanly":
     # a expects int; source supplies (ipv4)"x" which is a string-typed
@@ -157,15 +172,16 @@ two a=42 b="fine"
     check r2.value[0].a == 42
     check r2.value[0].b == "fine"
 
-# Round-2 M1: error hints embedding user-controlled annotation strings
-# must be length-capped (capAnnoForHint). Verify a giant annotation in
-# source produces a bounded error.hint length.
+# Error-hint amplification defense: user-controlled annotation bytes
+# embedded in error.hint must be length-capped (capAnnoForHint).
+# Without the cap, a malicious 1 MB `(tag)` in source would produce a
+# 1 MB error.hint that any log consumer would write verbatim.
 
 kdl:
   type Strict {.kdlNode: "strict".} = object
     v {.kdlProp, kdlReserved: "ipv4".}: string
 
-suite "annotation length cap in error hints (M1 / round-2)":
+suite "annotation length cap in error hints":
 
   test "1KB tag in source produces a bounded error hint":
     let bigTag = "a".repeat(1024)
