@@ -117,12 +117,17 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
     else: Token(kind: tkEof, span: pointSpan(StartPosition))
 
   while true:
-    while peek().kind == tkNewline: inc cursor
+    # Inter-node separators: newline AND semicolon.
+    while peek().kind == tkNewline or peek().kind == tkSemicolon: inc cursor
     var skipNode = false
     if peek().kind == tkSlashDash:
+      let sdSpan = peek().span
       inc cursor
       while peek().kind == tkNewline: inc cursor  # /- crosses newlines
       skipNode = true
+      if peek().kind == tkEof:
+        return err[void, ParseError](initError(peParseExpected, sdSpan,
+          "'/-' must be followed by a node"))
     if peek().kind == tkEof: break
     let r = parseNodeWith(source, visitor, stream, cursor,
                           skip = skipNode, depth = 0)
@@ -256,23 +261,42 @@ proc parseNodeWith[V](source: string, visitor: var V,
     var entrySkip = skip
     var sawSlashdash = false
     if peek().kind == tkSlashDash:
+      let sdSpan = peek().span
       inc cursor
       while peek().kind == tkNewline: inc cursor
       entrySkip = true
       sawSlashdash = true
+      if peek().kind in {tkNewline, tkSemicolon, tkEof, tkRBrace}:
+        return err[void, ParseError](initError(peParseExpected, sdSpan,
+          "'/-' must be followed by an entry or '{' children block"))
 
     # Snapshot entry-start precededByWs BEFORE annotation consumption —
     # `(type)value` is one entry; the precededByWs property belongs to
     # the leading `(`. Doing the check after handleValueAnno would test
     # the value token, which never has ws after the closing `)`.
+    # tkLBrace (children block start) doesn't require leading ws —
+    # corpus braces_in_bare_id.kdl: `foo123{bar}` is valid.
     let entryStartTok = peek()
     if not sawSlashdash and not entryStartTok.precededByWs and
-       entryStartTok.kind notin {tkNewline, tkSemicolon, tkEof, tkRBrace}:
+       entryStartTok.kind notin
+         {tkNewline, tkSemicolon, tkEof, tkRBrace, tkLBrace}:
       return err[void, ParseError](initError(peParseExpected, entryStartTok.span,
         "whitespace required before this entry"))
 
-    if peek().kind == tkLParen: handleValueAnno(entrySkip)
+    let hadValueAnno = peek().kind == tkLParen
+    if hadValueAnno: handleValueAnno(entrySkip)
     let t = peek()
+    # `(type)` alone (no following value) is invalid per
+    # corpus just_type_no_arg_fail.kdl: `node (type)`.
+    if hadValueAnno and t.kind in {tkNewline, tkSemicolon, tkEof, tkRBrace}:
+      return err[void, ParseError](initError(peParseExpected, t.span,
+        "type annotation must be followed by a value"))
+    # `(type)key=10` is invalid: annotations annotate values, not keys.
+    # Corpus type_before_prop_key_fail.kdl.
+    if hadValueAnno and t.kind in {tkIdent, tkString, tkRawString} and
+       peek(1).kind == tkEquals:
+      return err[void, ParseError](initError(peParseExpected, t.span,
+        "type annotation cannot precede a property key"))
     case t.kind
     of tkNewline, tkSemicolon, tkEof, tkRBrace:
       break
@@ -309,7 +333,8 @@ proc parseNodeWith[V](source: string, visitor: var V,
           let bcRes = visitor.visitBeginChildren()
           if bcRes.isErr: return bcRes
       while true:
-        while peek().kind == tkNewline: inc cursor
+        # Inter-child separators: newline AND semicolon.
+        while peek().kind == tkNewline or peek().kind == tkSemicolon: inc cursor
         if peek().kind == tkRBrace: break
         if peek().kind == tkEof:
           return err[void, ParseError](initError(peParseExpected, peek().span,
@@ -317,9 +342,13 @@ proc parseNodeWith[V](source: string, visitor: var V,
         # Inner-node slashdash within children
         var innerSkip = entrySkip
         if peek().kind == tkSlashDash:
+          let sdSpan = peek().span
           inc cursor
           while peek().kind == tkNewline: inc cursor
           innerSkip = true
+          if peek().kind == tkRBrace or peek().kind == tkEof:
+            return err[void, ParseError](initError(peParseExpected, sdSpan,
+              "'/-' must be followed by a child node"))
         when vcChildren in caps:
           let cRes = parseNodeWith(source, visitor, stream, cursor,
                                    skip = innerSkip, depth = depth + 1)

@@ -42,6 +42,7 @@ task test, "Run unit tests":
   exec cmd & " tests/test_typed_parser.nim"
   exec cmd & " tests/test_typed_parser_vm.nim"
   exec cmd & " tests/test_doc_builder.nim"
+  exec cmd & " tests/test_doc_builder_conformance.nim"
   exec cmd & " tests/test_option_and_node_tags.nim"
   exec cmd & " tests/test_encode.nim"
   exec cmd & " tests/test_grammar.nim"
