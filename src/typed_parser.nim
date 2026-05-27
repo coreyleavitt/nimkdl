@@ -270,53 +270,23 @@ proc parseNodeWith[V](source: string, visitor: var V,
         return err[void, ParseError](initError(peParseExpected, sdSpan,
           "'/-' must be followed by an entry or '{' children block"))
 
-    # Snapshot entry-start precededByWs BEFORE annotation consumption —
-    # `(type)value` is one entry; the precededByWs property belongs to
-    # the leading `(`. Doing the check after handleValueAnno would test
-    # the value token, which never has ws after the closing `)`.
-    # tkLBrace (children block start) doesn't require leading ws —
-    # corpus braces_in_bare_id.kdl: `foo123{bar}` is valid.
+    # One peek snapshot up front. precededByWs check folded into the
+    # hot-path case branches that actually need it (terminators + LBrace
+    # don't, so we don't pay for the predicate on the early-exit path).
     let entryStartTok = peek()
-    if not sawSlashdash and not entryStartTok.precededByWs and
-       entryStartTok.kind notin
-         {tkNewline, tkSemicolon, tkEof, tkRBrace, tkLBrace}:
-      return err[void, ParseError](initError(peParseExpected, entryStartTok.span,
-        "whitespace required before this entry"))
-
-    let hadValueAnno = peek().kind == tkLParen
+    let hadValueAnno = entryStartTok.kind == tkLParen
     if hadValueAnno: handleValueAnno(entrySkip)
     let t = peek()
-    # `(type)` alone (no following value) is invalid per
-    # corpus just_type_no_arg_fail.kdl: `node (type)`.
-    if hadValueAnno and t.kind in {tkNewline, tkSemicolon, tkEof, tkRBrace}:
-      return err[void, ParseError](initError(peParseExpected, t.span,
-        "type annotation must be followed by a value"))
-    # `(type)key=10` is invalid: annotations annotate values, not keys.
-    # Corpus type_before_prop_key_fail.kdl.
-    if hadValueAnno and t.kind in {tkIdent, tkString, tkRawString} and
-       peek(1).kind == tkEquals:
-      return err[void, ParseError](initError(peParseExpected, t.span,
-        "type annotation cannot precede a property key"))
+
+    # Fast-path dispatch. Cold-validation arms (hadValueAnno follow-ups,
+    # entries-after-children, precededByWs) live inside the case branches
+    # so the compiler only emits them in the paths where they can fire.
     case t.kind
     of tkNewline, tkSemicolon, tkEof, tkRBrace:
+      if hadValueAnno:
+        return err[void, ParseError](initError(peParseExpected, t.span,
+          "type annotation must be followed by a value"))
       break
-    else: discard
-
-    # Entries-after-children check. Any entry token (not LBrace) reaching
-    # here AFTER seenChildrenBlock is a violation.
-    if seenChildrenBlock and t.kind != tkLBrace:
-      return err[void, ParseError](initError(peParseUnexpected, t.span,
-        "entries are not permitted after a children block"))
-
-    # Entries-after-children check. Any entry token (not LBrace) reaching
-    # here AFTER seenChildrenBlock is a violation.
-    if seenChildrenBlock and t.kind != tkLBrace:
-      return err[void, ParseError](initError(peParseUnexpected, t.span,
-        "entries are not permitted after a children block"))
-
-    case t.kind
-    of tkNewline, tkSemicolon, tkEof, tkRBrace:
-      break    # unreachable (handled above), satisfies exhaustiveness
     of tkLBrace:
       # Children block. Inner nodes recurse through parseNodeWith with
       # skip = entrySkip; visitor children-boundary events fire iff
@@ -373,7 +343,17 @@ proc parseNodeWith[V](source: string, visitor: var V,
       # slice 9'.7). Loop to continue eating remaining /-{} blocks.
       continue
     of tkIdent, tkString, tkRawString:
+      # Entry-shape validation (fires only on actual entry tokens).
+      if not sawSlashdash and not entryStartTok.precededByWs:
+        return err[void, ParseError](initError(peParseExpected,
+          entryStartTok.span, "whitespace required before this entry"))
+      if seenChildrenBlock:
+        return err[void, ParseError](initError(peParseUnexpected, t.span,
+          "entries are not permitted after a children block"))
       if peek(1).kind == tkEquals:
+        if hadValueAnno:
+          return err[void, ParseError](initError(peParseExpected, t.span,
+            "type annotation cannot precede a property key"))
         let keyTok = peek()
         cursor += 2
         handleValueAnno(entrySkip)
@@ -447,6 +427,12 @@ proc parseNodeWith[V](source: string, visitor: var V,
             if aRes.isErr: return aRes
             inc argIdx
     of tkNumber, tkKeyword:
+      if not sawSlashdash and not entryStartTok.precededByWs:
+        return err[void, ParseError](initError(peParseExpected,
+          entryStartTok.span, "whitespace required before this entry"))
+      if seenChildrenBlock:
+        return err[void, ParseError](initError(peParseUnexpected, t.span,
+          "entries are not permitted after a children block"))
       inc cursor
       when vcArgs in caps:
         if not entrySkip:
