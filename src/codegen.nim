@@ -1257,12 +1257,15 @@ proc decodeAll*[T](source: string,
 #
 # Generates a hidden builder type + the six visitor methods needed by
 # typed_parser.parseWith. Emits a `kdlBuildVisitor` overload so the
-# generic `parseInto[T]` proc resolves to this type's machinery via
-# `mixin`.
+# the per-type kdlBuildVisitor / kdlBuildVisitorAllSeq overloads that
+# decode[T] / decodeAll[T] dispatch into.
 #
-# Cycle 2 scope: flat objects only, kdlArg + kdlProp fields with
-# string/int/bool types and default values. Children blocks (kdlChild)
-# come in cycle 7; variants come later if needed.
+# Supports: flat objects (kdlArg + kdlProp + kdlChild) with primitives
+# (string/int/bool/float), enums, Option[primitive], Option[CustomObject]
+# children, seq[T] children, kdlReserved value validation, type-level
+# kdlReserved. Variants (case objects with kdlArg discriminators) are
+# handled by emitVariantVisitor — see that proc's header for the
+# variant-specific restrictions.
 
 import ./typed_parser
 import ./lexer
@@ -1296,33 +1299,74 @@ import ./numlit
 #   - kdlChild on any shared or branch field: not implemented
 #   - kdlProp discriminator: not implemented (the disc could arrive after
 #     branch props, requiring buffering; punt until needed in practice)
+proc emitNameMatchCheck(nameStrIdent, nodeLit: NimNode): NimNode {.compileTime.} =
+  ## Emit a "is the openArray[char] `nameStrIdent` byte-equal to the
+  ## compile-time string literal `nodeLit`" check returning a `bool`.
+  ## Used by every visitBeginNode (flat, variant, and both seq wrappers)
+  ## to verify the incoming node name matches the type's expected
+  ## kdlNode. Single source of truth; previously hand-rolled at five
+  ## splice sites.
+  quote do:
+    block:
+      var match = `nameStrIdent`.len == `nodeLit`.len
+      if match:
+        for i in 0 ..< `nameStrIdent`.len:
+          if `nameStrIdent`[i] != `nodeLit`[i]:
+            match = false; break
+      match
+
+proc capAnnoForHint(s: string): string {.inline.} =
+  ## Cap a user-controlled annotation string before embedding in an
+  ## error hint. Without this, a 1 MB type annotation in source becomes
+  ## a 1 MB error.hint, which propagates verbatim to logs / LSP / CI
+  ## output — a real log-amplification vector under untrusted input.
+  ## 256 bytes is plenty for any well-formed reserved tag (`ipv4`,
+  ## `date-time`, etc. are all ≤ 16 bytes); the truncation marker makes
+  ## the cap visible to the operator.
+  if s.len <= 256: s
+  else: s[0 ..< 256] & "...(truncated)"
+
 proc emitReservedValidate(
     bIdent, tokIdent: NimNode,
     kdlNameLit, expectedReservedLit: NimNode,
-    fieldKey: string,
+    annoSym: NimNode,
     decodedExpr: NimNode,
     kvCtor: string): NimNode {.compileTime.} =
   ## Shared helper: emit the reserved-tag validation block for one field
-  ## decode. Caller passes the decoded primitive (already in scope at the
-  ## splice point) and the KdlValue constructor name (`newStringValue`,
-  ## `newIntValue`, `newBoolValue`, `newFloatValue`) appropriate for it.
+  ## decode.
+  ##
+  ## **Contract on `annoSym`**: caller must, at the START of each
+  ## primitive-decode case body, snapshot `bIdent.pendingValueAnno` into
+  ## a local (`annoSym`) and clear the builder field — so any early-Err
+  ## returns from the primitive decode itself leave the builder anno
+  ## clean. This helper then reads the snapshot (not the builder field),
+  ## which means we never leak the annotation into the next field's
+  ## reserved-tag check, regardless of how many early-err returns the
+  ## primitive decode has. See the round-2 review H1 finding.
+  ##
+  ## **Required in scope at the splice site**: `validateReserved` (from
+  ## `reserved.nim`), `initError` (from `spans.nim`), `err` / `ParseError`
+  ## (from `spans.nim`), the KdlValue constructor named by `kvCtor`
+  ## (from `ast.nim`), `capAnnoForHint` (in this module). All are
+  ## re-exported by `import nkdl`.
   ##
   ## Three checks fire in this order:
-  ##   1. pendingValueAnno empty + field has expectedReserved → err
-  ##   2. pendingValueAnno present + doesn't match expectedReserved → err
-  ##   3. pendingValueAnno present + matches → run validateReserved on a
+  ##   1. annoSym empty + field has expectedReserved → err
+  ##   2. annoSym present + doesn't match expectedReserved → err
+  ##   3. annoSym present + matches → run validateReserved on a
   ##      transient KdlValue built from the decoded primitive
   ##
-  ## On any success path, pendingValueAnno is cleared.
+  ## User-controlled annotation bytes embedded in error hints are
+  ## length-capped via `capAnnoForHint` to defeat log-amplification.
   ##
   ## Used by both the flat (emitVisitorFieldAssign) and variant
   ## (emitPrimitiveDecode) per-field emitters — single source of truth
   ## for the kdlReserved semantics the visitor enforces.
   let ctorIdent = ident(kvCtor)
-  let valSym = genSym(nskLet, "rvKv_" & fieldKey)
-  let rcheckSym = genSym(nskLet, "rvRc_" & fieldKey)
+  let valSym = genSym(nskLet, "rvKv")
+  let rcheckSym = genSym(nskLet, "rvRc")
   quote do:
-    if `bIdent`.pendingValueAnno.len == 0:
+    if `annoSym`.len == 0:
       if `expectedReservedLit`.len > 0:
         return err[void, ParseError](initError(peTypeReservedMismatch,
           `tokIdent`.span,
@@ -1330,16 +1374,15 @@ proc emitReservedValidate(
           ") tag but source value has no annotation"))
     else:
       if `expectedReservedLit`.len > 0 and
-         `bIdent`.pendingValueAnno != `expectedReservedLit`:
+         `annoSym` != `expectedReservedLit`:
         return err[void, ParseError](initError(peTypeReservedMismatch,
           `tokIdent`.span,
           "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
-          ") tag but source has (" & `bIdent`.pendingValueAnno & ")"))
+          ") tag but source has (" & capAnnoForHint(`annoSym`) & ")"))
       let `valSym` = `ctorIdent`(`decodedExpr`, `tokIdent`.span)
-      let `rcheckSym` = validateReserved(`bIdent`.pendingValueAnno, `valSym`)
+      let `rcheckSym` = validateReserved(`annoSym`, `valSym`)
       if `rcheckSym`.isErr:
         return err[void, ParseError](`rcheckSym`.getErr)
-      `bIdent`.pendingValueAnno = ""
 
 proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
   let typName = $typSym
@@ -1487,25 +1530,25 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
             "type expects (" & `typeReservedLit` & ") tag on its node " &
             "but source has no annotation"))
         if `bIdent`.pendingNodeAnno != `typeReservedLit`:
+          # Capture + clear before the early return so accumulating-mode
+          # recovery doesn't see a stale annotation on the next node.
+          let badAnno = `bIdent`.pendingNodeAnno
+          `bIdent`.pendingNodeAnno = ""
           return err[void, ParseError](initError(peTypeReservedMismatch,
             `spanIdent`,
             "type expects (" & `typeReservedLit` & ") tag on its node " &
-            "but source has (" & `bIdent`.pendingNodeAnno & ")"))
+            "but source has (" & capAnnoForHint(badAnno) & ")"))
         `bIdent`.pendingNodeAnno = ""
     else:
       newStmtList()
+  let nameCheck = emitNameMatchCheck(nameStrIdent, nodeLit)
   let beginNodeProc = quote do:
     proc visitBeginNode(`bIdent`: var `builderName`,
                    `nameStrIdent`: openArray[char],
                    `spanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
       `bIdent`.nodeSpan = `spanIdent`
-      var match = `nameStrIdent`.len == `nodeLit`.len
-      if match:
-        for i in 0 ..< `nameStrIdent`.len:
-          if `nameStrIdent`[i] != `nodeLit`[i]:
-            match = false; break
-      if not match:
+      if not `nameCheck`:
         return err[void, ParseError](initError(peTypeMismatch,
           `spanIdent`, "expected node `" & `nodeLit` & "`"))
       `typeAnnoCheckBody`
@@ -1522,9 +1565,19 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
     let fieldLabel = newLit(typName & "." & f.nimName)
     let kdlNameLit = newLit(f.kdlName)
     let expectedReservedLit = newLit(f.expectedReserved)
+    # Snapshot+clear pendingValueAnno at the TOP of every primitive decode.
+    # After this point, any early-Err return from the primitive decode
+    # (int kind-mismatch, decodeIntFromToken failure, etc.) sees a clean
+    # builder, so accumulating-mode recovery doesn't leak the annotation
+    # into the next field's reserved-tag check. validateBlock then reads
+    # the snapshot — not the cleared builder field. Round-2 review H1.
+    let annoSym = genSym(nskLet, "savedAnno")
+    let snapshot = quote do:
+      let `annoSym` = `bIdent`.pendingValueAnno
+      `bIdent`.pendingValueAnno = ""
     proc validateBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
       emitReservedValidate(bIdent, tokIdent, kdlNameLit,
-                           expectedReservedLit, f.nimName,
+                           expectedReservedLit, annoSym,
                            decodedExpr, kvCtor)
 
     if f.typeIsEnum:
@@ -1541,11 +1594,6 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       let decodeBlock = quote do:
         var `outSym`: `innerT`
         if not decodeEnumFromString(`outSym`, `strSym`):
-          # Clear stale pendingValueAnno: this early return aborts before
-          # validateBlock would have cleared it; under accumulating-mode
-          # recovery the next field's reserved-tag check would otherwise
-          # see a leaked annotation. Same fix at every early-Err exit.
-          `bIdent`.pendingValueAnno = ""
           return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "invalid enum value for `" &
             `fieldLabel` & "`: '" & `strSym` & "'"))
@@ -1556,7 +1604,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       body.add quote do:
         `bIdent`.`targetIdent` = `outSym`
         `bIdent`.`seenFlagIdent` = true
-      return quote do:
+      let inner = quote do:
         case `tokIdent`.kind
         of tkString:
           let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
@@ -1570,88 +1618,90 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
           let `strSym` = `streamIdent`.source[s0 .. s1]
           `body`
         else:
-          `bIdent`.pendingValueAnno = ""
           return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "expected string or bareword for `" &
             `fieldLabel` & "`"))
+      return newStmtList(snapshot, inner)
 
-    case primType
-    of "string":
-      let strSym = genSym(nskLet, "sv")
-      let v = validateBlock(strSym, "newStringValue")
-      quote do:
-        case `tokIdent`.kind
-        of tkString:
-          let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
-          `v`
-          `bIdent`.`targetIdent` = `strSym`
-          `bIdent`.`seenFlagIdent` = true
-        of tkRawString:
-          let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
-          `v`
-          `bIdent`.`targetIdent` = `strSym`
-          `bIdent`.`seenFlagIdent` = true
-        of tkIdent:
-          let s0 = `tokIdent`.span.start.offset
-          let s1 = `tokIdent`.span.finish.offset - 1
-          let `strSym` = `streamIdent`.source[s0 .. s1]
-          `v`
-          `bIdent`.`targetIdent` = `strSym`
-          `bIdent`.`seenFlagIdent` = true
-        else:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected string for `" & `fieldLabel` & "`"))
-    of "int":
-      let intSym = genSym(nskLet, "iv")
-      let v = validateBlock(intSym, "newIntValue")
-      quote do:
-        if `tokIdent`.kind != tkNumber:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected int for `" & `fieldLabel` & "`"))
-        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-        let d = decodeIntFromToken(n, `tokIdent`.span)
-        if d.isErr: return err[void, ParseError](d.getErr)
-        let `intSym` = int(d.get)
-        `v`
-        `bIdent`.`targetIdent` = `intSym`
-        `bIdent`.`seenFlagIdent` = true
-    of "bool":
-      let boolSym = genSym(nskLet, "bv")
-      let v = validateBlock(boolSym, "newBoolValue")
-      quote do:
-        if `tokIdent`.kind != tkKeyword:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected bool for `" & `fieldLabel` & "`"))
-        let `boolSym` = (`tokIdent`.keyword == kwTrue)
-        `v`
-        `bIdent`.`targetIdent` = `boolSym`
-        `bIdent`.`seenFlagIdent` = true
-    of "float", "float64":
-      let fltSym = genSym(nskLet, "fv")
-      let v = validateBlock(fltSym, "newFloatValue")
-      quote do:
-        if `tokIdent`.kind != tkNumber:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected number for `" & `fieldLabel` & "`"))
-        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-        let `fltSym` =
-          if looksLikeFloat(n):
-            let d = decodeFloatFromToken(n, `tokIdent`.span)
-            if d.isErr: return err[void, ParseError](d.getErr)
-            d.get
+    let inner =
+      case primType
+      of "string":
+        let strSym = genSym(nskLet, "sv")
+        let v = validateBlock(strSym, "newStringValue")
+        quote do:
+          case `tokIdent`.kind
+          of tkString:
+            let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+            `v`
+            `bIdent`.`targetIdent` = `strSym`
+            `bIdent`.`seenFlagIdent` = true
+          of tkRawString:
+            let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+            `v`
+            `bIdent`.`targetIdent` = `strSym`
+            `bIdent`.`seenFlagIdent` = true
+          of tkIdent:
+            let s0 = `tokIdent`.span.start.offset
+            let s1 = `tokIdent`.span.finish.offset - 1
+            let `strSym` = `streamIdent`.source[s0 .. s1]
+            `v`
+            `bIdent`.`targetIdent` = `strSym`
+            `bIdent`.`seenFlagIdent` = true
           else:
-            let d = decodeIntFromToken(n, `tokIdent`.span)
-            if d.isErr: return err[void, ParseError](d.getErr)
-            float(d.get)
-        `v`
-        `bIdent`.`targetIdent` = `fltSym`
-        `bIdent`.`seenFlagIdent` = true
-    else:
-      let primLit = newLit(primType)
-      quote do:
-        return err[void, ParseError](initError(peTypeMismatch,
-          `tokIdent`.span, "unsupported field type `" & `primLit` &
-          "` for `" & `fieldLabel` & "`"))
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected string for `" & `fieldLabel` & "`"))
+      of "int":
+        let intSym = genSym(nskLet, "iv")
+        let v = validateBlock(intSym, "newIntValue")
+        quote do:
+          if `tokIdent`.kind != tkNumber:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected int for `" & `fieldLabel` & "`"))
+          let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+          let d = decodeIntFromToken(n, `tokIdent`.span)
+          if d.isErr: return err[void, ParseError](d.getErr)
+          let `intSym` = int(d.get)
+          `v`
+          `bIdent`.`targetIdent` = `intSym`
+          `bIdent`.`seenFlagIdent` = true
+      of "bool":
+        let boolSym = genSym(nskLet, "bv")
+        let v = validateBlock(boolSym, "newBoolValue")
+        quote do:
+          if `tokIdent`.kind != tkKeyword:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected bool for `" & `fieldLabel` & "`"))
+          let `boolSym` = (`tokIdent`.keyword == kwTrue)
+          `v`
+          `bIdent`.`targetIdent` = `boolSym`
+          `bIdent`.`seenFlagIdent` = true
+      of "float", "float64":
+        let fltSym = genSym(nskLet, "fv")
+        let v = validateBlock(fltSym, "newFloatValue")
+        quote do:
+          if `tokIdent`.kind != tkNumber:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected number for `" & `fieldLabel` & "`"))
+          let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+          let `fltSym` =
+            if looksLikeFloat(n):
+              let d = decodeFloatFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              d.get
+            else:
+              let d = decodeIntFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              float(d.get)
+          `v`
+          `bIdent`.`targetIdent` = `fltSym`
+          `bIdent`.`seenFlagIdent` = true
+      else:
+        let primLit = newLit(primType)
+        quote do:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "unsupported field type `" & `primLit` &
+            "` for `" & `fieldLabel` & "`"))
+    newStmtList(snapshot, inner)
 
   # ---------- visitArg ----------
   # Case on positional index. Shared args dispatch directly. Disc arg
@@ -1853,17 +1903,13 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       allMode: bool
       curFailed: bool
       errors: seq[ParseError]
+  let nameCheckSeq = emitNameMatchCheck(nameStrIdent, nodeNameLit)
   let seqWrapProcs = quote do:
     proc visitBeginNode(`bIdent`: var `seqBuilderName`,
                    `nameStrIdent`: openArray[char],
                    `spanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
-      var nameMatch = `nameStrIdent`.len == `nodeNameLit`.len
-      if nameMatch:
-        for i in 0 ..< `nameStrIdent`.len:
-          if `nameStrIdent`[i] != `nodeNameLit`[i]:
-            nameMatch = false; break
-      if not nameMatch:
+      if not `nameCheckSeq`:
         `bIdent`.skipping = true
         `bIdent`.pendingNodeAnno = ""
         return ok(void, ParseError)
@@ -2002,8 +2048,7 @@ macro deriveVisitor(typ: typedesc): untyped =
     error("deriveVisitor: argument is not a type definition", typ)
   let body = typeImpl[2]
   if body.kind != nnkObjectTy:
-    error("deriveVisitor: only object types are supported (cycle 2 scope)",
-          typ)
+    error("deriveVisitor: only object types are supported", typ)
   let recList = body[2]
   let shape = collectShape(recList)
   if shape.hasVariant:
@@ -2153,10 +2198,12 @@ macro deriveVisitor(typ: typedesc): untyped =
             "type expects (" & `typeReservedLit` & ") tag on its node " &
             "but source has no annotation"))
         if `bIdent`.pendingNodeAnno != `typeReservedLit`:
+          let badAnno = `bIdent`.pendingNodeAnno
+          `bIdent`.pendingNodeAnno = ""
           return err[void, ParseError](initError(peTypeReservedMismatch,
             `spanIdent`,
             "type expects (" & `typeReservedLit` & ") tag on its node " &
-            "but source has (" & `bIdent`.pendingNodeAnno & ")"))
+            "but source has (" & capAnnoForHint(badAnno) & ")"))
         `bIdent`.pendingNodeAnno = ""
     else:
       # No constraint — leave pendingNodeAnno populated for child-slot
@@ -2192,7 +2239,7 @@ macro deriveVisitor(typ: typedesc): untyped =
             return err[void, ParseError](initError(peTypeReservedMismatch,
               `spanIdent`,
               "child `" & `nimNameLit` & "` expects (" & `expectedLit` &
-              ") tag but source has (" & badAnno & ")"))
+              ") tag but source has (" & capAnnoForHint(badAnno) & ")"))
       else:
         newStmtList()
     if c.isOption:
@@ -2226,6 +2273,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         "`" & `nodeLit` & "` has no child kind `" &
         openArrayToString(`nameStrIdent`) & "`")))
 
+  let nameCheck = emitNameMatchCheck(nameStrIdent, nodeLit)
   let beginNodeProc =
     if children.len > 0:
       quote do:
@@ -2236,12 +2284,7 @@ macro deriveVisitor(typ: typedesc): untyped =
           if `bIdent`.inChildren:
             `childBeginDispatch`
           `bIdent`.nodeSpan = `spanIdent`
-          var match = `nameStrIdent`.len == `nodeLit`.len
-          if match:
-            for i in 0 ..< `nameStrIdent`.len:
-              if `nameStrIdent`[i] != `nodeLit`[i]:
-                match = false; break
-          if not match:
+          if not `nameCheck`:
             return err[void, ParseError](initError(peTypeMismatch,
               `spanIdent`,
               "expected node `" & `nodeLit` & "`"))
@@ -2255,12 +2298,7 @@ macro deriveVisitor(typ: typedesc): untyped =
                        `spanIdent`: Span):
             Result[void, ParseError] {.noSideEffect.} =
           `bIdent`.nodeSpan = `spanIdent`
-          var match = `nameStrIdent`.len == `nodeLit`.len
-          if match:
-            for i in 0 ..< `nameStrIdent`.len:
-              if `nameStrIdent`[i] != `nodeLit`[i]:
-                match = false; break
-          if not match:
+          if not `nameCheck`:
             return err[void, ParseError](initError(peTypeMismatch,
               `spanIdent`,
               "expected node `" & `nodeLit` & "`"))
@@ -2292,9 +2330,18 @@ macro deriveVisitor(typ: typedesc): untyped =
     # visitor + AST-walk paths agree on every input.
     let expectedReservedLit = newLit(f.expectedReserved)
     let kdlNameLit = newLit(f.kdlName)
+    # Snapshot+clear pendingValueAnno at the TOP of every primitive
+    # decode. Same fix as in emitPrimitiveDecode — after this point any
+    # early-Err return from the primitive decode leaves the builder anno
+    # clean, so accumulating-mode recovery doesn't leak it into the next
+    # field's reserved-tag check. validateBlock reads the snapshot.
+    let annoSym = genSym(nskLet, "savedAnno")
+    let snapshot = quote do:
+      let `annoSym` = `bIdent`.pendingValueAnno
+      `bIdent`.pendingValueAnno = ""
     proc validateReservedBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
       emitReservedValidate(bIdent, tokIdent, kdlNameLit,
-                           expectedReservedLit, f.nimName,
+                           expectedReservedLit, annoSym,
                            decodedExpr, kvCtor)
 
     # Build core: a stmtlist that, given a `decoded` ident of the right
@@ -2333,11 +2380,6 @@ macro deriveVisitor(typ: typedesc): untyped =
       let body = quote do:
         var `outSym`: `innerT`
         if not decodeEnumFromString(`outSym`, `strSym`):
-          # Clear stale pendingValueAnno: this early return aborts before
-          # validateReservedBlock would have cleared it; under
-          # accumulating-mode recovery the next field's reserved-tag
-          # check would otherwise see a leaked annotation.
-          `bIdent`.pendingValueAnno = ""
           return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "invalid enum value for `" &
             `fieldLabel` & "`: '" & `strSym` & "'"))
@@ -2349,7 +2391,7 @@ macro deriveVisitor(typ: typedesc): untyped =
       # validation operates on the original textual form.
       assignBody.add(validateReservedBlock(strSym, "newStringValue"))
       assignBody.add(assignDecoded(outSym))
-      return quote do:
+      let inner = quote do:
         case `tokIdent`.kind
         of tkString:
           let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
@@ -2365,88 +2407,88 @@ macro deriveVisitor(typ: typedesc): untyped =
           let `strSym` = `streamIdent`.source[s0 .. s1]
           `assignBody`
         else:
-          `bIdent`.pendingValueAnno = ""
           return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "expected string or bareword for enum `" &
             `fieldLabel` & "`"))
+      return newStmtList(snapshot, inner)
 
-    case primTypeName
-    of "string":
-      let strSym = genSym(nskLet, "strVal")
-      let strAssign = validateAndAssign(strSym, "newStringValue")
-      quote do:
-        case `tokIdent`.kind
-        of tkString:
-          let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
-          `strAssign`
-        of tkRawString:
-          let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
-          `strAssign`
-        of tkIdent:
-          # KDL v2: a bareword identifier in value position is a string.
-          # Mirror DocBuilder's lenient handling.
-          let s0 = `tokIdent`.span.start.offset
-          let s1 = `tokIdent`.span.finish.offset - 1
-          let `strSym` = `streamIdent`.source[s0 .. s1]
-          `strAssign`
-        else:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected string for `" &
-            `fieldLabel` & "`"))
-    of "int":
-      let intSym = genSym(nskLet, "intVal")
-      let intAssign = validateAndAssign(intSym, "newIntValue")
-      quote do:
-        if `tokIdent`.kind != tkNumber:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected int for `" &
-            `fieldLabel` & "`"))
-        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-        let d = decodeIntFromToken(n, `tokIdent`.span)
-        if d.isErr: return err[void, ParseError](d.getErr)
-        let `intSym` = int(d.get)
-        `intAssign`
-    of "bool":
-      let boolSym = genSym(nskLet, "boolVal")
-      let boolAssign = validateAndAssign(boolSym, "newBoolValue")
-      quote do:
-        if `tokIdent`.kind != tkKeyword:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected bool for `" &
-            `fieldLabel` & "`"))
-        let `boolSym` = (`tokIdent`.keyword == kwTrue)
-        `boolAssign`
-    of "float", "float64":
-      let fltSym = genSym(nskLet, "fltVal")
-      let fltAssign = validateAndAssign(fltSym, "newFloatValue")
-      quote do:
-        if `tokIdent`.kind != tkNumber:
-          return err[void, ParseError](initError(peTypeMismatch,
-            `tokIdent`.span, "expected number for `" &
-            `fieldLabel` & "`"))
-        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-        let `fltSym` =
-          if looksLikeFloat(n):
-            let d = decodeFloatFromToken(n, `tokIdent`.span)
-            if d.isErr: return err[void, ParseError](d.getErr)
-            d.get
+    let inner =
+      case primTypeName
+      of "string":
+        let strSym = genSym(nskLet, "strVal")
+        let strAssign = validateAndAssign(strSym, "newStringValue")
+        quote do:
+          case `tokIdent`.kind
+          of tkString:
+            let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+            `strAssign`
+          of tkRawString:
+            let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+            `strAssign`
+          of tkIdent:
+            # KDL v2: a bareword identifier in value position is a string.
+            # Mirror DocBuilder's lenient handling.
+            let s0 = `tokIdent`.span.start.offset
+            let s1 = `tokIdent`.span.finish.offset - 1
+            let `strSym` = `streamIdent`.source[s0 .. s1]
+            `strAssign`
           else:
-            let d = decodeIntFromToken(n, `tokIdent`.span)
-            if d.isErr: return err[void, ParseError](d.getErr)
-            float(d.get)
-        `fltAssign`
-    else:
-      # Unsupported shape (e.g. Option[CustomObject], custom non-enum
-      # types, kdlReserved-validated fields where we'd need to track
-      # the inbound value annotation). Emit a runtime error — never
-      # block codegen, so the surrounding kdl: block can still emit
-      # decode + encode for the type. Use decode[T] for these fields.
-      let typeStrLit = newLit(typeStr)
-      quote do:
-        return err[void, ParseError](initError(peTypeMismatch,
-          `tokIdent`.span, "unsupported field type `" & `typeStrLit` &
-          "` for `" & `fieldLabel` &
-          "` in typed-direct path (use decode[T])"))
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected string for `" &
+              `fieldLabel` & "`"))
+      of "int":
+        let intSym = genSym(nskLet, "intVal")
+        let intAssign = validateAndAssign(intSym, "newIntValue")
+        quote do:
+          if `tokIdent`.kind != tkNumber:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected int for `" &
+              `fieldLabel` & "`"))
+          let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+          let d = decodeIntFromToken(n, `tokIdent`.span)
+          if d.isErr: return err[void, ParseError](d.getErr)
+          let `intSym` = int(d.get)
+          `intAssign`
+      of "bool":
+        let boolSym = genSym(nskLet, "boolVal")
+        let boolAssign = validateAndAssign(boolSym, "newBoolValue")
+        quote do:
+          if `tokIdent`.kind != tkKeyword:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected bool for `" &
+              `fieldLabel` & "`"))
+          let `boolSym` = (`tokIdent`.keyword == kwTrue)
+          `boolAssign`
+      of "float", "float64":
+        let fltSym = genSym(nskLet, "fltVal")
+        let fltAssign = validateAndAssign(fltSym, "newFloatValue")
+        quote do:
+          if `tokIdent`.kind != tkNumber:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "expected number for `" &
+              `fieldLabel` & "`"))
+          let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+          let `fltSym` =
+            if looksLikeFloat(n):
+              let d = decodeFloatFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              d.get
+            else:
+              let d = decodeIntFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              float(d.get)
+          `fltAssign`
+      else:
+        # Unsupported shape (e.g. Option[CustomObject], custom non-enum
+        # types). Emit a runtime error — never block codegen, so the
+        # surrounding kdl: block can still emit encode for the type.
+        let typeStrLit = newLit(typeStr)
+        quote do:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "unsupported field type `" & `typeStrLit` &
+            "` for `" & `fieldLabel` &
+            "` in typed-direct path"))
+    newStmtList(snapshot, inner)
 
   # 3. visitArg: dispatch by positional index.
   var argCase = newNimNode(nnkCaseStmt).add(idxIdent)
@@ -2574,10 +2616,9 @@ macro deriveVisitor(typ: typedesc): untyped =
           `propDispatch`
           ok(void, ParseError)
 
-  # 5/6/7. Children: no-op for flat case (cycle 7 adds children).
   # visitEndNode: required-field check fires here. Error wording mirrors
-  # the AST-walk path (emitArgDecode / emitAttrDecode / emitChildDecode)
-  # so consumer error-message matching is identical across both paths.
+  # the (since-deleted) AST-walk path so consumers see the same hints
+  # regardless of which decode path the parser took historically.
   var requiredCheckBody = newStmtList()
   if requiredNames.len > 0:
     for f in shape.shared:
@@ -2724,6 +2765,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       `bIdent`.pendingNodeAnno = openArrayToString(`annoStrIdent`)
       ok(void, ParseError)
+  let nameCheckSeq = emitNameMatchCheck(nameStrIdent, nodeNameLit)
   let seqWrapProcs = quote do:
     proc visitBeginNode(`bIdent`: var `seqBuilderName`,
                    `nameStrIdent`: openArray[char],
@@ -2732,12 +2774,7 @@ macro deriveVisitor(typ: typedesc): untyped =
       # Top-level name filter: only nodes named per T's kdlNode are
       # decoded. Others (e.g. other top-level node kinds in the same
       # document) are silently skipped — matches AST-walk decode[seq[T]].
-      var nameMatch = `nameStrIdent`.len == `nodeNameLit`.len
-      if nameMatch:
-        for i in 0 ..< `nameStrIdent`.len:
-          if `nameStrIdent`[i] != `nodeNameLit`[i]:
-            nameMatch = false; break
-      if not nameMatch:
+      if not `nameCheckSeq`:
         `bIdent`.skipping = true
         `bIdent`.pendingNodeAnno = ""
         return ok(void, ParseError)

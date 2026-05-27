@@ -178,6 +178,11 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
     if t.kind == tkError:
       if errorBuf.isNil:
         return err[void, ParseError](stream.errorPayloads[t.errIdx])
+      # Cap accumulation: a pathological input with thousands of lex
+      # errors (e.g. high-bit bytes sprinkled through MB-sized input)
+      # would otherwise grow errorBuf in proportion to source size.
+      # Same MaxAccumulatedErrors ceiling as the per-node loop below.
+      if errorBuf[].len >= MaxAccumulatedErrors: break
       errorBuf[].add(stream.errorPayloads[t.errIdx])
 
   var cursor = 0
