@@ -934,58 +934,56 @@ macro deriveEncode(typ: typedesc): untyped =
   let bufIdent = ident("buf")
   let indentIdent = ident("indent")
   let modeIdent = ident("mode")
+  let forcedTagIdent = ident("forcedTag")
+  # Two shapes the direct path doesn't implement:
+  #   - variant (case-object) types — would need discriminator + per-
+  #     branch field dispatch, currently no consumer
+  #   - Option[T] on a kdlArg (positional optional) — semantics fuzzy
+  #     (which positional slot does an absent value occupy?), no consumer
+  # Both emit runtime-error stubs rather than compile errors so the
+  # `kdl:` block still compiles for types where decode is the only use.
   var hasUnsupported = shape.hasVariant
+  var unsupportedReason = ""
+  if shape.hasVariant:
+    unsupportedReason = "variant (case-object) types"
   for f in shape.shared:
-    # Option[T] supported only on kdlProp fields in E.4 scope. On kdlArg
-    # (positional optional) the semantics get fuzzier; defer.
-    if f.isOption and f.kind != fkAttr:
+    if f.isOption and f.kind == fkArg:
       hasUnsupported = true
-    # Non-seq kdlChild (single-object nested) — needs a per-field child
-    # call that doesn't iterate. Defer to a later slice; fall back today.
-    if f.kind == fkChild and
-       (f.typeNode.kind != nnkBracketExpr or
-        f.typeNode.len < 1 or
-        $f.typeNode[0] != "seq"):
-      hasUnsupported = true
+      unsupportedReason = "Option[T] on a kdlArg (positional) field"
   var directBody = newStmtList()
   if hasUnsupported:
-    # Delegate to legacy path for now (E.4 / E.6 add direct emit for
-    # Option[T] and kdlReserved; until then, indent prefix happens here
-    # too so nested children call sites stay correct).
+    let reasonLit = newLit(unsupportedReason)
+    let typeNameLit = newLit(typeNameStr)
     directBody.add quote do:
-      var legacyDoc = newDoc()
-      let nRes = kdlEncodeImpl(`vIdent`, legacyDoc)
-      if nRes.isErr: return err[void, ParseError](nRes.getErr)
-      legacyDoc.nodes.add(nRes.get)
+      err[void, ParseError](initError(peTypeMismatch,
+        pointSpan(StartPosition),
+        "encode[" & `typeNameLit` & "]: " & `reasonLit` &
+        " are not supported by the typed encoder. Build the KdlDoc " &
+        "manually if you need this shape encoded."))
+  else:
+    # Type-level kdlReserved: emit `(tag)nodename` to match the spec
+    # behavior. Without this, encodeFrom would silently drop the
+    # type-level annotation for any type carrying `{.kdlReserved: "X".}`.
+    let typeReservedLit = newLit(typeReserved)
+    # Indent + tag + name. The tag is either:
+    #   - non-empty `forcedTag` parameter (parent slot has field-level
+    #     kdlReserved — takes precedence over the child type's own tag)
+    #   - the type-level kdlReserved literal (if any), otherwise
+    #   - nothing
+    # Compact mode suppresses the leading indent (the caller, e.g.
+    # encode[seq[T]] or the children-block emit, is responsible for
+    # between-node separators in compact mode).
+    directBody.add quote do:
       if `modeIdent` != emCompact:
         appendIndent(`bufIdent`, `indentIdent`)
-      let effective = if `modeIdent` == emPreserve: emPretty else: `modeIdent`
-      let s = kdlEncode.encode(legacyDoc, effective)
-      `bufIdent`.add(s)
-      ok(void, ParseError)
-  else:
-    # Type-level kdlReserved: emit `(tag)nodename` to match the legacy
-    # path. Without this, encodeFrom silently drops the type-level
-    # annotation for any type carrying `{.kdlReserved: "X".}` —
-    # divergence from encode(v, emPretty) and a real round-trip break
-    # (round-2 review H1).
-    let typeReservedLit = newLit(typeReserved)
-    # Indent + tag + name. Compact mode suppresses the leading indent
-    # (the caller, e.g. encode[seq[T]] or the children-block emit, is
-    # responsible for between-node separators in compact mode).
-    if typeReserved.len > 0:
-      directBody.add quote do:
-        if `modeIdent` != emCompact:
-          appendIndent(`bufIdent`, `indentIdent`)
+      let effectiveTag =
+        if `forcedTagIdent`.len > 0: `forcedTagIdent`
+        else: `typeReservedLit`
+      if effectiveTag.len > 0:
         `bufIdent`.add('(')
-        `bufIdent`.add(`typeReservedLit`)
+        `bufIdent`.add(effectiveTag)
         `bufIdent`.add(')')
-        `bufIdent`.add(`nodeNameLit`)
-    else:
-      directBody.add quote do:
-        if `modeIdent` != emCompact:
-          appendIndent(`bufIdent`, `indentIdent`)
-        `bufIdent`.add(`nodeNameLit`)
+      `bufIdent`.add(`nodeNameLit`)
     # Helper: emit one value with optional kdlReserved validation and
     # `(tag)` prefix. Used by BOTH the arg and prop loops so kdlReserved
     # semantics are uniform across positional and keyed fields. Validation
@@ -1046,20 +1044,37 @@ macro deriveEncode(typ: typedesc): untyped =
       else:
         directBody.add(emitProp)
     # Children: emit `{` block with each child recursing at indent+1.
-    # Skip the block entirely when ALL kdlChild fields are empty seqs
-    # (matches legacy behavior of not emitting `{}` for absent children).
+    # Three kdlChild shapes supported by the direct path:
+    #   - `seq[T]`:    iterate, emit each element as a child node
+    #   - `T`:         emit the single child node unconditionally
+    #   - `Option[T]`: emit the inner node when isSome; nothing otherwise
+    # Skip the entire `{` block when all child slots are "absent" (empty
+    # seqs / none Options) — matches the legacy behavior of not emitting
+    # `{}` for shapes that produced zero child nodes.
+    type ChildShape = enum csSeq, csSingle, csOption
+    proc childShapeOf(f: FieldSpec): ChildShape =
+      if f.isOption: csOption
+      elif typeNodeIsSeq(f.typeNode): csSeq
+      else: csSingle
     var childFields: seq[FieldSpec] = @[]
     for f in shape.shared:
       if f.kind == fkChild: childFields.add(f)
     if childFields.len > 0:
-      # Build a runtime "any non-empty?" predicate. For seq fields:
-      # `v.f.len > 0`. For non-seq single-object kdlChild: always true
-      # (the child is structurally present). v0 only supports seq.
+      # Runtime "any child slot non-empty?" predicate. csSingle is
+      # structurally always present (the child object exists by Nim's
+      # default-init); csSeq checks `.len > 0`; csOption checks `.isSome`.
       var anyNonEmpty: NimNode = newLit(false)
       for f in childFields:
         let access = newDotExpr(vIdent, ident(f.nimName))
-        let lenExpr = quote do: `access`.len > 0
-        anyNonEmpty = infix(anyNonEmpty, "or", lenExpr)
+        let predicate: NimNode =
+          case childShapeOf(f)
+          of csSeq:
+            quote do: `access`.len > 0
+          of csOption:
+            quote do: `access`.isSome
+          of csSingle:
+            newLit(true)
+        anyNonEmpty = infix(anyNonEmpty, "or", predicate)
       # Children-block open: pretty = " {\n" then indent each child;
       # compact = " { " then "; "-separated children, no indent.
       directBody.add quote do:
@@ -1067,20 +1082,43 @@ macro deriveEncode(typ: typedesc): untyped =
           if `modeIdent` == emCompact: `bufIdent`.add(" {")
           else: `bufIdent`.add(" {\n")
       # Emit each child via its own kdlEncodeIntoImpl. In compact mode
-      # we need "; " between siblings; track that with `__firstChild`.
+      # we need "; " between siblings; track that with `firstChild`.
       let firstChildIdent = genSym(nskVar, "firstChild")
       directBody.add quote do:
         var `firstChildIdent` = true
       for f in childFields:
         let access = newDotExpr(vIdent, ident(f.nimName))
-        directBody.add quote do:
-          for child in `access`:
-            if `modeIdent` == emCompact:
-              if not `firstChildIdent`: `bufIdent`.add("; ")
-              `firstChildIdent` = false
-            let cRes = kdlEncodeIntoImpl(child, `bufIdent`, `modeIdent`,
-                                         `indentIdent` + 1)
-            if cRes.isErr: return cRes
+        let childTagLit = newLit(f.expectedReserved)
+        let emit =
+          case childShapeOf(f)
+          of csSeq:
+            quote do:
+              for child in `access`:
+                if `modeIdent` == emCompact:
+                  if not `firstChildIdent`: `bufIdent`.add("; ")
+                  `firstChildIdent` = false
+                let cRes = kdlEncodeIntoImpl(child, `bufIdent`, `modeIdent`,
+                                             `indentIdent` + 1, `childTagLit`)
+                if cRes.isErr: return cRes
+          of csOption:
+            quote do:
+              if `access`.isSome:
+                if `modeIdent` == emCompact:
+                  if not `firstChildIdent`: `bufIdent`.add("; ")
+                  `firstChildIdent` = false
+                let cRes = kdlEncodeIntoImpl(`access`.get, `bufIdent`,
+                                             `modeIdent`, `indentIdent` + 1,
+                                             `childTagLit`)
+                if cRes.isErr: return cRes
+          of csSingle:
+            quote do:
+              if `modeIdent` == emCompact:
+                if not `firstChildIdent`: `bufIdent`.add("; ")
+                `firstChildIdent` = false
+              let cRes = kdlEncodeIntoImpl(`access`, `bufIdent`, `modeIdent`,
+                                           `indentIdent` + 1, `childTagLit`)
+              if cRes.isErr: return cRes
+        directBody.add(emit)
       # Children-block close + node terminator.
       # Pretty:  indent + "}\n"    (or just "\n" when no block was opened)
       # Compact: "}"                (no leading space, no trailing newline —
@@ -1103,7 +1141,8 @@ macro deriveEncode(typ: typedesc): untyped =
   let encodeIntoProc = quote do:
     proc kdlEncodeIntoImpl*(`vIdent`: `typ`, `bufIdent`: var string,
                             `modeIdent`: EncodeMode = emPretty,
-                            `indentIdent`: int = 0):
+                            `indentIdent`: int = 0,
+                            `forcedTagIdent`: string = ""):
         Result[void, ParseError] {.noSideEffect.} =
       `directBody`
 
