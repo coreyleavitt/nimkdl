@@ -97,6 +97,37 @@ Our parser does recursive descent directly into the AST. Once the value-copy bug
 
 So the comparison isn't "Nim parser beats C parser at C parser's game." It's "AST-building Nim parser is faster than event-stream C parser if you eliminate the allocation overhead." That happens to be the apples-to-apples comparison for "how fast does my program get a usable tree out of a KDL file."
 
+## Encode
+
+![Encode comparison](docs/charts/encode.svg)
+
+Three encode modes, three different shapes. The chart normalizes within each section because the scales differ wildly across modes (preserve is roughly 1000x faster than the others, see below).
+
+### Preserve mode
+
+`encode(doc, emPreserve)` returns `doc.sourceText` verbatim when the doc hasn't been mutated. That's essentially a memcpy. 23.4M ops/s on realistic-config.kdl because we cached the source bytes at parse time and just hand them back.
+
+kdl-rs takes a different strategy. They store per-token whitespace and comments on every AST node, so `doc.to_string()` walks the tree and emits the stored trivia per token. That's more work than memcpy and runs at 117K ops/s on the same fixture, roughly 200x slower than our path.
+
+Both approaches achieve byte-lossless round-trip. Ours is structurally lighter at the cost of carrying the source string around; theirs is structurally heavier at the cost of being able to render the doc without the source. Different trade-offs for different consumer profiles.
+
+### Canonical mode
+
+`encode(doc, emPretty)` regenerates from the AST without trying to preserve anything. 56.8K ops/s for us, 17.6K ops/s for `kdl-rs autoformat() + to_string()`. We win 3.2x here. The big lift on our side is that we don't have per-token trivia to walk and discard.
+
+knus has no serialize path so it's not in the comparison. ckdl has only a streaming emitter API (no parse-then-emit-later), so a fair head-to-head isn't possible.
+
+### Typed value → string
+
+facet-kdl wins 1.5x. Same architectural pattern as the typed-decode gap.
+
+| Path                          | ops/s |
+|-------------------------------|------:|
+| facet-kdl `to_string(&doc)`   | 27.5K |
+| nimkdl `encode(seq[Service])` | 17.9K |
+
+facet-kdl serializes directly from the typed value to a string. nimkdl goes typed → KdlDoc → string, paying for an intermediate representation we throw away. Same architectural fix that closes the typed-decode gap (issue #1) would close this one too.
+
 ## Methodology
 
 Cross-implementation benchmarks lie easily. The discipline that makes this comparison hold up to outside scrutiny.
