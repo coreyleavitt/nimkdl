@@ -17,15 +17,15 @@
 ##
 ## A type `V` is a parse visitor if it implements:
 ##
-##   proc beginNode(v: var V, name: InternedStr,
+##   proc visitBeginNode(v: var V, name: InternedStr,
 ##                  nameStr: openArray[char]): Result[void, ParseError]
-##   proc arg(v: var V, idx: int, tok: Token,
+##   proc visitArg(v: var V, idx: int, tok: Token,
 ##            stream: TokenStream): Result[void, ParseError]
-##   proc prop(v: var V, key: InternedStr, keyStr: openArray[char],
+##   proc visitProp(v: var V, key: InternedStr, keyStr: openArray[char],
 ##             tok: Token, stream: TokenStream): Result[void, ParseError]
-##   proc beginChildren(v: var V): Result[void, ParseError]
-##   proc endChildren(v: var V): Result[void, ParseError]
-##   proc endNode(v: var V): Result[void, ParseError]
+##   proc visitBeginChildren(v: var V): Result[void, ParseError]
+##   proc visitEndChildren(v: var V): Result[void, ParseError]
+##   proc visitEndNode(v: var V): Result[void, ParseError]
 ##
 ## All methods return Result so errors propagate without raising
 ## (preserves `embed[T]` compile-time-eval semantics).
@@ -34,11 +34,91 @@ import ./[lexer, intern, spans]
 
 proc parseInto*[T](source: string, sourcePath = "<input>"):
     Result[T, ParseError] =
-  ## Typed entry point. Used as `parseInto[Rule]("...")`. Resolves the
-  ## per-type visitor via `deriveVisitor[T]`-emitted `kdlVisitorParse`
+  ## Typed entry point. Used as `parseInto[Rule]("...")` or
+  ## `parseInto[seq[Rule]]("...")`. Resolves the per-type visitor via
+  ## `deriveVisitor[T]`-emitted `kdlVisitorParse` / `kdlVisitorParseSeq`
   ## overload at instantiation time.
-  mixin kdlVisitorParse
-  kdlVisitorParse(T, source, sourcePath)
+  mixin kdlVisitorParse, kdlVisitorParseSeq
+  when T is seq:
+    type Elem = typeof(default(T)[0])
+    kdlVisitorParseSeq(Elem, source, sourcePath)
+  else:
+    kdlVisitorParse(T, source, sourcePath)
+
+proc parseDocumentWith*[V](source: string, visitor: var V,
+                           sourcePath = "<input>"):
+    Result[void, ParseError] =
+  ## Walks every top-level node in `source` through `visitor`.
+  ## Each node fires visitBeginNode/...visitEndNode independently. The visitor
+  ## is responsible for accumulating results across nodes (the seq[T]
+  ## entry point's emitted visitor does this).
+  var interner = initInterner()
+  let stream = lex(source, interner)
+  for t in stream.tokens:
+    if t.kind == tkError:
+      return err[void, ParseError](stream.errorPayloads[t.errIdx])
+
+  var cursor = 0
+  template peek(off = 0): Token =
+    if cursor + off < stream.tokens.len: stream.tokens[cursor + off]
+    else: Token(kind: tkEof, span: pointSpan(StartPosition))
+
+  while true:
+    while peek().kind == tkNewline: inc cursor
+    if peek().kind == tkEof: break
+
+    let nameTok = peek()
+    if nameTok.kind != tkIdent:
+      return err[void, ParseError](initError(peParseExpected, nameTok.span,
+        "expected node name"))
+    inc cursor
+
+    let nameStr = interner.lookup(nameTok.ident)
+    let bRes = visitor.visitBeginNode(nameTok.ident,
+                                  nameStr.toOpenArray(0, nameStr.high))
+    if bRes.isErr: return bRes
+
+    var argIdx = 0
+    while true:
+      let t = peek()
+      case t.kind
+      of tkNewline, tkSemicolon, tkEof, tkRBrace:
+        break
+      of tkIdent, tkString, tkRawString:
+        if peek(1).kind == tkEquals:
+          let keyTok = peek()
+          let keyHandle =
+            case keyTok.kind
+            of tkIdent: keyTok.ident
+            of tkString: interner.intern(stream.stringPayloads[keyTok.strIdx])
+            of tkRawString: interner.intern(stream.rawStringPayloads[keyTok.rawIdx])
+            else: InvalidInterned
+          cursor += 2
+          let valueTok = peek()
+          inc cursor
+          let keyStr = interner.lookup(keyHandle)
+          let pRes = visitor.visitProp(keyHandle,
+                                   keyStr.toOpenArray(0, keyStr.high),
+                                   valueTok, stream)
+          if pRes.isErr: return pRes
+        else:
+          inc cursor
+          let aRes = visitor.visitArg(argIdx, t, stream)
+          if aRes.isErr: return aRes
+          inc argIdx
+      of tkNumber, tkKeyword:
+        inc cursor
+        let aRes = visitor.visitArg(argIdx, t, stream)
+        if aRes.isErr: return aRes
+        inc argIdx
+      else:
+        return err[void, ParseError](initError(peParseUnexpected, t.span,
+          "unexpected token in node entries"))
+
+    let eRes = visitor.visitEndNode()
+    if eRes.isErr: return eRes
+
+  ok(void, ParseError)
 
 proc parseWith*[V](source: string, visitor: var V,
                    sourcePath = "<input>"): Result[void, ParseError] =
@@ -69,7 +149,7 @@ proc parseWith*[V](source: string, visitor: var V,
   inc cursor
 
   let nameStr = interner.lookup(nameTok.ident)
-  let bRes = visitor.beginNode(nameTok.ident, nameStr.toOpenArray(0, nameStr.high))
+  let bRes = visitor.visitBeginNode(nameTok.ident, nameStr.toOpenArray(0, nameStr.high))
   if bRes.isErr: return bRes
 
   # Entries (args + props) until newline / EOF / RBrace
@@ -80,7 +160,7 @@ proc parseWith*[V](source: string, visitor: var V,
     of tkNewline, tkSemicolon, tkEof, tkRBrace:
       break
     of tkIdent, tkString, tkRawString:
-      # Could be a property (X=...) or an arg (just the value).
+      # Could be a property (X=...) or an visitArg (just the value).
       if peek(1).kind == tkEquals:
         # property
         let keyTok = peek()
@@ -94,26 +174,26 @@ proc parseWith*[V](source: string, visitor: var V,
         let valueTok = peek()
         inc cursor
         let keyStr = interner.lookup(keyHandle)
-        let pRes = visitor.prop(keyHandle, keyStr.toOpenArray(0, keyStr.high),
+        let pRes = visitor.visitProp(keyHandle, keyStr.toOpenArray(0, keyStr.high),
                                 valueTok, stream)
         if pRes.isErr: return pRes
       else:
-        # arg
+        # visitArg
         inc cursor
-        let aRes = visitor.arg(argIdx, t, stream)
+        let aRes = visitor.visitArg(argIdx, t, stream)
         if aRes.isErr: return aRes
         inc argIdx
     of tkNumber, tkKeyword:
-      # bare arg (number or keyword)
+      # bare visitArg (number or keyword)
       inc cursor
-      let aRes = visitor.arg(argIdx, t, stream)
+      let aRes = visitor.visitArg(argIdx, t, stream)
       if aRes.isErr: return aRes
       inc argIdx
     else:
       return err[void, ParseError](initError(peParseUnexpected, t.span,
         "unexpected token in node entries"))
 
-  let eRes = visitor.endNode()
+  let eRes = visitor.visitEndNode()
   if eRes.isErr: return eRes
 
   ok(void, ParseError)

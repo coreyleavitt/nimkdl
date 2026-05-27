@@ -29,7 +29,7 @@ type ServiceBuilder = object
   result: Service
   inNode: bool
 
-proc beginNode(b: var ServiceBuilder, name: InternedStr,
+proc visitBeginNode(b: var ServiceBuilder, name: InternedStr,
                nameStr: openArray[char]): Result[void, ParseError] =
   if not (nameStr.len == 7 and nameStr.toString == "service"):
     return err[void, ParseError](initError(peParseUnexpected, pointSpan(StartPosition),
@@ -40,7 +40,7 @@ proc beginNode(b: var ServiceBuilder, name: InternedStr,
   b.result.enabled = true
   ok(void, ParseError)
 
-proc arg(b: var ServiceBuilder, idx: int, tok: Token,
+proc visitArg(b: var ServiceBuilder, idx: int, tok: Token,
          stream: TokenStream): Result[void, ParseError] =
   case tok.kind
   of tkString:
@@ -48,9 +48,9 @@ proc arg(b: var ServiceBuilder, idx: int, tok: Token,
     ok(void, ParseError)
   else:
     err[void, ParseError](initError(peParseExpected, tok.span,
-      "expected string arg for Service.name"))
+      "expected string visitArg for Service.name"))
 
-proc prop(b: var ServiceBuilder, key: InternedStr, keyStr: openArray[char],
+proc visitProp(b: var ServiceBuilder, key: InternedStr, keyStr: openArray[char],
           tok: Token, stream: TokenStream): Result[void, ParseError] =
   case keyStr.toString
   of "port":
@@ -79,13 +79,13 @@ proc prop(b: var ServiceBuilder, key: InternedStr, keyStr: openArray[char],
       "Service has no field: " & keyStr.toString))
   ok(void, ParseError)
 
-proc beginChildren(b: var ServiceBuilder): Result[void, ParseError] =
+proc visitBeginChildren(b: var ServiceBuilder): Result[void, ParseError] =
   ok(void, ParseError)
 
-proc endChildren(b: var ServiceBuilder): Result[void, ParseError] =
+proc visitEndChildren(b: var ServiceBuilder): Result[void, ParseError] =
   ok(void, ParseError)
 
-proc endNode(b: var ServiceBuilder): Result[void, ParseError] =
+proc visitEndNode(b: var ServiceBuilder): Result[void, ParseError] =
   b.inNode = false
   ok(void, ParseError)
 
@@ -142,3 +142,20 @@ suite "typed parser — macro-generated visitor (cycle 2)":
     check r.get.port == 80
     check r.get.replicas == 1
     check r.get.enabled == true
+
+# Cycle 3: seq[T] entry point — list of homogeneous nodes.
+suite "typed parser — seq[T] (cycle 3)":
+  test "parseInto[seq[ServiceTyped]] decodes two services":
+    let src = "service \"a\" port=1\nservice \"b\" port=2\n"
+    let r = parseInto[seq[ServiceTyped]](src)
+    check r.isOk
+    check r.get.len == 2
+    check r.get[0].name == "a"
+    check r.get[0].port == 1
+    check r.get[1].name == "b"
+    check r.get[1].port == 2
+
+  test "parseInto[seq[ServiceTyped]] on empty input returns empty seq":
+    let r = parseInto[seq[ServiceTyped]]("")
+    check r.isOk
+    check r.get.len == 0

@@ -1645,7 +1645,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
     type `builderName` = object
       result: `typSym`
 
-  # 2. beginNode: name match + apply field defaults.
+  # 2. visitBeginNode: name match + apply field defaults.
   var defaultsBody = newStmtList()
   for f in shape.shared:
     if f.defaultExpr.kind != nnkEmpty:
@@ -1655,7 +1655,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
         `bIdent`.result.`nimName` = `defExpr`
   let nodeLit = newLit(nodeName)
   let beginNodeProc = quote do:
-    proc beginNode(`bIdent`: var `builderName`,
+    proc visitBeginNode(`bIdent`: var `builderName`,
                    name: InternedStr,
                    `nameStrIdent`: openArray[char]):
         Result[void, ParseError] =
@@ -1671,7 +1671,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
       `defaultsBody`
       ok(void, ParseError)
 
-  # 3. arg: dispatch by positional index.
+  # 3. visitArg: dispatch by positional index.
   var argCase = newNimNode(nnkCaseStmt).add(idxIdent)
   var argSeen = 0
   for f in shape.shared:
@@ -1713,20 +1713,20 @@ macro deriveVisitor*(typ: typedesc): untyped =
         else:
           quote do:
             return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported arg type (cycle 2 scope)"))
+              `tokIdent`.span, "unsupported visitArg type (cycle 2 scope)"))
       argCase.add(newNimNode(nnkOfBranch).add(lit).add(assignment))
       inc argSeen
   argCase.add(newNimNode(nnkElse).add quote do:
     return err[void, ParseError](initError(peParseUnexpected, `tokIdent`.span,
       "too many positional args for `" & `nodeLit` & "`")))
   let argProc = quote do:
-    proc arg(`bIdent`: var `builderName`, `idxIdent`: int,
+    proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
              `tokIdent`: Token, `streamIdent`: TokenStream):
         Result[void, ParseError] =
       `argCase`
       ok(void, ParseError)
 
-  # 4. prop: dispatch by property key string.
+  # 4. visitProp: dispatch by property key string.
   var propCase = newNimNode(nnkCaseStmt).add(quote do:
     cast[string](@(`keyStrIdent`.toOpenArray(0, `keyStrIdent`.len - 1))))
   for f in shape.shared:
@@ -1770,7 +1770,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
         else:
           quote do:
             return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported prop type (cycle 2 scope)"))
+              `tokIdent`.span, "unsupported visitProp type (cycle 2 scope)"))
       propCase.add(newNimNode(nnkOfBranch).add(kdlName).add(assignment))
   # Strict default per Decision 1: unknown property is an error.
   propCase.add(newNimNode(nnkElse).add quote do:
@@ -1779,24 +1779,24 @@ macro deriveVisitor*(typ: typedesc): untyped =
       cast[string](@(`keyStrIdent`.toOpenArray(0, `keyStrIdent`.len - 1))) &
       "`")))
   let propProc = quote do:
-    proc prop(`bIdent`: var `builderName`, key: InternedStr,
+    proc visitProp(`bIdent`: var `builderName`, key: InternedStr,
               `keyStrIdent`: openArray[char],
               `tokIdent`: Token, `streamIdent`: TokenStream):
         Result[void, ParseError] =
       `propCase`
       ok(void, ParseError)
 
-  # 5/6/7. Children + endNode: no-op for flat case (cycle 7 adds children).
+  # 5/6/7. Children + visitEndNode: no-op for flat case (cycle 7 adds children).
   let restProcs = quote do:
-    proc beginChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
+    proc visitBeginChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
       ok(void, ParseError)
-    proc endChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
+    proc visitEndChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
       ok(void, ParseError)
-    proc endNode(`bIdent`: var `builderName`): Result[void, ParseError] =
+    proc visitEndNode(`bIdent`: var `builderName`): Result[void, ParseError] =
       ok(void, ParseError)
 
   # 8. kdlVisitorParse — the macro-emitted entry the generic parseInto[T]
-  # mixin's into.
+  # mixins into for the singular case.
   let kvpProc = quote do:
     proc kdlVisitorParse(_: typedesc[`typSym`], source: string,
                          sourcePath: string): Result[`typSym`, ParseError] =
@@ -1805,8 +1805,52 @@ macro deriveVisitor*(typ: typedesc): untyped =
       if r.isErr: return err[`typSym`, ParseError](r.getErr)
       ok[`typSym`, ParseError](`bIdent`.result)
 
+  # 9. Seq variant. Uses a wrapping visitor that holds a seq + per-node
+  # builder; visitEndNode commits to the seq and resets the builder for the
+  # next sibling. parseDocumentWith drives the loop over top-level nodes.
+  let seqBuilderName = ident(typName & "VBuilderSeq")
+  let seqBuilderType = quote do:
+    type `seqBuilderName` = object
+      results: seq[`typSym`]
+      cur: `builderName`
+  let seqWrapProcs = quote do:
+    proc visitBeginNode(`bIdent`: var `seqBuilderName`, name: InternedStr,
+                   `nameStrIdent`: openArray[char]):
+        Result[void, ParseError] =
+      `bIdent`.cur = `builderName`()
+      visitBeginNode(`bIdent`.cur, name, `nameStrIdent`)
+    proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
+             `tokIdent`: Token, `streamIdent`: TokenStream):
+        Result[void, ParseError] =
+      visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`)
+    proc visitProp(`bIdent`: var `seqBuilderName`, key: InternedStr,
+              `keyStrIdent`: openArray[char],
+              `tokIdent`: Token, `streamIdent`: TokenStream):
+        Result[void, ParseError] =
+      visitProp(`bIdent`.cur, key, `keyStrIdent`, `tokIdent`, `streamIdent`)
+    proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
+        Result[void, ParseError] =
+      visitBeginChildren(`bIdent`.cur)
+    proc visitEndChildren(`bIdent`: var `seqBuilderName`):
+        Result[void, ParseError] =
+      visitEndChildren(`bIdent`.cur)
+    proc visitEndNode(`bIdent`: var `seqBuilderName`): Result[void, ParseError] =
+      let r = visitEndNode(`bIdent`.cur)
+      if r.isErr: return r
+      `bIdent`.results.add(`bIdent`.cur.result)
+      ok(void, ParseError)
+  let kvpSeqProc = quote do:
+    proc kdlVisitorParseSeq(_: typedesc[`typSym`], source: string,
+                            sourcePath: string):
+        Result[seq[`typSym`], ParseError] =
+      var sb = `seqBuilderName`()
+      let r = parseDocumentWith(source, sb, sourcePath)
+      if r.isErr: return err[seq[`typSym`], ParseError](r.getErr)
+      ok[seq[`typSym`], ParseError](sb.results)
+
   result = newStmtList(
-    builderType, beginNodeProc, argProc, propProc, restProcs, kvpProc)
+    builderType, beginNodeProc, argProc, propProc, restProcs, kvpProc,
+    seqBuilderType, seqWrapProcs, kvpSeqProc)
   when defined(dumpKdlGen):
     echo "=== deriveVisitor for ", repr(typ), " ==="
     echo result.repr
