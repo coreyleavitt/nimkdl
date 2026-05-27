@@ -20,12 +20,11 @@ Requires Nim 2.0+.
 ```nim
 import nkdl
 
-type Service {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  replicas {.kdlProp.}: int = 1
-  enabled {.kdlProp.}: bool = true
-
-deriveDecode(Service)
+kdl:
+  type Service {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    replicas {.kdlProp.}: int = 1
+    enabled {.kdlProp.}: bool = true
 
 let r = decode[seq[Service]](readFile("services.kdl"))
 if r.isErr:
@@ -52,7 +51,7 @@ const builtins = embed[seq[Service]]("services.kdl").get
 |---|---|---|
 | Parse | `parse(src, preserveFormat = false) -> Result[KdlDoc, ParseError]` | KDL v2 text to AST. `preserveFormat` is opt-in for `emPreserve`. |
 | Encode | `encode(doc, mode = emPreserve) -> string` | `emPreserve` is byte-lossless; `emPretty` and `emCompact` are canonical. |
-| Decode | `decode[T](src) -> Result[T, ParseError]` | Typed decode via `deriveDecode[T]`. |
+| Decode | `decode[T](src) -> Result[T, ParseError]` | Typed decode for types in a `kdl:` block. |
 | Embed | `embed[T]("path")` | `staticRead` plus decode at compile time. Bad input fails the build. |
 | Query | `path(items, [pred].chain)` | Compile-time field-checked filter and access. |
 | Reference | `referenceInterpret(src)` | Table-driven independent parser used as differential-test oracle. |
@@ -66,7 +65,7 @@ Full KDL v2. **338 / 338** of the [kdl-org/kdl test corpus](https://github.com/k
 
 Reserved type annotations (spec §3) get parse-time validation for all 30-ish spec-defined tags: range checks for `i8` through `u128`, `f32`, `f64`; format validation for `uuid`, `ipv4`, `ipv6`, `date`, `time`, `date-time`, `duration`, `email`, `url`; ISO registry membership for `country-2`, `country-3`, `currency`; IEEE 754-2008 checks for `decimal`, `decimal64`, `decimal128`.
 
-KSL (KDL Schema Language) and KQL (KDL Query Language) are intentionally not implemented. KSL targets v1 and has no working reference impl — we replace it with Nim-types-as-schema (`deriveDecode[T]` plus `{.kdlReserved.}`). KQL is marked unreleased in the spec — we replace it with the `path()` macro (compile-time field-checked).
+KSL (KDL Schema Language) and KQL (KDL Query Language) are intentionally not implemented. KSL targets v1 and has no working reference impl — we replace it with Nim-types-as-schema (`kdl:` block plus `{.kdlReserved.}`). KQL is marked unreleased in the spec — we replace it with the `path()` macro (compile-time field-checked).
 
 ## Pragmas
 

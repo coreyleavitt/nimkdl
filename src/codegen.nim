@@ -12,25 +12,27 @@
 ## ```nim
 ## import nkdl
 ##
-## type
-##   ActionKind* = enum
+## kdl:
+##   type ActionKind = enum
 ##     akInject = "inject"
 ##     akDeny   = "deny"
 ##
-##   Action* {.kdlNode: "action".} = object
-##     kind*:     ActionKind  {.kdlArg.}
-##     template*: string      {.kdlProp.}
+##   type Action {.kdlNode: "action".} = object
+##     kind {.kdlArg.}: ActionKind
+##     tmpl {.kdlProp, kdlRename: "template".}: string
 ##
-##   Rule* {.kdlNode: "rule".} = object
-##     id*:      string                {.kdlArg.}
-##     enabled* {.kdlProp, default: true.}: bool
-##     action*:  Action                {.kdlChild.}
+##   type Rule {.kdlNode: "rule".} = object
+##     id {.kdlArg.}: string
+##     enabled {.kdlProp.}: bool = true
+##     action {.kdlChild.}: Action
 ##
-## deriveDecode(Action)
-## deriveDecode(Rule)
-##
-## let rule = parse[Rule]("rule \"compaction\" {\n  action \"inject\"\n}")
+## let r = decode[Rule]("rule \"compaction\" {\n  action \"inject\"\n}")
 ## ```
+##
+## One `kdl:` block per file is usually enough — it walks every typedef
+## inside and emits decode/encode/typed-direct codegen for any
+## `{.kdlNode.}`-marked type. Helper types (no `{.kdlNode.}`) pass
+## through unchanged.
 ##
 ## ## Pragmas
 ##
@@ -43,16 +45,8 @@
 ##   - `{.kdlChild.}`         — child node (default for nested objects + seq[T])
 ##   - `{.kdlSkip.}`          — never decoded; uses Nim default value
 ##   - `{.kdlRename: "x".}`   — override the KDL name for this field
-##   - `{.default: expr.}`    — fallback when the KDL document omits the field
-##
-## ## Why a separate `deriveDecode` call
-##
-## A pure `parse[T]` macro can't generate procs *in scope for the call site*
-## without macro pragmas, which are hard to compose. `deriveDecode(T)` is
-## the explicit hand-off: it emits a `kdlDecodeImpl` overload bound to T.
-## `parse[T]` then dispatches by overload resolution. Cost: one extra line
-## per type. Benefit: composable, no order-of-definition surprises, and
-## the generated code is dumpable via `-d:dumpKdlGen`.
+##   - `{.kdlReserved: "tag".}` — value must carry the reserved KDL type tag
+##   - Native Nim defaults (`field: T = expr`) double as fallback values
 
 import std/[macros, strutils, tables]
 

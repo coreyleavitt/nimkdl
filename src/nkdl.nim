@@ -12,12 +12,11 @@
 ## ```nim
 ## import nkdl
 ##
-## type Service {.kdlNode: "service".} = object
-##   name {.kdlArg.}: string
-##   port {.kdlProp.}: int
-##   enabled {.kdlProp.}: bool = true
-##
-## deriveDecode(Service)
+## kdl:
+##   type Service {.kdlNode: "service".} = object
+##     name {.kdlArg.}: string
+##     port {.kdlProp.}: int
+##     enabled {.kdlProp.}: bool = true
 ##
 ## let r = decode[seq[Service]](readFile("services.kdl"))
 ## if r.isErr:
@@ -105,7 +104,7 @@ export encode
 # via `import nkdl/grammar` for tests but aren't curated public API.
 export grammar
 
-# Codegen — the headline surface. Pragmas, deriveDecode, decode[T],
+# Codegen — the headline surface. Pragmas, `kdl:` block macro, decode[T],
 # embed[T], kdlDecodeValue overloads (needed by user-defined enum types).
 export codegen
 
