@@ -1904,6 +1904,10 @@ macro deriveVisitor(typ: typedesc): untyped =
     builderFields.add newIdentDefs(ident("seen"),
       newNimNode(nnkBracketExpr).add(ident("set"), ident("uint8")))
   builderFields.add newIdentDefs(ident("nodeSpan"), ident("Span"))
+  # Holds the most recent `(tag)` annotation set by visitValueTypeAnno;
+  # consumed (and cleared) by the next visitArg/visitProp. Empty string
+  # = no pending annotation.
+  builderFields.add newIdentDefs(ident("pendingValueAnno"), ident("string"))
   if children.len > 0:
     builderFields.add newIdentDefs(ident("inChildren"), ident("bool"))
     builderFields.add newIdentDefs(ident("curChildName"), ident("string"))
@@ -2010,9 +2014,42 @@ macro deriveVisitor(typ: typedesc): untyped =
     let primTypeNode = if isOpt: f.innerType else: f.typeNode
     let primTypeName = $primTypeNode
     let typeStr = primTypeName  # for error msgs
+    # Reserved-tag validation: if the field declares `{.kdlReserved: "x".}`,
+    # the source value MUST carry the matching `(x)` annotation. If the
+    # source carries any annotation (even on a non-reserved field), the
+    # annotation's content must validate per spec §3 (e.g. `(ipv4)` →
+    # validateIpv4). Mirrors DocBuilder's visitArg/visitProp logic so the
+    # visitor + AST-walk paths agree on every input.
+    let expectedReservedLit = newLit(f.expectedReserved)
+    let kdlNameLit = newLit(f.kdlName)
+    proc validateReservedBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
+      let ctorIdent = ident(kvCtor)
+      let valSym = genSym(nskLet, "kdlVal_" & f.nimName)
+      let rcheckSym = genSym(nskLet, "rcheck_" & f.nimName)
+      quote do:
+        if `bIdent`.pendingValueAnno.len == 0:
+          if `expectedReservedLit`.len > 0:
+            return err[void, ParseError](initError(peTypeReservedMismatch,
+              `tokIdent`.span,
+              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
+              ") tag but source value has no annotation"))
+        else:
+          if `expectedReservedLit`.len > 0 and
+             `bIdent`.pendingValueAnno != `expectedReservedLit`:
+            return err[void, ParseError](initError(peTypeReservedMismatch,
+              `tokIdent`.span,
+              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
+              ") tag but source has (" & `bIdent`.pendingValueAnno & ")"))
+          let `valSym` = `ctorIdent`(`decodedExpr`, `tokIdent`.span)
+          let `rcheckSym` = validateReserved(`bIdent`.pendingValueAnno, `valSym`)
+          if `rcheckSym`.isErr:
+            return err[void, ParseError](`rcheckSym`.getErr)
+          `bIdent`.pendingValueAnno = ""
+
     # Build core: a stmtlist that, given a `decoded` ident of the right
-    # primitive type, assigns it to the target field (wrapping in some
-    # if Option) and runs the seen bit if not Option.
+    # primitive type, validates any reserved-tag constraint, then assigns
+    # to the target field (wrapping in some if Option) and runs the seen
+    # bit if not Option.
     proc assignDecoded(decodedExpr: NimNode): NimNode =
       if isOpt:
         quote do:
@@ -2025,6 +2062,12 @@ macro deriveVisitor(typ: typedesc): untyped =
         s.add(asn)
         s.add(seenStmt)
         s
+
+    proc validateAndAssign(decodedExpr: NimNode, kvCtor: string): NimNode =
+      let s = newStmtList()
+      s.add(validateReservedBlock(decodedExpr, kvCtor))
+      s.add(assignDecoded(decodedExpr))
+      s
 
     # Enum dispatch: read string payload then decodeEnumFromString.
     if f.typeIsEnum:
@@ -2039,6 +2082,11 @@ macro deriveVisitor(typ: typedesc): untyped =
             `fieldLabel` & "`: '" & `strSym` & "'"))
       let assignBody = newStmtList()
       assignBody.add(body)
+      # Enum source is always a string token — validate via newStringValue
+      # against the matched-against string (pre-enum-decode). We use
+      # `strSym` (the source bytes) rather than `outSym` (the enum) so the
+      # validation operates on the original textual form.
+      assignBody.add(validateReservedBlock(strSym, "newStringValue"))
       assignBody.add(assignDecoded(outSym))
       return quote do:
         case `tokIdent`.kind
@@ -2063,7 +2111,7 @@ macro deriveVisitor(typ: typedesc): untyped =
     case primTypeName
     of "string":
       let strSym = genSym(nskLet, "strVal")
-      let strAssign = assignDecoded(strSym)
+      let strAssign = validateAndAssign(strSym, "newStringValue")
       quote do:
         case `tokIdent`.kind
         of tkString:
@@ -2078,7 +2126,7 @@ macro deriveVisitor(typ: typedesc): untyped =
             `fieldLabel` & "`"))
     of "int":
       let intSym = genSym(nskLet, "intVal")
-      let intAssign = assignDecoded(intSym)
+      let intAssign = validateAndAssign(intSym, "newIntValue")
       quote do:
         if `tokIdent`.kind != tkNumber:
           return err[void, ParseError](initError(peTypeMismatch,
@@ -2091,7 +2139,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         `intAssign`
     of "bool":
       let boolSym = genSym(nskLet, "boolVal")
-      let boolAssign = assignDecoded(boolSym)
+      let boolAssign = validateAndAssign(boolSym, "newBoolValue")
       quote do:
         if `tokIdent`.kind != tkKeyword:
           return err[void, ParseError](initError(peTypeMismatch,
@@ -2101,7 +2149,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         `boolAssign`
     of "float", "float64":
       let fltSym = genSym(nskLet, "fltVal")
-      let fltAssign = assignDecoded(fltSym)
+      let fltAssign = validateAndAssign(fltSym, "newFloatValue")
       quote do:
         if `tokIdent`.kind != tkNumber:
           return err[void, ParseError](initError(peTypeMismatch,
@@ -2352,6 +2400,15 @@ macro deriveVisitor(typ: typedesc): untyped =
     type `seqBuilderName` = object
       results: seq[`typSym`]
       cur: `builderName`
+  let annoStrIdent = ident("annoStr")
+  let annoSpanIdent = ident("annoSpan")
+  let valueAnnoProc = quote do:
+    proc visitValueTypeAnno(`bIdent`: var `builderName`,
+                            `annoStrIdent`: openArray[char],
+                            `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.pendingValueAnno = openArrayToString(`annoStrIdent`)
+      ok(void, ParseError)
   let seqWrapProcs = quote do:
     proc visitBeginNode(`bIdent`: var `seqBuilderName`,
                    `nameStrIdent`: openArray[char],
@@ -2371,6 +2428,11 @@ macro deriveVisitor(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`, `streamIdent`,
                 entrySpan)
+    proc visitValueTypeAnno(`bIdent`: var `seqBuilderName`,
+                            `annoStrIdent`: openArray[char],
+                            `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      visitValueTypeAnno(`bIdent`.cur, `annoStrIdent`, `annoSpanIdent`)
     proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
       visitBeginChildren(`bIdent`.cur)
@@ -2398,13 +2460,13 @@ macro deriveVisitor(typ: typedesc): untyped =
   # the corresponding gate code via `when X in caps:` branches.
   let capsTemplate = quote do:
     template visitorCaps*(_: typedesc[`builderName`]): set[VisitorCap] =
-      {vcArgs, vcProps, vcChildren}
+      {vcArgs, vcProps, vcChildren, vcValueAnno}
     template visitorCaps*(_: typedesc[`seqBuilderName`]): set[VisitorCap] =
-      {vcArgs, vcProps, vcChildren}
+      {vcArgs, vcProps, vcChildren, vcValueAnno}
 
   result = newStmtList(
-    builderType, beginNodeProc, argProc, propProc, restProcs, kvpProc,
-    seqBuilderType, seqWrapProcs, capsTemplate, kvpSeqProc)
+    builderType, beginNodeProc, argProc, propProc, valueAnnoProc, restProcs,
+    kvpProc, seqBuilderType, seqWrapProcs, capsTemplate, kvpSeqProc)
   when defined(dumpKdlGen):
     echo "=== deriveVisitor for ", repr(typ), " ==="
     echo result.repr
