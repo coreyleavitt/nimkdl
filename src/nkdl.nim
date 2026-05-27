@@ -43,7 +43,7 @@
 ## | Multi-error typed decode | `decodeAll[T](src) -> (value, errors)` | `codegen` |
 ## | Compile-time embed | `embed[T]("path")` | `codegen` |
 ## | Encode AST → text | `encode(doc, mode = emPreserve) -> string` | `encode` |
-## | Typed-direct encode | `encodeFrom[T](v) -> Result[string, ParseError]` | `codegen` |
+## | Typed-direct encode | `encode[T](v) -> Result[string, ParseError]` | `codegen` |
 ## | Typed query DSL | `path(items, [pred].field.chain)` | `path` |
 ## | Differential oracle | `referenceInterpret(src)` | `grammar` |
 ##
@@ -108,8 +108,8 @@ export encode
 export grammar
 
 # Codegen — the headline surface. Pragmas, `kdl:` block macro, decode[T],
-# decodeAll[T], embed[T], encode[T] / encodeFrom[T], kdlDecodeValue
-# overloads (needed by user-defined enum types).
+# decodeAll[T], embed[T], encode[T], kdlDecodeValue overloads (needed
+# by user-defined enum types).
 export codegen
 
 # Path DSL — full public surface.

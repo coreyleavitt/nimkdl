@@ -1,9 +1,9 @@
-## Cycle E.1 — encodeFrom[T] tracer.
+## Cycle E.1 — encode[T] tracer.
 ##
-## Acceptance: encodeFrom[T](v) produces byte-identical output to the
+## Acceptance: encode[T](v) produces byte-identical output to the
 ## legacy `encode[T](v, emPretty).get` path (value → KdlNode → KdlDoc →
 ## string) for a simple object type. Architectural symmetry with the
-## decode-side win: parseInto[T] skipped KdlDoc, encodeFrom[T] skips
+## decode-side win: parseInto[T] skipped KdlDoc, encode[T] skips
 ## KdlNode + KdlDoc.
 
 import std/[strutils, unittest]
@@ -17,13 +17,13 @@ kdl:
     replicas {.kdlProp.}: int = 1
     enabled {.kdlProp.}: bool = true
 
-suite "encodeFrom[T] tracer (cycle E.1)":
+suite "encode[T] tracer (cycle E.1)":
 
   test "single Service value: direct encode matches legacy KdlDoc encode":
     let s = Service(name: "web", port: 8080, replicas: 2, enabled: true)
     let viaLegacy = encode(s, emPretty)
     check viaLegacy.isOk
-    let viaDirect = encodeFrom(s)
+    let viaDirect = encode(s)
     check viaDirect.isOk
     check viaLegacy.get == viaDirect.get
 
@@ -31,13 +31,13 @@ suite "encodeFrom[T] tracer (cycle E.1)":
     let s = Service(name: "api", port: 80)  # replicas + enabled default
     let viaLegacy = encode(s, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(s).get == viaLegacy.get
+    check encode(s).get == viaLegacy.get
 
   test "Service with name needing quoting (contains space)":
     let s = Service(name: "my service", port: 443)
     let viaLegacy = encode(s, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(s).get == viaLegacy.get
+    check encode(s).get == viaLegacy.get
 
 # Cycle E.5 — children blocks
 kdl:
@@ -47,7 +47,7 @@ kdl:
     name {.kdlArg.}: string
     actions {.kdlChild.}: seq[Action]
 
-suite "encodeFrom[T] children blocks (cycle E.5)":
+suite "encode[T] children blocks (cycle E.5)":
 
   test "Server with seq[Action] children — direct matches legacy":
     let s = Server(name: "web", actions: @[
@@ -55,13 +55,13 @@ suite "encodeFrom[T] children blocks (cycle E.5)":
       Action(tmpl: "alert")])
     let viaLegacy = encode(s, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(s).get == viaLegacy.get
+    check encode(s).get == viaLegacy.get
 
   test "Server with empty children seq emits no block":
     let s = Server(name: "minimal", actions: @[])
     let viaLegacy = encode(s, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(s).get == viaLegacy.get
+    check encode(s).get == viaLegacy.get
 
 # Cycle E.4 — Option[T] fields
 kdl:
@@ -70,57 +70,57 @@ kdl:
     retries {.kdlProp.}: Option[int]
     desc {.kdlProp.}: Option[string]
 
-suite "encodeFrom[T] Option[T] (cycle E.4)":
+suite "encode[T] Option[T] (cycle E.4)":
 
   test "Option some(int) emits prop=value":
     let t = WithOpt(name: "build", retries: some(3), desc: none(string))
     let viaLegacy = encode(t, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(t).get == viaLegacy.get
+    check encode(t).get == viaLegacy.get
 
   test "Option none — prop is omitted":
     let t = WithOpt(name: "lint", retries: none(int), desc: none(string))
     let viaLegacy = encode(t, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(t).get == viaLegacy.get
+    check encode(t).get == viaLegacy.get
 
   test "Option some(string)":
     let t = WithOpt(name: "deploy", retries: none(int),
                     desc: some("rollout"))
     let viaLegacy = encode(t, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(t).get == viaLegacy.get
+    check encode(t).get == viaLegacy.get
 
 # Cycle E.6 — kdlReserved tag emission + validation
 kdl:
   type Tagged {.kdlNode: "tagged".} = object
     bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
 
-suite "encodeFrom[T] kdlReserved (cycle E.6)":
+suite "encode[T] kdlReserved (cycle E.6)":
 
   test "valid ipv4 emits `(ipv4)` tag prefix":
     let t = Tagged(bindAddr: "192.0.2.1")
     let viaLegacy = encode(t, emPretty)
     check viaLegacy.isOk
-    check encodeFrom(t).get == viaLegacy.get
+    check encode(t).get == viaLegacy.get
 
   test "round-trips through parser + decode":
     let t = Tagged(bindAddr: "10.0.0.1")
-    let txt = encodeFrom(t).get
+    let txt = encode(t).get
     check "(ipv4)" in txt
 
   test "invalid ipv4 errors (Layer 1 validation fires in direct path)":
     let bad = Tagged(bindAddr: "not-an-ip")
-    let r = encodeFrom(bad)
+    let r = encode(bad)
     check r.isErr
     check r.getErr.code == peReservedTypeInvalid
 
-suite "encodeFrom[T] string escaping (cycle E.3)":
+suite "encode[T] string escaping (cycle E.3)":
 
   proc roundTripsEqual(s: Service) =
     let viaLegacy = encode(s, emPretty)
     check viaLegacy.isOk
-    let viaDirect = encodeFrom(s)
+    let viaDirect = encode(s)
     check viaDirect.isOk
     check viaDirect.get == viaLegacy.get
 
@@ -164,16 +164,16 @@ kdl:
   type WithU8 {.kdlNode: "port".} = object
     n {.kdlProp, kdlReserved: "u8".}: int
 
-suite "encodeFrom: numeric kdlReserved tag (C1 regression)":
+suite "encode: numeric kdlReserved tag (C1 regression)":
   test "valid (u8) value encodes":
-    let r = encodeFrom(WithU8(n: 200))
+    let r = encode(WithU8(n: 200))
     check r.isOk
     check "(u8)200" in r.get
   test "value matches legacy encode":
     let v = WithU8(n: 42)
-    check encodeFrom(v).get == encode(v, emPretty).get
+    check encode(v).get == encode(v, emPretty).get
   test "out-of-range (u8) value errors":
-    let r = encodeFrom(WithU8(n: 999))
+    let r = encode(WithU8(n: 999))
     check r.isErr
     check r.getErr.code == peReservedTypeInvalid
     # Error hint should be prefixed with TypeName.fieldName (M2).
@@ -183,18 +183,18 @@ kdl:
   type Bind {.kdlNode: "bind".} = object
     addr1 {.kdlArg, kdlReserved: "ipv4".}: string
 
-suite "encodeFrom: kdlReserved on kdlArg (C2 regression)":
+suite "encode: kdlReserved on kdlArg (C2 regression)":
   test "valid arg emits with (ipv4) tag prefix":
-    let r = encodeFrom(Bind(addr1: "127.0.0.1"))
+    let r = encode(Bind(addr1: "127.0.0.1"))
     check r.isOk
     check "(ipv4)" in r.get
   test "invalid arg fails validation":
-    let r = encodeFrom(Bind(addr1: "not-an-ip"))
+    let r = encode(Bind(addr1: "not-an-ip"))
     check r.isErr
     check r.getErr.code == peReservedTypeInvalid
   test "arg encode matches legacy":
     let v = Bind(addr1: "10.0.0.1")
-    check encodeFrom(v).get == encode(v, emPretty).get
+    check encode(v).get == encode(v, emPretty).get
 
 kdl:
   type BigU {.kdlNode: "big".} = object
@@ -202,25 +202,25 @@ kdl:
 
 # Round-2 H1: type-level kdlReserved on the node was silently dropped
 # by the direct-buffer path. The legacy encode[T] sets
-# nodeSym.typeAnnotation; encodeFrom only emitted the node name with
-# no `(tag)` prefix, breaking encodeFrom == encode(emPretty) parity.
+# nodeSym.typeAnnotation; encode only emitted the node name with
+# no `(tag)` prefix, breaking encode == encode(emPretty) parity.
 
 kdl:
   type Versioned {.kdlNode: "module", kdlReserved: "v2".} = object
     field {.kdlProp.}: string
 
-suite "encodeFrom: type-level kdlReserved emits (tag) prefix (round-2 H1)":
+suite "encode: type-level kdlReserved emits (tag) prefix (round-2 H1)":
   test "node carries (v2) tag in output":
     let v = Versioned(field: "ok")
-    let r = encodeFrom(v)
+    let r = encode(v)
     check r.isOk
     check "(v2)module" in r.get
-  test "encodeFrom output matches legacy encode for type-level tag":
+  test "encode output matches legacy encode for type-level tag":
     let v = Versioned(field: "ok")
-    check encodeFrom(v).get == encode(v, emPretty).get
+    check encode(v).get == encode(v, emPretty).get
   test "round-trips through decode":
     let v = Versioned(field: "ok")
-    let txt = encodeFrom(v).get
+    let txt = encode(v).get
     let back = decode[Versioned](txt)
     check back.isOk
     check back.get.field == "ok"
@@ -231,17 +231,17 @@ suite "encodeFrom: type-level kdlReserved emits (tag) prefix (round-2 H1)":
 ## both modes. New behavior — adds tests; existing emPretty behavior
 ## stays unchanged.
 
-suite "encodeFrom: emCompact mode":
+suite "encode: emCompact mode":
   test "flat type encodes as single line, no trailing newline":
     let s = Service(name: "web", port: 80, replicas: 1, enabled: true)
-    let r = encodeFrom(s, emCompact)
+    let r = encode(s, emCompact)
     check r.isOk
     check '\n' notin r.get
     check r.get.startsWith("service")
 
   test "direct emCompact matches legacy encode emCompact byte-for-byte":
     let s = Service(name: "api", port: 8080, replicas: 2, enabled: false)
-    let viaDirect = encodeFrom(s, emCompact)
+    let viaDirect = encode(s, emCompact)
     let viaLegacy = encode(s, emCompact)
     check viaDirect.isOk
     check viaLegacy.isOk
@@ -250,7 +250,7 @@ suite "encodeFrom: emCompact mode":
   test "nested children (Server with Action seq) compact form":
     let srv = Server(name: "web", actions: @[
       Action(tmpl: "log"), Action(tmpl: "alert")])
-    let r = encodeFrom(srv, emCompact)
+    let r = encode(srv, emCompact)
     check r.isOk
     check '\n' notin r.get
     check "{" in r.get
@@ -259,31 +259,31 @@ suite "encodeFrom: emCompact mode":
   test "nested children: direct compact == legacy compact":
     let srv = Server(name: "web", actions: @[
       Action(tmpl: "log"), Action(tmpl: "alert")])
-    check encodeFrom(srv, emCompact).get == encode(srv, emCompact).get
+    check encode(srv, emCompact).get == encode(srv, emCompact).get
 
   test "emPretty default unchanged":
     let s = Service(name: "ok", port: 1, replicas: 1, enabled: true)
-    # encodeFrom(s) without mode = encodeFrom(s, emPretty) = current behavior
-    check encodeFrom(s).get == encodeFrom(s, emPretty).get
+    # encode(s) without mode = encode(s, emPretty) = current behavior
+    check encode(s).get == encode(s, emPretty).get
 
   test "emPreserve on typed value degrades to emPretty":
     # No source bytes available for a built-from-scratch value;
     # emPreserve falls through to canonical (emPretty) emit.
     let s = Service(name: "ok", port: 1, replicas: 1, enabled: true)
-    check encodeFrom(s, emPreserve).get == encodeFrom(s, emPretty).get
+    check encode(s, emPreserve).get == encode(s, emPretty).get
 
-suite "encodeFrom: uint64 bigint promotion (H1 regression)":
+suite "encode: uint64 bigint promotion (H1 regression)":
   test "uint64 within int64.high encodes as plain int":
-    let r = encodeFrom(BigU(n: 12345'u64))
+    let r = encode(BigU(n: 12345'u64))
     check r.isOk
     check "n=12345" in r.get
   test "uint64 above int64.high promotes to bigint, not negative":
     # int64.high = 9223372036854775807; pick a value clearly above it.
     let big: uint64 = 18446744073709551615'u64  # uint64.max
-    let r = encodeFrom(BigU(n: big))
+    let r = encode(BigU(n: big))
     check r.isOk
     check "n=18446744073709551615" in r.get
     check "-" notin r.get   # pre-fix this would have emitted "n=-1"
-  test "encodeFrom value matches legacy for the same big uint64":
+  test "encode value matches legacy for the same big uint64":
     let v = BigU(n: 18446744073709551614'u64)
-    check encodeFrom(v).get == encode(v, emPretty).get
+    check encode(v).get == encode(v, emPretty).get

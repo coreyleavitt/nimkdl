@@ -1131,43 +1131,14 @@ proc encodeNode*[T: object](v: T, doc: var KdlDoc):
   mixin kdlEncodeImpl
   kdlEncodeImpl(v, doc)
 
-proc encodeFrom*[T: object](v: T, mode = emPretty):
-    Result[string, ParseError] =
-  ## Typed-direct encode. Skips KdlNode + KdlDoc construction; the
-  ## macro-emitted `kdlEncodeIntoImpl` writes KDL bytes straight into a
-  ## string buffer in one pass. Output matches `encode(v, mode).get`
-  ## byte-for-byte for emPretty and emCompact. emPreserve degrades to
-  ## emPretty (no source bytes to preserve for a built-from-scratch
-  ## value).
-  ##
-  ## `T` must be declared inside a `kdl:` block.
-  mixin kdlEncodeIntoImpl
-  var buf = newStringOfCap(64)
-  let r = kdlEncodeIntoImpl(v, buf, mode)
-  if r.isErr: return err[string, ParseError](r.getErr)
-  ok[string, ParseError](buf)
-
-proc encodeFrom*[T: object](vs: seq[T], mode = emPretty):
-    Result[string, ParseError] =
-  ## seq[T] variant — each element becomes one top-level node.
-  ## emPretty: newline-separated. emCompact: `; `-separated, single
-  ## line. Stops at the first kdlReserved validation failure.
-  ##
-  ## `T` must be declared inside a `kdl:` block.
-  mixin kdlEncodeIntoImpl
-  var buf = newStringOfCap(64 * vs.len + 32)
-  for i, v in vs:
-    if mode == emCompact and i > 0:
-      buf.add("; ")
-    let r = kdlEncodeIntoImpl(v, buf, mode)
-    if r.isErr: return err[string, ParseError](r.getErr)
-  ok[string, ParseError](buf)
-
 proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
-  ## Render a typed value as KDL text. Default `mode` is `emPretty`
-  ## (multi-line, indented). `emCompact` produces single-line, `;`-
-  ## separated output. `emPreserve` falls through to `emPretty` here —
-  ## a freshly-constructed typed value has no sourceText to preserve.
+  ## Render a typed value as KDL text. Writes bytes straight to a
+  ## string buffer in one pass (no KdlNode / KdlDoc intermediate).
+  ##
+  ## - `emPretty` (default): multi-line, indented.
+  ## - `emCompact`: single-line, `;`-separated entries inside `{}`.
+  ## - `emPreserve`: falls through to `emPretty` — a built-from-scratch
+  ##   typed value has no sourceText to preserve.
   ##
   ## Subject to Layer 1 `kdlReserved` validation: a typed value with a
   ## kdlReserved pragma whose content doesn't match its tag returns
@@ -1180,16 +1151,28 @@ proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
   ## at the offending field.
   ##
   ## `T` must be declared inside a `kdl:` block.
-  encodeFrom(v, mode)
+  mixin kdlEncodeIntoImpl
+  var buf = newStringOfCap(64)
+  let r = kdlEncodeIntoImpl(v, buf, mode)
+  if r.isErr: return err[string, ParseError](r.getErr)
+  ok[string, ParseError](buf)
 
 proc encode*[T: object](vs: seq[T], mode = emPretty):
     Result[string, ParseError] =
   ## Render a sequence of typed values as KDL text: each element
-  ## becomes one top-level node. Symmetric with `decode[seq[T]]`.
-  ## Stops at the first `kdlReserved` validation failure.
+  ## becomes one top-level node. emPretty separates with newlines;
+  ## emCompact joins with `; `. Stops at the first kdlReserved
+  ## validation failure.
   ##
   ## `T` must be declared inside a `kdl:` block.
-  encodeFrom(vs, mode)
+  mixin kdlEncodeIntoImpl
+  var buf = newStringOfCap(64 * vs.len + 32)
+  for i, v in vs:
+    if mode == emCompact and i > 0:
+      buf.add("; ")
+    let r = kdlEncodeIntoImpl(v, buf, mode)
+    if r.isErr: return err[string, ParseError](r.getErr)
+  ok[string, ParseError](buf)
 
 # ---------------------------------------------------------------------------
 # parse[T]

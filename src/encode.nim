@@ -139,7 +139,7 @@ func emitIdent(s: string): string {.inline.} =
   if canEmitBare(s): s else: quotedString(s)
 
 # ---------------------------------------------------------------------------
-# Direct-buffer emit primitives (cycle E — encodeFrom[T] fast path).
+# Direct-buffer emit primitives (cycle E — encode[T] fast path).
 #
 # These write KDL bytes straight into a caller-provided `var string` buffer.
 # Mirrors the per-allocation `emitX` family above but skips the intermediate

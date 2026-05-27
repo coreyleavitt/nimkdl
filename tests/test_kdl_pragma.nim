@@ -33,9 +33,9 @@ suite "kdl: block macro":
     check r.get.replicas == 3
     check r.get.enabled == false
 
-  test "encodeFrom[T] works (deriveEncode emitted)":
+  test "encode[T] works (deriveEncode emitted)":
     let s = Service(name: "deploy", port: 22, replicas: 2, enabled: true)
-    let r = encodeFrom(s)
+    let r = encode(s)
     check r.isOk
     check r.get.len > 0
     check "service" in r.get
@@ -46,5 +46,5 @@ suite "kdl: block macro":
   test "second type from the same module-level kdl block":
     let d = decode[Action](""" action "log" """).get
     check d.tmpl == "log"
-    let e = encodeFrom(Action(tmpl: "alert")).get
+    let e = encode(Action(tmpl: "alert")).get
     check "alert" in e

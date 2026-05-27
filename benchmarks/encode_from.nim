@@ -22,9 +22,9 @@ proc benchSeq[T](label: string, vs: seq[T]) =
   var start = getMonoTime()
   for _ in 1..iters: discard encode(vs, emPretty)
   let elLegacy = (getMonoTime() - start).inNanoseconds.float / 1e9
-  for _ in 1..100: discard encodeFrom(vs).get
+  for _ in 1..100: discard encode(vs).get
   start = getMonoTime()
-  for _ in 1..iters: discard encodeFrom(vs).get
+  for _ in 1..iters: discard encode(vs).get
   let elDirect = (getMonoTime() - start).inNanoseconds.float / 1e9
   echo label
   echo "  legacy: ", int(elLegacy / float(iters) * 1e6), "us  ",
