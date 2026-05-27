@@ -15,3 +15,7 @@ path = "main.rs"
 [[bin]]
 name = "kdlrs-mem"
 path = "mem.rs"
+
+[[bin]]
+name = "kdlrs-corpus"
+path = "corpus.rs"

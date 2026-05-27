@@ -32,6 +32,16 @@ for f in all_node_fields.kdl all_escapes.kdl; do
   fi
 done
 
+# Stage the full kdl-org reference conformance corpus into a separate
+# mount (/corpus/) so it doesn't collide with /fixtures/. The corpus
+# is the community-curated set of spec test cases — used by the
+# real-trace replay benchmark.
+CORPUS_STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE" "$CORPUS_STAGE"' EXIT
+if [ -d "$REPO_ROOT/tests/conformance/test_cases/input" ]; then
+  cp "$REPO_ROOT/tests/conformance/test_cases/input"/*.kdl "$CORPUS_STAGE/"
+fi
+
 run_nimkdl() {
   echo "================================================================"
   echo "  nimkdl (this repo) -- comprehensive harness"
@@ -250,6 +260,78 @@ run_memory() {
   echo ""
 }
 
+run_corpus() {
+  echo "================================================================"
+  echo "  Corpus replay (kdl-org reference conformance corpus, 338 files)"
+  echo "  Real-trace defense: same input every spec parser is held against"
+  echo "================================================================"
+
+  # nimkdl corpus
+  $CONTAINER_RUNTIME run --rm \
+    -v "$REPO_ROOT:/work:Z" \
+    -v "$CORPUS_STAGE:/corpus:Z" \
+    -w /work \
+    docker.io/nimlang/nim:2.2.0 \
+    sh -c '
+      set -e
+      nim c --hints:off -d:release -d:lto \
+        -p:/work/src -o:/tmp/nimkdl-corpus \
+        benchmarks/comparisons/nimkdl/corpus.nim 2>&1 | tail -1 >&2
+      /tmp/nimkdl-corpus /corpus
+    '
+
+  # ckdl corpus — builds ckdl from source if not already present.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/ckdl:/work:Z" \
+    -v "$CORPUS_STAGE:/corpus:Z" \
+    -w /work \
+    docker.io/library/gcc:13 \
+    sh -c '
+      set -e
+      apt-get update -qq >/dev/null 2>&1
+      apt-get install -y -qq cmake git >/dev/null 2>&1
+      if [ ! -d ckdl ]; then
+        git clone --depth 1 https://github.com/tjol/ckdl.git
+        cd ckdl
+        cmake -B build -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_KDL_SHARED_LIBRARY=OFF -DBUILD_KDLPP=OFF \
+          -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF >/dev/null 2>&1
+        cmake --build build -j >/dev/null 2>&1
+        cd ..
+      fi
+      gcc -O3 -DNDEBUG -I ckdl/include -o ckdl-corpus corpus.c ckdl/build/libkdl.a -lm
+      ./ckdl-corpus /corpus
+    '
+
+  # knus corpus.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/knus:/work:Z" \
+    -v "$CORPUS_STAGE:/corpus:Z" \
+    -w /work \
+    docker.io/library/rust:1.86 \
+    sh -c '
+      set -e
+      mkdir -p src && cp main.rs src/main.rs && cp mem.rs src/mem.rs && cp corpus.rs src/corpus.rs
+      cargo build --release --bin knus-corpus 2>&1 | tail -1 >&2
+      ./target/release/knus-corpus /corpus
+    '
+
+  # kdl-rs corpus.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/kdl-rs:/work:Z" \
+    -v "$CORPUS_STAGE:/corpus:Z" \
+    -w /work \
+    docker.io/library/rust:1.83 \
+    sh -c '
+      set -e
+      cargo build --release --bin kdlrs-corpus 2>&1 | tail -1 >&2
+      ./target/release/kdlrs-corpus /corpus
+    '
+
+  echo "  (facet-kdl skipped — typed-decode-only, no usable untyped path for arbitrary-shape corpus.)"
+  echo ""
+}
+
 if [ $# -eq 0 ]; then
   run_nimkdl
   run_ckdl
@@ -257,6 +339,7 @@ if [ $# -eq 0 ]; then
   run_facet_kdl
   run_kdl_rs
   run_memory
+  run_corpus
   exit 0
 fi
 
@@ -269,6 +352,7 @@ for target in "$@"; do
     facet-kdl)     run_facet_kdl ;;
     kdl-rs)        run_kdl_rs ;;
     memory)        run_memory ;;
-    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs|memory)" >&2; exit 1 ;;
+    corpus)        run_corpus ;;
+    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs|memory|corpus)" >&2; exit 1 ;;
   esac
 done

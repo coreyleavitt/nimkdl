@@ -179,6 +179,38 @@ skip the others rather than route them through facet-kdl's
 transitive kdl-rs dependency (which would just duplicate kdl-rs's
 numbers under a different label).
 
+## Real-trace replay (kdl-org conformance corpus)
+
+Throughput on the [kdl-org reference test corpus](https://github.com/kdl-org/kdl/tree/main/tests/test_cases) —
+338 community-curated KDL files (~7 KB total) that every spec-compliant
+parser is held against. We didn't pick these fixtures; the kdl-org
+maintainers did.
+
+Average file is ~21 bytes — most are single-line edge cases. Per-call
+fixed overhead dominates over byte throughput, so the headline metric
+is microseconds per parse call (lower is better).
+
+| Parser    | μs / file | files / sec | accepted / 338 |
+|-----------|----------:|------------:|---------------:|
+| ckdl      | **0.42**  | 2,397K      | 240            |
+| nimkdl    | 0.67      | 1,498K      | **243**        |
+| kdl-rs    | 6.15      | 163K        | 242            |
+| knus      | 11.59     | 86K         | 111            |
+
+(facet-kdl skipped — typed-decode-only, no usable untyped path for
+arbitrary-shape corpus.)
+
+ckdl is fastest per-file (no AST construction); nimkdl follows at
+1.6× ckdl's per-call time but with the highest spec coverage in the
+table — 243 of 338 fixtures accepted, matching the kdl-org corpus's
+own "should parse" count exactly. knus's 111-accepted gap (~130 spec-
+valid files rejected) is a real correctness signal, not a perf
+artifact: knus does not implement some KDL v2 features the conformance
+suite exercises.
+
+Source: `benchmarks/comparisons/last-corpus.txt` (regenerate with
+`benchmarks/comparisons/run.sh corpus`).
+
 ## Methodology
 
 Cross-implementation benchmarks lie easily. The discipline that makes this comparison hold up to outside scrutiny.

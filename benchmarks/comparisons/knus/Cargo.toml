@@ -16,3 +16,7 @@ path = "src/main.rs"
 [[bin]]
 name = "knus-mem"
 path = "src/mem.rs"
+
+[[bin]]
+name = "knus-corpus"
+path = "src/corpus.rs"
