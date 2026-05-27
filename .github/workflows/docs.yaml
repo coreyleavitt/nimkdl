@@ -1,0 +1,50 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: nimlang/nim:2.2.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: build nim docs
+        run: |
+          # --project crawls the whole module graph from the entry point.
+          # --index:on emits a searchable theindex.html. Git options seed
+          # "View source" links so doc pages link back to GitHub blob view.
+          nim doc \
+            --project \
+            --index:on \
+            --git.url:https://github.com/coreyleavitt/nkdl \
+            --git.commit:${{ github.sha }} \
+            --outdir:_docs \
+            src/nkdl.nim
+          # Land at the umbrella module by default.
+          cp _docs/nkdl.html _docs/index.html || true
+      - name: upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
