@@ -47,7 +47,7 @@ proc visitBeginNode(b: var ServiceBuilder,
   ok(void, ParseError)
 
 proc visitArg(b: var ServiceBuilder, idx: int, tok: Token,
-         stream: TokenStream): Result[void, ParseError] =
+         stream: TokenStream, entrySpan: Span): Result[void, ParseError] =
   case tok.kind
   of tkString:
     b.result.name = stream.stringPayloads[tok.strIdx]
@@ -57,7 +57,8 @@ proc visitArg(b: var ServiceBuilder, idx: int, tok: Token,
       "expected string visitArg for Service.name"))
 
 proc visitProp(b: var ServiceBuilder, keyStr: openArray[char],
-          tok: Token, stream: TokenStream): Result[void, ParseError] =
+          tok: Token, stream: TokenStream, entrySpan: Span):
+              Result[void, ParseError] =
   case keyStr.toString
   of "port":
     if tok.kind != tkNumber:
@@ -91,7 +92,8 @@ proc visitBeginChildren(b: var ServiceBuilder): Result[void, ParseError] =
 proc visitEndChildren(b: var ServiceBuilder): Result[void, ParseError] =
   ok(void, ParseError)
 
-proc visitEndNode(b: var ServiceBuilder): Result[void, ParseError] =
+proc visitEndNode(b: var ServiceBuilder, nodeFullSpan: Span):
+    Result[void, ParseError] =
   b.inNode = false
   ok(void, ParseError)
 

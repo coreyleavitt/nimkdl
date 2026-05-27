@@ -255,3 +255,27 @@ suite "DocBuilder depth bound (cycle 9'.8)":
     let vRes = parseDocumentWith(src, b)
     check vRes.isOk
     assertEquivalent(pRes.get, b.finish())
+
+suite "DocBuilder preserveFormat parseHash (cycle 10a)":
+
+  test "entry parseHash matches parser.nim for prop entries":
+    let src = "node port=80 enabled=#true\n"
+    let viaParser = parse(src, preserveFormat = true).get
+    var b = newDocBuilder(src, "test", preserveFormat = true)
+    discard parseDocumentWith(src, b)
+    let viaVisitor = b.finish()
+    check viaParser.nodes[0].entries.len == viaVisitor.nodes[0].entries.len
+    for i in 0 ..< viaParser.nodes[0].entries.len:
+      check viaParser.nodes[0].entries[i].parseHash ==
+            viaVisitor.nodes[0].entries[i].parseHash
+
+  test "node parseHash matches parser.nim for nested children":
+    let src = "outer arg {\n  inner foo=1\n  inner foo=2\n}\n"
+    let viaParser = parse(src, preserveFormat = true).get
+    var b = newDocBuilder(src, "test", preserveFormat = true)
+    discard parseDocumentWith(src, b)
+    let viaVisitor = b.finish()
+    check viaParser.nodes[0].parseHash == viaVisitor.nodes[0].parseHash
+    for i in 0 ..< viaParser.nodes[0].children.len:
+      check viaParser.nodes[0].children[i].parseHash ==
+            viaVisitor.nodes[0].children[i].parseHash

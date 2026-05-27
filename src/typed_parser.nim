@@ -94,11 +94,11 @@ proc parseInto*[T](source: string, sourcePath = "<input>"):
 proc parseNodeWith[V](source: string, visitor: var V,
                       stream: TokenStream, cursor: var int,
                       skip: bool = false, depth: int = 0):
-    Result[void, ParseError]
+    Result[void, ParseError] {.noSideEffect.}
 
 proc parseDocumentWith*[V](source: string, visitor: var V,
                            sourcePath = "<input>"):
-    Result[void, ParseError] =
+    Result[void, ParseError] {.noSideEffect.} =
   ## Walks every top-level node in `source` through `visitor`.
   ## A leading `/-` slashdash-marks the next node as discarded — its
   ## tokens are still parsed (so syntax errors inside it surface), but
@@ -138,7 +138,7 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
 proc parseNodeWith[V](source: string, visitor: var V,
                       stream: TokenStream, cursor: var int,
                       skip: bool = false, depth: int = 0):
-    Result[void, ParseError] =
+    Result[void, ParseError] {.noSideEffect.} =
   ## Parse one node + its entries + (recursively) its children.
   ## When `skip` is true, tokens are still parsed (preserving syntax-
   ## error surfaces) but no visitor events fire — used by slashdash.
@@ -362,6 +362,9 @@ proc parseNodeWith[V](source: string, visitor: var V,
         # Validate key shape unconditionally — bare reserved keywords +
         # bidi-tainted quoted/raw keys are grammar-level errors that
         # apply to every visitor, even those without vcProps.
+        # Entry span for props: keyTok start → valueTok finish (matches
+        # parser.nim's `initSpan(keyTok.start, valueTok.finish)`).
+        let entrySpan = initSpan(keyTok.span.start, valueTok.span.finish)
         case keyTok.kind
         of tkIdent:
           let ks = keyTok.span.start.offset
@@ -374,7 +377,7 @@ proc parseNodeWith[V](source: string, visitor: var V,
           when vcProps in caps:
             if not entrySkip:
               let pRes = visitor.visitProp(source.toOpenArray(ks, kl),
-                                          valueTok, stream)
+                                          valueTok, stream, entrySpan)
               if pRes.isErr: return pRes
         of tkString:
           let p = stream.stringPayloads[keyTok.strIdx]
@@ -384,7 +387,7 @@ proc parseNodeWith[V](source: string, visitor: var V,
           when vcProps in caps:
             if not entrySkip:
               let pRes = visitor.visitProp(p.toOpenArray(0, p.high),
-                                          valueTok, stream)
+                                          valueTok, stream, entrySpan)
               if pRes.isErr: return pRes
         of tkRawString:
           let p = stream.rawStringPayloads[keyTok.rawIdx]
@@ -394,7 +397,7 @@ proc parseNodeWith[V](source: string, visitor: var V,
           when vcProps in caps:
             if not entrySkip:
               let pRes = visitor.visitProp(p.toOpenArray(0, p.high),
-                                          valueTok, stream)
+                                          valueTok, stream, entrySpan)
               if pRes.isErr: return pRes
         else: discard   # unreachable
       else:
@@ -423,7 +426,10 @@ proc parseNodeWith[V](source: string, visitor: var V,
         inc cursor
         when vcArgs in caps:
           if not entrySkip:
-            let aRes = visitor.visitArg(argIdx, t, stream)
+            # Entry span = entryStartTok.start (covers `(type)` if present)
+            # through t.finish (the value token).
+            let entrySpan = initSpan(entryStartTok.span.start, t.span.finish)
+            let aRes = visitor.visitArg(argIdx, t, stream, entrySpan)
             if aRes.isErr: return aRes
             inc argIdx
     of tkNumber, tkKeyword:
@@ -436,7 +442,8 @@ proc parseNodeWith[V](source: string, visitor: var V,
       inc cursor
       when vcArgs in caps:
         if not entrySkip:
-          let aRes = visitor.visitArg(argIdx, t, stream)
+          let entrySpan = initSpan(entryStartTok.span.start, t.span.finish)
+          let aRes = visitor.visitArg(argIdx, t, stream, entrySpan)
           if aRes.isErr: return aRes
           inc argIdx
     else:
@@ -444,7 +451,15 @@ proc parseNodeWith[V](source: string, visitor: var V,
         "unexpected token in node entries"))
 
   if not skip:
-    let eRes = visitor.visitEndNode()
+    # Final span = start of first consumed token to end of last consumed
+    # token. visitor.visitEndNode receives this so the visitor can stamp
+    # KdlNode.span correctly (required by the preserve-format encoder
+    # which uses spans to splice source bytes).
+    let endOff =
+      if cursor > 0: stream.tokens[cursor - 1].span.finish
+      else: nameTok.span.finish
+    let nodeFullSpan = initSpan(nameTok.span.start, endOff)
+    let eRes = visitor.visitEndNode(nodeFullSpan)
     if eRes.isErr: return eRes
   ok(void, ParseError)
 

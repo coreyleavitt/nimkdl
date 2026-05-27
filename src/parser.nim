@@ -37,6 +37,7 @@
 ## possible without escape hatches.
 
 import ./ast
+import ./doc_builder
 import ./encode  # hashNodeFromChildHashes (parser seeds n.parseHash for emPreserve)
 import ./fnv     # Hash128
 import ./intern
@@ -44,6 +45,7 @@ import ./lexer
 import ./numlit
 import ./reserved
 import ./spans
+import ./typed_parser
 
 const
   MaxParserDepth* = 256
@@ -638,26 +640,15 @@ proc parse*(source: string, sourcePath = "<input>",
   ## decode via `embed[T]`, validation-and-discard) doesn't need it.
   ## `encode(doc, emPreserve)` fails loud if called on a doc that
   ## wasn't parsed with this flag set.
-  var doc = newDoc(sourcePath)
-  doc.preserveFormat = preserveFormat
-  let tokens = lex(source, doc.interner)
-  # Early-exit on any inline lex errors so callers get the lex diagnostic,
-  # not a downstream parser-confusion diagnostic.
-  for t in tokens.tokens:
-    if t.kind == tkError:
-      return err[KdlDoc, ParseError](tokens.errorPayloads[t.errIdx])
-  var p = Parser(stream: tokens, cursor: 0, depth: 0, doc: doc)
-  let dRes = p.parseDocument()
-  if dRes.isErr:
-    return err[KdlDoc, ParseError](dRes.getErr)
-  # The parser may have interned additional strings (quoted node names,
-  # quoted property keys) into its local copy of the doc's interner.
-  # Reach into p.doc rather than the original `doc` so those interns
-  # are preserved.
-  p.doc.nodes = dRes.take    # sink-move; non-sink .get deep-copies the tree
-  p.doc.sourceText = source
-  p.doc.parseTopLevelCount = int32(p.doc.nodes.len)
-  ok[KdlDoc, ParseError](move p.doc)   # explicit move out of p
+  # Cycle 10b: parse() now drives parseDocumentWith[DocBuilder]. The
+  # hand-written recursive descent below (parseNode/parseChildren/
+  # parseDocument/parseEntry/parseValue/parseTypeAnno) remains only for
+  # parseAll's multi-error recovery mode; cycle 10c folds that into a
+  # sibling visitor and the legacy code is deleted.
+  var b = newDocBuilder(source, sourcePath, preserveFormat)
+  let r = parseDocumentWith(source, b, sourcePath)
+  if r.isErr: return err[KdlDoc, ParseError](r.getErr)
+  ok[KdlDoc, ParseError](b.finish())
 
 proc parseAll*(source: string, sourcePath = "<input>",
                preserveFormat: bool = false):

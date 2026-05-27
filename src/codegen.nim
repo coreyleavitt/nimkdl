@@ -1639,6 +1639,8 @@ macro deriveVisitor*(typ: typedesc): untyped =
   let keyStrIdent = ident("keyStr")
   let nameStrIdent = ident("nameStr")
   let idxIdent = ident("idx")
+  let entrySpanIdent = ident("entrySpan")
+  let nodeFullSpanIdent = ident("nodeFullSpan")
 
   # Collect kdlChild fields. For seq[T], record the element type so we
   # can wire up a child SeqBuilder slot per field. For non-seq, the
@@ -1850,7 +1852,8 @@ macro deriveVisitor*(typ: typedesc): untyped =
     let kdlLit = newLit(c.kdlName)
     let slot = ident(c.nimName & "_b")
     childArgDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
-      return visitArg(`bIdent`.`slot`, `idxIdent`, `tokIdent`, `streamIdent`))
+      return visitArg(`bIdent`.`slot`, `idxIdent`, `tokIdent`,
+                      `streamIdent`, `entrySpanIdent`))
   if children.len > 0:
     childArgDispatch.add(newNimNode(nnkElse).add quote do:
       return err[void, ParseError](initError(peParseUnexpected, `tokIdent`.span,
@@ -1859,7 +1862,8 @@ macro deriveVisitor*(typ: typedesc): untyped =
     if children.len > 0:
       quote do:
         proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
-                 `tokIdent`: Token, `streamIdent`: TokenStream):
+                 `tokIdent`: Token, `streamIdent`: TokenStream,
+                 `entrySpanIdent`: Span):
             Result[void, ParseError] {.noSideEffect.} =
           if `bIdent`.inChildren:
             `childArgDispatch`
@@ -1868,7 +1872,8 @@ macro deriveVisitor*(typ: typedesc): untyped =
     else:
       quote do:
         proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
-                 `tokIdent`: Token, `streamIdent`: TokenStream):
+                 `tokIdent`: Token, `streamIdent`: TokenStream,
+                 `entrySpanIdent`: Span):
             Result[void, ParseError] {.noSideEffect.} =
           `argCase`
           ok(void, ParseError)
@@ -1977,7 +1982,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
     let slot = ident(c.nimName & "_b")
     childPropDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
       return visitProp(`bIdent`.`slot`, `keyStrIdent`,
-                       `tokIdent`, `streamIdent`))
+                       `tokIdent`, `streamIdent`, `entrySpanIdent`))
   if children.len > 0:
     childPropDispatch.add(newNimNode(nnkElse).add quote do:
       return err[void, ParseError](initError(peParseUnexpected, `tokIdent`.span,
@@ -1987,7 +1992,8 @@ macro deriveVisitor*(typ: typedesc): untyped =
       quote do:
         proc visitProp(`bIdent`: var `builderName`,
                   `keyStrIdent`: openArray[char],
-                  `tokIdent`: Token, `streamIdent`: TokenStream):
+                  `tokIdent`: Token, `streamIdent`: TokenStream,
+                  `entrySpanIdent`: Span):
             Result[void, ParseError] {.noSideEffect.} =
           if `bIdent`.inChildren:
             `childPropDispatch`
@@ -1997,7 +2003,8 @@ macro deriveVisitor*(typ: typedesc): untyped =
       quote do:
         proc visitProp(`bIdent`: var `builderName`,
                   `keyStrIdent`: openArray[char],
-                  `tokIdent`: Token, `streamIdent`: TokenStream):
+                  `tokIdent`: Token, `streamIdent`: TokenStream,
+                  `entrySpanIdent`: Span):
             Result[void, ParseError] {.noSideEffect.} =
           `propDispatch`
           ok(void, ParseError)
@@ -2039,7 +2046,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
     let kdlLit = newLit(c.kdlName)
     let slot = ident(c.nimName & "_b")
     childEndDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
-      return visitEndNode(`bIdent`.`slot`))
+      return visitEndNode(`bIdent`.`slot`, `nodeFullSpanIdent`))
   if children.len > 0:
     childEndDispatch.add(newNimNode(nnkElse).add quote do:
       return ok(void, ParseError))
@@ -2055,7 +2062,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
             Result[void, ParseError] {.noSideEffect.} =
           `endChildrenBody`
           ok(void, ParseError)
-        proc visitEndNode(`bIdent`: var `builderName`):
+        proc visitEndNode(`bIdent`: var `builderName`, `nodeFullSpanIdent`: Span):
             Result[void, ParseError] {.noSideEffect.} =
           if `bIdent`.inChildren:
             `childEndDispatch`
@@ -2069,7 +2076,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
         proc visitEndChildren(`bIdent`: var `builderName`):
             Result[void, ParseError] {.noSideEffect.} =
           ok(void, ParseError)
-        proc visitEndNode(`bIdent`: var `builderName`):
+        proc visitEndNode(`bIdent`: var `builderName`, `nodeFullSpanIdent`: Span):
             Result[void, ParseError] {.noSideEffect.} =
           `requiredCheckBody`
           ok(void, ParseError)
@@ -2100,23 +2107,26 @@ macro deriveVisitor*(typ: typedesc): untyped =
       `bIdent`.cur = `builderName`()
       visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
     proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
-             `tokIdent`: Token, `streamIdent`: TokenStream):
+             `tokIdent`: Token, `streamIdent`: TokenStream,
+             `entrySpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
-      visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`)
+      visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`, `entrySpanIdent`)
     proc visitProp(`bIdent`: var `seqBuilderName`,
               `keyStrIdent`: openArray[char],
-              `tokIdent`: Token, `streamIdent`: TokenStream):
+              `tokIdent`: Token, `streamIdent`: TokenStream,
+              `entrySpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
-      visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`, `streamIdent`)
+      visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`, `streamIdent`,
+                entrySpan)
     proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
       visitBeginChildren(`bIdent`.cur)
     proc visitEndChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
       visitEndChildren(`bIdent`.cur)
-    proc visitEndNode(`bIdent`: var `seqBuilderName`):
+    proc visitEndNode(`bIdent`: var `seqBuilderName`, `nodeFullSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
-      let r = visitEndNode(`bIdent`.cur)
+      let r = visitEndNode(`bIdent`.cur, `nodeFullSpanIdent`)
       if r.isErr: return r
       `bIdent`.results.add(`bIdent`.cur.result)
       ok(void, ParseError)
