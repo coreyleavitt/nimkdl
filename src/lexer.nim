@@ -153,6 +153,10 @@ type
     rawStringPayloads*: seq[string]
     numberPayloads*: seq[NumberPayload]
     errorPayloads*: seq[ParseError]
+    source*: string
+      ## Original source text — needed by visitors that read bareword
+      ## (tkIdent) bytes directly (interner is disabled in visitor mode).
+      ## Stored as a string ref; no extra allocation beyond the bind.
 
   Lexer = object
     ## Lexer state during a `lex(source, interner)` call. The interner
@@ -1551,4 +1555,5 @@ proc lex*(source: string, interner: var Interner): TokenStream
     lx.lexOne(interner)
   if lx.stream.tokens.len == 0 or lx.stream.tokens[^1].kind != tkEof:
     lx.emit(Token(kind: tkEof, span: pointSpan(lx.pos)))
+  lx.stream.source = source
   result = lx.stream

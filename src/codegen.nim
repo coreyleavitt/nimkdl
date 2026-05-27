@@ -2029,15 +2029,17 @@ macro deriveVisitor(typ: typedesc): untyped =
         of tkRawString:
           let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
           `assignBody`
+        of tkIdent:
+          # Bareword identifier — read bytes from the original source via
+          # the token span. `stream.source` is set by `lex()`.
+          let s0 = `tokIdent`.span.start.offset
+          let s1 = `tokIdent`.span.finish.offset - 1
+          let `strSym` = `streamIdent`.source[s0 .. s1]
+          `assignBody`
         else:
-          # Bareword (tkIdent) enum values are not yet supported through
-          # the typed-direct path — visitArg/visitProp don't receive the
-          # source slice needed to read the bareword bytes. Use decode[T]
-          # for that case, or quote the value in source.
           return err[void, ParseError](initError(peTypeEnumInvalid,
-            `tokIdent`.span, "expected string for enum `" &
-            `fieldLabel` & "` (bareword enum values via parseInto " &
-            "not supported; quote the value or use decode[T])"))
+            `tokIdent`.span, "expected string or bareword for enum `" &
+            `fieldLabel` & "`"))
 
     case primTypeName
     of "string":
