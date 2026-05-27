@@ -40,7 +40,7 @@
 ## | Parse text → AST | `parse(src) -> Result[KdlDoc, ParseError]` | `parser` |
 ## | Multi-error parse | `parseAll(src) -> (doc, errors)` | `parser` |
 ## | Typed decode | `decode[T](src) -> Result[T, ParseError]` | `codegen` |
-## | Typed-direct decode | `parseInto[T](src) -> Result[T, ParseError]` | `typed_parser` |
+## | Multi-error typed decode | `decodeAll[T](src) -> (value, errors)` | `codegen` |
 ## | Compile-time embed | `embed[T]("path")` | `codegen` |
 ## | Encode AST → text | `encode(doc, mode = emPreserve) -> string` | `encode` |
 ## | Typed-direct encode | `encodeFrom[T](v) -> Result[string, ParseError]` | `codegen` |
@@ -71,10 +71,13 @@ import ./encode
 import ./grammar
 import ./codegen
 import ./path
-import ./typed_parser
-# Note: ./lexer NOT imported here on purpose — keeps Token / TokenKind /
-# Lexer / lex out of the `import nkdl` namespace. They're still accessible
-# via `import nkdl/lexer` for tests and advanced consumers.
+# Note: ./lexer and ./typed_parser are NOT imported here on purpose.
+# Lexer keeps Token / TokenKind / Lexer / lex out of the `import nkdl`
+# namespace (still reachable via `import nkdl/lexer` for tests/advanced
+# consumers). typed_parser is the visitor protocol that powers decode[T]
+# under the hood — public consumers route through decode[T], so the
+# visitor primitives (parseInto / parseWith / parseDocumentWith / etc.)
+# stay implementation-detail.
 
 # Spans / Result / Position / Span — public diagnostic + error vocabulary.
 export spans
@@ -105,13 +108,11 @@ export encode
 export grammar
 
 # Codegen — the headline surface. Pragmas, `kdl:` block macro, decode[T],
-# embed[T], kdlDecodeValue overloads (needed by user-defined enum types).
+# decodeAll[T], embed[T], encode[T] / encodeFrom[T], kdlDecodeValue
+# overloads (needed by user-defined enum types).
 export codegen
 
 # Path DSL — full public surface.
 export path
-
-# Typed-direct path (issue #1) — parseInto[T] + parseWith[V].
-export typed_parser
 
 const KdlLibVersion* = "0.1.0"
