@@ -257,8 +257,12 @@ proc kdlDecodeValue*[E: enum](target: var E, v: KdlValue, doc: var KdlDoc): bool
 # ---------------------------------------------------------------------------
 #
 # `kdlEncodeValue` overloads convert a typed Nim value into a `KdlValue`.
-# Symmetric counterpart to `kdlDecodeValue`. Used by `deriveEncode`'s
-# generated `kdlEncodeImpl` procs.
+# Symmetric counterpart to `kdlDecodeValue`. Used by the direct-buffer
+# emit's reserved-tag validation path: the typed value is wrapped as a
+# transient KdlValue and fed to `validateReserved`, which dispatches by
+# `kind`. Numeric reserved tags like (u8)/(i32)/(f64) need this to
+# produce a kvInt/kvFloat (rather than kvString) so they hit the right
+# validator branch.
 
 func kdlEncodeValue*(s: string): KdlValue =
   newStringValue(s)
@@ -674,179 +678,16 @@ proc prefixEncodeHint*(err: var ParseError, path: string) {.inline.} =
   else:
     err.hint = path
 
-proc emitReservedTagValidate(f: FieldSpec, valIdent: NimNode,
-                             pathLit: NimNode): NimNode =
-  ## Emit a runtime check that `valIdent`'s tagged content matches the
-  ## tag's spec interpretation. Symmetric Layer 1: parse-time validates
-  ## inputs; encode-time validates outputs so we never silently produce
-  ## malformed KDL. Empty when no `kdlReserved` is declared.
-  ##
-  ## `pathLit` is a string literal of the form `TypeName.fieldName` that
-  ## gets prefixed onto the error's `hint` on failure — see L1 in
-  ## BACKLOG.md. The encode span stays synthetic; the hint carries the
-  ## useful diagnostic.
-  if f.expectedReserved.len == 0:
-    return newEmptyNode()
-  let tagLit = newLit(f.expectedReserved)
-  quote do:
-    let vcheck = validateReserved(`tagLit`, `valIdent`)
-    if vcheck.isErr:
-      var e = vcheck.getErr
-      prefixEncodeHint(e, `pathLit`)
-      return err[KdlNode, ParseError](e)
-
-proc encodeValueCore(f: FieldSpec, sourceAccess, valSym, docIdent,
-                     pathLit: NimNode): NimNode =
-  ## Shared body: build a KdlValue from `sourceAccess`, optionally tag
-  ## with kdlReserved, validate, into `valSym`. Used by both arg and
-  ## attr emitters; the Option case calls this on `sourceAccess.get`.
-  ## `pathLit` is the string literal for `TypeName.fieldName` used by
-  ## the reserved-tag validator on failure.
-  let inner =
-    if f.isOption: newDotExpr(sourceAccess, ident("get"))
-    else: sourceAccess
-  result = newStmtList()
-  result.add quote do:
-    var `valSym` = kdlEncodeValue(`inner`)
-  if f.expectedReserved.len > 0:
-    let tagLit = newLit(f.expectedReserved)
-    result.add quote do:
-      `valSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
-  result.add(emitReservedTagValidate(f, valSym, pathLit))
-
-proc emitArgEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent,
-                   pathLit: NimNode): NimNode =
-  ## Emit code that appends `v.fieldName` as a positional argument on
-  ## the generated node. For Option fields, `none` skips the entry
-  ## entirely; `some(v)` emits `v` normally (with kdlReserved checks).
-  let valSym = genSym(nskVar, "argVal_" & f.nimName)
-  let core = encodeValueCore(f, sourceAccess, valSym, docIdent, pathLit)
-  let appendStmt = quote do:
-    `nodeIdent`.entries.add(KdlEntry(
-      kind: keArgument,
-      argValue: `valSym`,
-      span: `nodeIdent`.span))
-  if f.isOption:
-    quote do:
-      if `sourceAccess`.isSome:
-        `core`
-        `appendStmt`
-  else:
-    newStmtList(core, appendStmt)
-
-proc emitAttrEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent,
-                    pathLit: NimNode): NimNode =
-  ## Emit code that appends `v.fieldName` as a `name=value` property.
-  ## For Option fields, `none` skips the entry entirely.
-  let valSym = genSym(nskVar, "attrVal_" & f.nimName)
-  let kdlNameLit = newLit(f.kdlName)
-  let core = encodeValueCore(f, sourceAccess, valSym, docIdent, pathLit)
-  let appendStmt = quote do:
-    `nodeIdent`.entries.add(KdlEntry(
-      kind: keProperty,
-      propName: `docIdent`.interner.intern(`kdlNameLit`),
-      propValue: `valSym`,
-      span: `nodeIdent`.span))
-  if f.isOption:
-    quote do:
-      if `sourceAccess`.isSome:
-        `core`
-        `appendStmt`
-  else:
-    newStmtList(core, appendStmt)
-
-proc emitChildEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
-    NimNode =
-  ## Emit code that recursively encodes a child object (or seq, or
-  ## Option[Object]) and appends as a nested node. The recursive call
-  ## returns `Result[KdlNode, ParseError]`; propagate Err.
-  ##
-  ## When the field has `kdlReserved`, the produced child node's
-  ## typeAnnotation is set to the declared tag before appending —
-  ## symmetric with the decode-side child-tag assertion.
-  ##
-  ## Conflict detection: if the FIELD has `kdlReserved: "X"` AND the
-  ## child TYPE itself has a type-level `{.kdlReserved: "Y".}` pragma,
-  ## those tags may disagree. Without a check the type-level annotation
-  ## (set by the child's own `kdlEncodeImpl`) would be silently
-  ## overwritten by the field-level setTagStmts below. Resolve at macro
-  ## time so the user gets a clear error before runtime.
-  let childNodeSym = genSym(nskVar, "childNode_" & f.nimName)
-  if f.expectedReserved.len > 0:
-    let elemTypeNode =
-      if (typeNodeIsSeq(f.typeNode) or f.isOption) and
-         f.typeNode.kind == nnkBracketExpr and f.typeNode.len >= 2:
-        f.typeNode[1]
-      else:
-        f.typeNode
-    if elemTypeNode.kind in {nnkIdent, nnkSym}:
-      let childTypeReserved = extractTypeReserved(elemTypeNode)
-      if childTypeReserved.len > 0 and
-         childTypeReserved != f.expectedReserved:
-        error("kdl: field `" & f.nimName & "` declares {.kdlReserved: \"" &
-              f.expectedReserved & "\".} but its child type `" &
-              $elemTypeNode & "` declares {.kdlReserved: \"" &
-              childTypeReserved & "\".}. The two tags conflict; set " &
-              "only one (prefer the type-level pragma if every value of " &
-              "that type carries the tag).", f.typeNode)
-  let setTagStmts =
-    if f.expectedReserved.len > 0:
-      let tagLit = newLit(f.expectedReserved)
-      quote do:
-        `childNodeSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
-    else:
-      newEmptyNode()
-
-  if typeNodeIsSeq(f.typeNode):
-    let elemSym = genSym(nskForVar, "childElem_" & f.nimName)
-    let recSym  = genSym(nskLet, "childRes_" & f.nimName)
-    quote do:
-      for `elemSym` in `sourceAccess`:
-        let `recSym` = kdlEncodeImpl(`elemSym`, `docIdent`)
-        if `recSym`.isErr:
-          return err[KdlNode, ParseError](`recSym`.getErr)
-        var `childNodeSym` = `recSym`.get
-        `setTagStmts`
-        `nodeIdent`.children.add(`childNodeSym`)
-  elif f.isOption:
-    let recSym = genSym(nskLet, "childRes_" & f.nimName)
-    let innerAccess = newDotExpr(sourceAccess, ident("get"))
-    quote do:
-      if `sourceAccess`.isSome:
-        let `recSym` = kdlEncodeImpl(`innerAccess`, `docIdent`)
-        if `recSym`.isErr:
-          return err[KdlNode, ParseError](`recSym`.getErr)
-        var `childNodeSym` = `recSym`.get
-        `setTagStmts`
-        `nodeIdent`.children.add(`childNodeSym`)
-  else:
-    let recSym = genSym(nskLet, "childRes_" & f.nimName)
-    quote do:
-      let `recSym` = kdlEncodeImpl(`sourceAccess`, `docIdent`)
-      if `recSym`.isErr:
-        return err[KdlNode, ParseError](`recSym`.getErr)
-      var `childNodeSym` = `recSym`.get
-      `setTagStmts`
-      `nodeIdent`.children.add(`childNodeSym`)
-
-proc emitFieldEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode,
-                     typeName: string): NimNode =
-  let pathLit = newLit(typeName & "." & f.nimName)
-  case f.kind
-  of fkSkip:  newStmtList()
-  of fkArg:   emitArgEncode(f, sourceAccess, docIdent, nodeIdent, pathLit)
-  of fkAttr:  emitAttrEncode(f, sourceAccess, docIdent, nodeIdent, pathLit)
-  of fkChild: emitChildEncode(f, sourceAccess, docIdent, nodeIdent)
-
 macro deriveEncode(typ: typedesc): untyped =
-  ## Emit a `kdlEncodeImpl` overload for `typ` (the symmetric
-  ## counterpart to `deriveDecode`). Generated procedure walks a typed
-  ## value and produces the equivalent `KdlNode`, with the configured
-  ## `kdlReserved` tags carried over to value-level type annotations.
+  ## Emit a `kdlEncodeIntoImpl` overload for `typ`. Generated procedure
+  ## walks a typed value and writes KDL text directly into a
+  ## caller-provided string buffer (no KdlNode / KdlDoc intermediate).
+  ## The configured `kdlReserved` tags carry over to value-level
+  ## annotations, validated via `validateReserved` at emit time.
   ##
-  ## Combined with the top-level `encode[T](v: T): string`, this closes
-  ## round-trip for typed configs: `decode[T](encode(v))` produces a
-  ## value equal to `v` for every type that round-trips losslessly
+  ## Combined with the top-level `encode[T](v: T, mode): string`, this
+  ## closes round-trip for typed configs: `decode[T](encode(v).get)`
+  ## produces a value equal to `v` for every type that round-trips losslessly
   ## through the underlying KDL grammar.
   ##
   ## Generated code is dumpable via `-d:dumpKdlGen`.
@@ -869,59 +710,7 @@ macro deriveEncode(typ: typedesc): untyped =
   let nodeNameLit = newLit(extractNodeName(typSym))
   let typeReserved = extractTypeReserved(typSym)
 
-  var procBody = newStmtList()
-  let nodeSym = genSym(nskVar, "encNode")
-  procBody.add quote do:
-    var `nodeSym` = KdlNode(
-      name: `docIdent`.interner.intern(`nodeNameLit`),
-      typeAnnotation: InvalidInterned,
-      entries: @[],
-      children: @[],
-      span: pointSpan(StartPosition))
-  if typeReserved.len > 0:
-    let tagLit = newLit(typeReserved)
-    procBody.add quote do:
-      `nodeSym`.typeAnnotation = `docIdent`.interner.intern(`tagLit`)
-
-  let nodeIdent = nodeSym
-  if not shape.hasVariant:
-    for f in shape.shared:
-      let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
-      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent,
-                                   typeNameStr))
-  else:
-    # Variant types: shared fields always encode; branch fields only
-    # encode for the active discriminator.
-    for f in shape.shared:
-      let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
-      procBody.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent,
-                                   typeNameStr))
-    let disc = shape.variant.disc
-    let discAccess = newDotExpr(vIdent, ident(disc.nimName))
-    procBody.add(emitFieldEncode(disc, discAccess, docIdent, nodeIdent,
-                                 typeNameStr))
-    let caseStmt = nnkCaseStmt.newTree(discAccess)
-    for branch in shape.variant.branches:
-      var bb = newStmtList()
-      for f in branch.fields:
-        let sourceAccess = newDotExpr(vIdent, ident(f.nimName))
-        bb.add(emitFieldEncode(f, sourceAccess, docIdent, nodeIdent,
-                               typeNameStr))
-      if bb.len == 0:
-        bb.add(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
-      caseStmt.add(nnkOfBranch.newTree(branch.discValue, bb))
-    procBody.add(caseStmt)
-
-  procBody.add quote do:
-    ok[KdlNode, ParseError](`nodeSym`)
-
-  let encodeProc = quote do:
-    proc kdlEncodeImpl*(`vIdent`: `typ`,
-                       `docIdent`: var KdlDoc):
-        Result[KdlNode, ParseError] {.noSideEffect.} =
-      `procBody`
-
-  # --- Direct-buffer emit (cycle E.1+) -------------------------------
+  # --- Direct-buffer emit --------------------------------------------
   # Walks the same `shape` and emits buf.add / appendFieldValue calls
   # directly into a caller-provided `var string`. Skips KdlNode + KdlDoc
   # construction entirely.
@@ -1089,6 +878,30 @@ macro deriveEncode(typ: typedesc): untyped =
       for f in childFields:
         let access = newDotExpr(vIdent, ident(f.nimName))
         let childTagLit = newLit(f.expectedReserved)
+        # Macro-time conflict guard (round-1 M1): if the field declares
+        # a kdlReserved tag AND the child type itself has a type-level
+        # kdlReserved with a DIFFERENT tag, those are mutually
+        # contradictory metadata. Erroring at emit time is friendlier
+        # than letting the field-level tag silently overwrite the
+        # type-level annotation at runtime.
+        if f.expectedReserved.len > 0:
+          let elemTypeNode =
+            if (typeNodeIsSeq(f.typeNode) or f.isOption) and
+               f.typeNode.kind == nnkBracketExpr and f.typeNode.len >= 2:
+              f.typeNode[1]
+            else:
+              f.typeNode
+          if elemTypeNode.kind in {nnkIdent, nnkSym}:
+            let childTypeReserved = extractTypeReserved(elemTypeNode)
+            if childTypeReserved.len > 0 and
+               childTypeReserved != f.expectedReserved:
+              error("kdl: field `" & f.nimName &
+                    "` declares {.kdlReserved: \"" & f.expectedReserved &
+                    "\".} but its child type `" & $elemTypeNode &
+                    "` declares {.kdlReserved: \"" & childTypeReserved &
+                    "\".}. The two tags conflict; set only one (prefer " &
+                    "the type-level pragma if every value of that type " &
+                    "carries the tag).", f.typeNode)
         let emit =
           case childShapeOf(f)
           of csSeq:
@@ -1146,29 +959,11 @@ macro deriveEncode(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       `directBody`
 
-  result = newStmtList(encodeProc, encodeIntoProc)
+  result = encodeIntoProc
   when defined(dumpKdlGen):
-    echo "=== kdlEncodeImpl for ", repr(typ), " ==="
+    echo "=== kdlEncodeIntoImpl for ", repr(typ), " ==="
     echo result.repr
     echo "==="
-
-proc encodeNode*[T: object](v: T, doc: var KdlDoc):
-                            Result[KdlNode, ParseError] =
-  ## Render a typed value as a single `KdlNode`, ready to insert into
-  ## `doc`'s top level (or as a child of an existing node). The
-  ## low-level primitive: callers compose multi-node docs, mix typed
-  ## values with manually-built nodes, or assemble fragments.
-  ##
-  ## `doc` is `var` because any string-typed entries (names, prop
-  ## names, type annotations) need to be interned into it.
-  ##
-  ## Subject to Layer 1 `kdlReserved` validation: a typed value with a
-  ## kdlReserved pragma whose content doesn't match its tag returns
-  ## `Err(peReservedTypeInvalid, ...)`.
-  ##
-  ## `T` must be declared inside a `kdl:` block.
-  mixin kdlEncodeImpl
-  kdlEncodeImpl(v, doc)
 
 proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
   ## Render a typed value as KDL text. Writes bytes straight to a

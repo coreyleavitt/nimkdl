@@ -1,10 +1,9 @@
-## Tests for `deriveEncode[T]` — typed-value-to-KDL serialization.
+## Tests for `encode[T]` — typed-value-to-KDL serialization.
 ##
-## Symmetric counterpart to `deriveDecode[T]`. Same pragma surface
-## (kdlArg / kdlProp / kdlChild / kdlSkip / kdlRename / kdlReserved /
-## kdlNode); the macro generates a `kdlEncodeImpl(v: T, doc: var KdlDoc):
-## KdlNode` proc, and `encode[T](v: T)` wraps that in a fresh document
-## and renders to KDL text.
+## Same pragma surface as decode (kdlArg / kdlProp / kdlChild / kdlSkip /
+## kdlRename / kdlReserved / kdlNode); the `kdl:` block emits the
+## per-type `kdlEncodeIntoImpl` proc that writes KDL text directly into
+## a string buffer, and `encode[T](v, mode)` wraps that into a Result.
 
 import std/[strutils, unittest]
 
@@ -134,21 +133,8 @@ suite "deriveEncode — children":
         check back.get.inner.label == "bottom"
 
 # ---------------------------------------------------------------------------
-# M2: encode mode + encodeNode primitive
+# M2: encode mode parameter
 # ---------------------------------------------------------------------------
-
-suite "encodeNode[T] — typed value to KdlNode primitive":
-  test "encodeNode produces a node with the right name and entries":
-    let v = Simple(name: "x", count: 3)
-    var doc = newDoc()
-    let r = encodeNode(v, doc)
-    check r.isOk
-    if r.isOk:
-      let n = r.get
-      check doc.resolveName(n) == "simple"
-      check n.hasProp(doc, "name")
-      check n.prop(doc, "name").get.strVal == "x"
-      check n.prop(doc, "count").get.intVal == 3
 
 suite "encode[T] — mode parameter":
   test "default mode is emPretty (multi-line children block)":
