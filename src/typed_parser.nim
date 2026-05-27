@@ -38,9 +38,21 @@ func openArrayToString*(s: openArray[char]): string {.noSideEffect.} =
   ## VM-friendly conversion. `cast[string](@seq[char])` blows up in
   ## NimVM ("does not support 'cast' from tySequence to tyString"); a
   ## newString + byte-copy works both at runtime and at compile time.
-  ## Used by the macro-emitted visitProp case dispatch.
+  ## Used in error messages only — the hot-path dispatch uses bytesEq.
   result = newString(s.len)
   for i in 0 ..< s.len: result[i] = s[i]
+
+func bytesEq*(s: openArray[char], lit: static string): bool
+    {.inline, noSideEffect.} =
+  ## Zero-alloc byte compare against a compile-time-known string.
+  ## Used by the macro-emitted visitProp / visitBeginNode dispatch in
+  ## place of a `case openArrayToString(s) of ...` ladder. The length-
+  ## first compare lets the compiler short-circuit aggressively; the
+  ## bytewise loop unrolls for small literals.
+  if s.len != lit.len: return false
+  for i in 0 ..< lit.len:
+    if s[i] != lit[i]: return false
+  true
 
 proc parseInto*[T](source: string, sourcePath = "<input>"):
     Result[T, ParseError] =
@@ -63,6 +75,7 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
   ## is responsible for accumulating results across nodes (the seq[T]
   ## entry point's emitted visitor does this).
   var interner = initInterner()
+  interner.disabled = true   # typed-direct path reads bytes from source
   let stream = lex(source, interner)
   for t in stream.tokens:
     if t.kind == tkError:
@@ -100,9 +113,13 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
         "expected node name"))
     inc cursor
 
-    let nameStr = interner.lookup(nameTok.ident)
-    let bRes = visitor.visitBeginNode(nameStr.toOpenArray(0, nameStr.high),
-                                  nameTok.span)
+    # Read name bytes directly from source — skips an
+    # interner.lookup + mnewString roundtrip (~1.5% of CPU per perf).
+    # Safe because tkIdent is always a bare ident with no escapes.
+    let nameStart = nameTok.span.start.offset
+    let nameLast = nameTok.span.finish.offset - 1
+    let bRes = visitor.visitBeginNode(source.toOpenArray(nameStart, nameLast),
+                                       nameTok.span)
     if bRes.isErr: return bRes
 
     var argIdx = 0
@@ -137,9 +154,12 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
             return err[void, ParseError](initError(peParseExpected, childTok.span,
               "expected child node name"))
           inc cursor
-          let childName = interner.lookup(childTok.ident)
-          let cbRes = visitor.visitBeginNode(childName.toOpenArray(0, childName.high),
-                                             childTok.span)
+          # Read child name bytes directly from source (skips interner).
+          let childStart = childTok.span.start.offset
+          let childLast = childTok.span.finish.offset - 1
+          let cbRes = visitor.visitBeginNode(
+                        source.toOpenArray(childStart, childLast),
+                        childTok.span)
           if cbRes.isErr: return cbRes
           var cArgIdx = 0
           while true:
@@ -150,20 +170,29 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
             of tkIdent, tkString, tkRawString:
               if peek(1).kind == tkEquals:
                 let cKeyTok = peek()
-                let cKeyHandle =
-                  case cKeyTok.kind
-                  of tkIdent: cKeyTok.ident
-                  of tkString: interner.intern(stream.stringPayloads[cKeyTok.strIdx])
-                  of tkRawString: interner.intern(stream.rawStringPayloads[cKeyTok.rawIdx])
-                  else: InvalidInterned
                 cursor += 2
                 skipTypeAnno()     # optional (type) before prop value
                 let cValTok = peek()
                 inc cursor
-                let cKeyStr = interner.lookup(cKeyHandle)
-                let cpRes = visitor.visitProp(cKeyStr.toOpenArray(0, cKeyStr.high),
-                                              cValTok, stream)
-                if cpRes.isErr: return cpRes
+                # Read key bytes from source for bare idents (skip
+                # intern + lookup roundtrip). For quoted/raw keys
+                # we still go through the payload tables.
+                if cKeyTok.kind == tkIdent:
+                  let ks = cKeyTok.span.start.offset
+                  let kl = cKeyTok.span.finish.offset - 1
+                  let cpRes = visitor.visitProp(
+                                source.toOpenArray(ks, kl), cValTok, stream)
+                  if cpRes.isErr: return cpRes
+                else:
+                  let payload =
+                    if cKeyTok.kind == tkString:
+                      stream.stringPayloads[cKeyTok.strIdx]
+                    else:
+                      stream.rawStringPayloads[cKeyTok.rawIdx]
+                  let cpRes = visitor.visitProp(
+                                payload.toOpenArray(0, payload.high),
+                                cValTok, stream)
+                  if cpRes.isErr: return cpRes
               else:
                 inc cursor
                 let caRes = visitor.visitArg(cArgIdx, ct, stream)
@@ -186,20 +215,28 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
       of tkIdent, tkString, tkRawString:
         if peek(1).kind == tkEquals:
           let keyTok = peek()
-          let keyHandle =
-            case keyTok.kind
-            of tkIdent: keyTok.ident
-            of tkString: interner.intern(stream.stringPayloads[keyTok.strIdx])
-            of tkRawString: interner.intern(stream.rawStringPayloads[keyTok.rawIdx])
-            else: InvalidInterned
           cursor += 2
           skipTypeAnno()       # optional (type) before prop value
           let valueTok = peek()
           inc cursor
-          let keyStr = interner.lookup(keyHandle)
-          let pRes = visitor.visitProp(keyStr.toOpenArray(0, keyStr.high),
-                                   valueTok, stream)
-          if pRes.isErr: return pRes
+          # Read key bytes directly from source for bare idents
+          # (skips intern + lookup roundtrip — was ~1.5% of CPU).
+          if keyTok.kind == tkIdent:
+            let ks = keyTok.span.start.offset
+            let kl = keyTok.span.finish.offset - 1
+            let pRes = visitor.visitProp(
+                          source.toOpenArray(ks, kl), valueTok, stream)
+            if pRes.isErr: return pRes
+          else:
+            let payload =
+              if keyTok.kind == tkString:
+                stream.stringPayloads[keyTok.strIdx]
+              else:
+                stream.rawStringPayloads[keyTok.rawIdx]
+            let pRes = visitor.visitProp(
+                          payload.toOpenArray(0, payload.high),
+                          valueTok, stream)
+            if pRes.isErr: return pRes
         else:
           inc cursor
           let aRes = visitor.visitArg(argIdx, t, stream)

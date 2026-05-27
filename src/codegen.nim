@@ -1873,9 +1873,11 @@ macro deriveVisitor*(typ: typedesc): untyped =
           `argCase`
           ok(void, ParseError)
 
-  # 4. visitProp: dispatch by property key string.
-  var propCase = newNimNode(nnkCaseStmt).add(quote do:
-    openArrayToString(`keyStrIdent`))
+  # 4. visitProp: dispatch by property key string. Build as a series of
+  # nested if/elif with bytesEq compile-time byte compares so the
+  # dispatch is zero-alloc (the previous openArrayToString + case was
+  # ~2.4% of CPU per perf record).
+  var propBranches: seq[(string, NimNode)]  # (kdlName, assignment)
   for f in shape.shared:
     if f.kind == fkAttr:
       let nimName = ident(f.nimName)
@@ -1943,13 +1945,30 @@ macro deriveVisitor*(typ: typedesc): untyped =
           quote do:
             return err[void, ParseError](initError(peTypeMismatch,
               `tokIdent`.span, "unsupported prop type for typed-direct path"))
-      propCase.add(newNimNode(nnkOfBranch).add(kdlName).add(assignment))
-  # Strict default per Decision 1: unknown property is an error.
-  propCase.add(newNimNode(nnkElse).add quote do:
-    return err[void, ParseError](initError(peTypeUnknownField, `tokIdent`.span,
-      "`" & `nodeLit` & "` has no field `" &
-      openArrayToString(`keyStrIdent`) &
-      "`")))
+      propBranches.add((f.kdlName, assignment))
+  # Build the if/elif/else cascade from the collected branches.
+  var propDispatch: NimNode
+  if propBranches.len == 0:
+    propDispatch = quote do:
+      return err[void, ParseError](initError(peTypeUnknownField, `tokIdent`.span,
+        "`" & `nodeLit` & "` has no field `" &
+        openArrayToString(`keyStrIdent`) & "`"))
+  else:
+    let elseBranch = quote do:
+      return err[void, ParseError](initError(peTypeUnknownField, `tokIdent`.span,
+        "`" & `nodeLit` & "` has no field `" &
+        openArrayToString(`keyStrIdent`) & "`"))
+    # Build elif cascade from back to front
+    propDispatch = elseBranch
+    for i in countdown(propBranches.high, 0):
+      let (kdlName, assignment) = propBranches[i]
+      let nameLit = newLit(kdlName)
+      let nextNode = propDispatch
+      propDispatch = quote do:
+        if bytesEq(`keyStrIdent`, `nameLit`):
+          `assignment`
+        else:
+          `nextNode`
   # When inChildren, forward visitProp to the right child slot.
   var childPropDispatch = newNimNode(nnkCaseStmt).add(quote do:
     `bIdent`.curChildName)
@@ -1972,7 +1991,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
             Result[void, ParseError] {.noSideEffect.} =
           if `bIdent`.inChildren:
             `childPropDispatch`
-          `propCase`
+          `propDispatch`
           ok(void, ParseError)
     else:
       quote do:
@@ -1980,7 +1999,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
                   `keyStrIdent`: openArray[char],
                   `tokIdent`: Token, `streamIdent`: TokenStream):
             Result[void, ParseError] {.noSideEffect.} =
-          `propCase`
+          `propDispatch`
           ok(void, ParseError)
 
   # 5/6/7. Children: no-op for flat case (cycle 7 adds children).

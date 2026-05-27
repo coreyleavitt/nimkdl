@@ -69,6 +69,11 @@ type
     # that hash to that bucket. Single-element seqs are the common case
     # (collision rare); we walk the seq linearly on collision.
     byHash: Table[Hash, seq[uint32]]
+    disabled*: bool
+      ## When true, `intern()` no-ops and returns `InvalidInterned`.
+      ## Set by callers (typed-direct parse) that read bytes from the
+      ## source string directly and never need the InternedStr handle.
+      ## Saves ~13% of CPU on typed parse (per perf record).
 
 const InvalidInterned* = InternedStr(uint32.high)
   ## Sentinel handle. Lookups return this from invalid handles
@@ -121,6 +126,11 @@ proc intern*(interner: var Interner, s: openArray[char]): InternedStr =
   ## Takes `openArray[char]` so callers can pass a slice into the lexer
   ## source without allocating an intermediate string. The heap path
   ## still allocates one string for the Entry payload.
+  ##
+  ## When `interner.disabled` is true, returns `InvalidInterned`
+  ## immediately. Used by the typed-direct path where the consumer
+  ## reads bytes from source directly and never needs the handle.
+  if interner.disabled: return InvalidInterned
   let h = hash(s)
   if h in interner.byHash:
     for idx in interner.byHash[h]:
