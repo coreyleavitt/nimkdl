@@ -36,6 +36,33 @@ jobs:
             src/nkdl.nim
           # Land at the umbrella module by default.
           cp _docs/nkdl.html _docs/index.html || true
+      - name: run conformance + emit live badge JSON
+        run: |
+          # Capture the conformance line from the real test output.
+          # Output shape (from tests/test_conformance.nim):
+          #   conformance: 338 pass, 0 fail, 0 skip (of 338 cases)
+          nim c -r --hints:off tests/test_conformance.nim 2>&1 \
+            | tee conf.out
+          LINE=$(grep -E "^[[:space:]]*conformance: [0-9]+ pass" conf.out | head -1)
+          if [ -z "$LINE" ]; then
+            echo "::error::could not parse conformance output"
+            exit 1
+          fi
+          PASS=$(echo "$LINE" | grep -oE "[0-9]+ pass" | grep -oE "[0-9]+")
+          FAIL=$(echo "$LINE" | grep -oE "[0-9]+ fail" | grep -oE "[0-9]+")
+          TOTAL=$(echo "$LINE" | grep -oE "of [0-9]+ cases" | grep -oE "[0-9]+")
+          # Color picks badge tone honestly: full green only at 100%.
+          if [ "$FAIL" = "0" ] && [ "$PASS" = "$TOTAL" ]; then
+            COLOR="brightgreen"
+          elif [ "$FAIL" = "0" ]; then
+            COLOR="green"
+          else
+            COLOR="red"
+          fi
+          mkdir -p _docs
+          printf '{"schemaVersion":1,"label":"conformance","message":"%s/%s","color":"%s"}\n' \
+            "$PASS" "$TOTAL" "$COLOR" > _docs/conformance-badge.json
+          echo "badge: $PASS/$TOTAL ($COLOR)"
       - name: upload pages artifact
         uses: actions/upload-pages-artifact@v5
         with:

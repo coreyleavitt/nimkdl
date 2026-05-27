@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/coreyleavitt/nkdl/actions/workflows/ci.yaml/badge.svg)](https://github.com/coreyleavitt/nkdl/actions/workflows/ci.yaml)
 [![Docs](https://img.shields.io/badge/docs-coreyleavitt.github.io%2Fnkdl-blue)](https://coreyleavitt.github.io/nkdl/)
-[![Conformance](https://img.shields.io/badge/conformance-338%2F338-brightgreen)](BENCHMARK.md)
+[![Conformance](https://img.shields.io/endpoint?url=https://coreyleavitt.github.io/nkdl/conformance-badge.json)](BENCHMARK.md)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue)](LICENSE)
 
 A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. On realistic configs nkdl parses about 1.58× faster than [ckdl](https://github.com/tjol/ckdl) (a hand-written C parser) and 9-20× faster than the Rust options ([knus](https://crates.io/crates/knus), [kdl-rs](https://github.com/kdl-org/kdl-rs)). On typed decode `parseInto[T]` edges knus's serde-derive (23.3K vs 21.8K ops/s). On typed encode `encodeFrom[T]` is **4.87× faster than [facet-kdl](https://crates.io/crates/facet-kdl)** (139.6K vs 28.7K). One grammar, 338/338 conformance fixtures. Per-fixture breakdown and methodology in [BENCHMARK.md](BENCHMARK.md).
