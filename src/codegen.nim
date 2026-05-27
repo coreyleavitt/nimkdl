@@ -764,7 +764,31 @@ proc emitChildEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode):
   ## When the field has `kdlReserved`, the produced child node's
   ## typeAnnotation is set to the declared tag before appending —
   ## symmetric with the decode-side child-tag assertion.
+  ##
+  ## Conflict detection: if the FIELD has `kdlReserved: "X"` AND the
+  ## child TYPE itself has a type-level `{.kdlReserved: "Y".}` pragma,
+  ## those tags may disagree. Without a check the type-level annotation
+  ## (set by the child's own `kdlEncodeImpl`) would be silently
+  ## overwritten by the field-level setTagStmts below. Resolve at macro
+  ## time so the user gets a clear error before runtime.
   let childNodeSym = genSym(nskVar, "childNode_" & f.nimName)
+  if f.expectedReserved.len > 0:
+    let elemTypeNode =
+      if (typeNodeIsSeq(f.typeNode) or f.isOption) and
+         f.typeNode.kind == nnkBracketExpr and f.typeNode.len >= 2:
+        f.typeNode[1]
+      else:
+        f.typeNode
+    if elemTypeNode.kind in {nnkIdent, nnkSym}:
+      let childTypeReserved = extractTypeReserved(elemTypeNode)
+      if childTypeReserved.len > 0 and
+         childTypeReserved != f.expectedReserved:
+        error("kdl: field `" & f.nimName & "` declares {.kdlReserved: \"" &
+              f.expectedReserved & "\".} but its child type `" &
+              $elemTypeNode & "` declares {.kdlReserved: \"" &
+              childTypeReserved & "\".}. The two tags conflict; set " &
+              "only one (prefer the type-level pragma if every value of " &
+              "that type carries the tag).", f.typeNode)
   let setTagStmts =
     if f.expectedReserved.len > 0:
       let tagLit = newLit(f.expectedReserved)
@@ -942,38 +966,54 @@ macro deriveEncode(typ: typedesc): untyped =
     directBody.add quote do:
       appendIndent(`bufIdent`, `indentIdent`)
       `bufIdent`.add(`nodeNameLit`)
-    # Args first (positional, in source order)
+    # Helper: emit one value with optional kdlReserved validation and
+    # `(tag)` prefix. Used by BOTH the arg and prop loops so kdlReserved
+    # semantics are uniform across positional and keyed fields. Validation
+    # builds the transient KdlValue via kdlEncodeValue (which dispatches
+    # by Nim type to the right KdlValueKind — kvInt / kvFloat / kvBool /
+    # kvString) so numeric reserved tags like (u8) / (i32) / (f64) take
+    # the correct validator branch. prefixEncodeHint adds the TypeName.
+    # fieldName context to the error so callers see which field tripped.
+    proc emitDirectValue(getExpr, tagLit: NimNode, hasTag: bool,
+                         fieldPath: string): NimNode =
+      let pathLit = newLit(fieldPath)
+      var body = newStmtList()
+      if hasTag:
+        body.add quote do:
+          let tmpVal = kdlEncodeValue(`getExpr`)
+          let rcheck = validateReserved(`tagLit`, tmpVal)
+          if rcheck.isErr:
+            var rerr = rcheck.getErr
+            prefixEncodeHint(rerr, `pathLit`)
+            return err[void, ParseError](rerr)
+          `bufIdent`.add('('); `bufIdent`.add(`tagLit`); `bufIdent`.add(')')
+      body.add quote do:
+        appendFieldValue(`bufIdent`, `getExpr`)
+      body
+    # Args first (positional, in source order). kdlReserved on a kdlArg
+    # gets the same validation + (tag) prefix that kdlProp gets — the
+    # spec doesn't restrict reserved tags to either position.
     for f in shape.shared:
       if f.kind != fkArg: continue
       let access = newDotExpr(vIdent, ident(f.nimName))
+      let tagLit = newLit(f.expectedReserved)
+      let hasTag = f.expectedReserved.len > 0
+      let valueEmit = emitDirectValue(access, tagLit, hasTag,
+                                      typeNameStr & "." & f.nimName)
       directBody.add quote do:
         `bufIdent`.add(' ')
-        appendFieldValue(`bufIdent`, `access`)
+        `valueEmit`
     # Props next (key=value). Option[T] props are conditional: only emit
-    # when isSome. Non-Option props always emit. Fields with a
-    # `kdlReserved: "tag"` pragma get a `(tag)` prefix on the value AND
-    # run Layer-1 validation (validateReserved); failure short-circuits
-    # the encode with peReservedTypeInvalid.
+    # when isSome. Non-Option props always emit.
     for f in shape.shared:
       if f.kind != fkAttr: continue
       let access = newDotExpr(vIdent, ident(f.nimName))
       let keyLit = newLit(f.kdlName)
       let tagLit = newLit(f.expectedReserved)
       let hasTag = f.expectedReserved.len > 0
-      # Build the (potentially validated, potentially tagged) emit body
-      # for the value side of `key=value`.
       let getExpr = if f.isOption: newDotExpr(access, ident("get")) else: access
-      var valueEmit = newStmtList()
-      if hasTag:
-        # Validate: construct a transient KdlValue to feed validateReserved.
-        # Only fires for kdlReserved'd fields, which are rare on hot paths.
-        valueEmit.add quote do:
-          let tmpVal = newStringValue($(`getExpr`))
-          let rcheck = validateReserved(`tagLit`, tmpVal)
-          if rcheck.isErr: return err[void, ParseError](rcheck.getErr)
-          `bufIdent`.add('('); `bufIdent`.add(`tagLit`); `bufIdent`.add(')')
-      valueEmit.add quote do:
-        appendFieldValue(`bufIdent`, `getExpr`)
+      let valueEmit = emitDirectValue(getExpr, tagLit, hasTag,
+                                      typeNameStr & "." & f.nimName)
       let emitProp = quote do:
         `bufIdent`.add(' ')
         appendIdent(`bufIdent`, `keyLit`)

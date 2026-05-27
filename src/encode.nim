@@ -111,6 +111,11 @@ func canEmitBare(s: string): bool =
 func escapeStringBody(s: string): string =
   ## Escape only what's necessary for a valid double-quoted KDL string.
   ## Round-trip stable: re-parsing the output yields back the same bytes.
+  ##
+  ## **Keep in sync with `appendEscapedBody` below** — the two are paired
+  ## (AST-path vs direct-buffer-path) and any new escape rule must land
+  ## in both. The duplication is justified by the direct path's
+  ## no-allocation guarantee, not by independent semantics.
   result = ""
   for c in s:
     case c
@@ -143,6 +148,9 @@ func emitIdent(s: string): string {.inline.} =
 # ---------------------------------------------------------------------------
 
 func appendEscapedBody*(buf: var string, s: string) {.noSideEffect, inline.} =
+  ## Direct-buffer counterpart to `escapeStringBody`. Same escape rules,
+  ## written to a caller-provided buffer instead of returning a string.
+  ## **Keep in sync with `escapeStringBody` above.**
   for ch in s:
     case ch
     of '\\':   buf.add('\\'); buf.add('\\')
@@ -182,6 +190,9 @@ func appendInt*(buf: var string, i: int64) {.noSideEffect, inline.} =
   buf.add($i)
 
 func appendFloat*(buf: var string, f: float) {.noSideEffect.} =
+  ## Direct-buffer counterpart to `emitFloat`. Same special-value mapping
+  ## (`Inf`/`NegInf`/`NaN` → `#inf`/`#-inf`/`#nan`).
+  ## **Keep in sync with `emitFloat` further down.**
   if f == Inf: buf.add("#inf"); return
   if f == NegInf: buf.add("#-inf"); return
   if f != f: buf.add("#nan"); return
@@ -222,13 +233,21 @@ func appendFieldValue*[T: uint8|uint16|uint32](buf: var string, i: T)
   ## overload set must cover what decode[T] does (which already
   ## accepts SomeUnsignedInt via kdlDecodeValue).
   appendInt(buf, int64(i))
-func appendFieldValue*(buf: var string, i: uint) {.noSideEffect, inline.} =
-  # `uint` is 64-bit on common targets; values above int64.high don't
-  # fit. Emit as int64; callers needing the full uint64 range should
-  # encode through the KdlDoc path which uses kvBigInt.
-  appendInt(buf, int64(i))
+func emitBigInt(hi, lo: uint64, negative: bool): string  # forward decl
+
 func appendFieldValue*(buf: var string, i: uint64) {.noSideEffect, inline.} =
-  appendInt(buf, int64(i))
+  ## uint64 above int64.high needs bigint promotion — same path the
+  ## KdlDoc encode uses (`kdlEncodeValue[SomeUnsignedInt]` promotes to
+  ## kvBigInt). Without this, large uint64 values silently emit as
+  ## negative int64 decimals after the cast, corrupting output.
+  if i <= uint64(int64.high):
+    appendInt(buf, int64(i))
+  else:
+    buf.add(emitBigInt(0'u64, i, negative = false))
+func appendFieldValue*(buf: var string, i: uint) {.noSideEffect, inline.} =
+  ## `uint` is 64-bit on common targets — route through the uint64
+  ## overload so the same bigint promotion fires.
+  appendFieldValue(buf, uint64(i))
 func appendFieldValue*(buf: var string, f: float) {.noSideEffect, inline.} =
   appendFloat(buf, f)
 func appendFieldValue*(buf: var string, f: float32) {.noSideEffect, inline.} =
@@ -247,6 +266,9 @@ func appendFieldValue*[T: enum](buf: var string, e: T) {.noSideEffect, inline.} 
 func emitFloat(f: float): string =
   ## Canonical float format. Specials go through v2 keywords; finite values
   ## use Nim's default repr (which rounds to short-but-stable text).
+  ## **Keep in sync with `appendFloat` above** — the two are paired
+  ## (AST-path vs direct-buffer-path); any new special-value or
+  ## fraction-shape rule must land in both.
   if f == Inf: return "#inf"
   if f == NegInf: return "#-inf"
   if f != f: return "#nan"  # NaN

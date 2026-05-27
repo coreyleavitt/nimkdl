@@ -150,3 +150,68 @@ suite "encodeFrom[T] string escaping (cycle E.3)":
 
   test "name with non-ASCII utf8 (☃ snowman)":
     roundTripsEqual(Service(name: "snow☃man", port: 9))
+
+# Encode-path review round-1 regressions:
+#   C1 — numeric reserved tags ((u8), (i32), etc.) used to fail validation
+#         in the direct path because the value was always wrapped as
+#         kvString. kdlEncodeValue dispatch fixes it.
+#   C2 — kdlReserved on a kdlArg field used to be silently skipped in the
+#         direct path (no validation, no (tag) prefix emit).
+#   H1 — uint64 above int64.high used to silently emit as a negative
+#         decimal after a lossy cast; now promotes to bigint.
+
+kdl:
+  type WithU8 {.kdlNode: "port".} = object
+    n {.kdlProp, kdlReserved: "u8".}: int
+
+suite "encodeFrom: numeric kdlReserved tag (C1 regression)":
+  test "valid (u8) value encodes":
+    let r = encodeFrom(WithU8(n: 200))
+    check r.isOk
+    check "(u8)200" in r.get
+  test "value matches legacy encode":
+    let v = WithU8(n: 42)
+    check encodeFrom(v).get == encode(v, emPretty).get
+  test "out-of-range (u8) value errors":
+    let r = encodeFrom(WithU8(n: 999))
+    check r.isErr
+    check r.getErr.code == peReservedTypeInvalid
+    # Error hint should be prefixed with TypeName.fieldName (M2).
+    check "WithU8.n" in r.getErr.hint
+
+kdl:
+  type Bind {.kdlNode: "bind".} = object
+    addr1 {.kdlArg, kdlReserved: "ipv4".}: string
+
+suite "encodeFrom: kdlReserved on kdlArg (C2 regression)":
+  test "valid arg emits with (ipv4) tag prefix":
+    let r = encodeFrom(Bind(addr1: "127.0.0.1"))
+    check r.isOk
+    check "(ipv4)" in r.get
+  test "invalid arg fails validation":
+    let r = encodeFrom(Bind(addr1: "not-an-ip"))
+    check r.isErr
+    check r.getErr.code == peReservedTypeInvalid
+  test "arg encode matches legacy":
+    let v = Bind(addr1: "10.0.0.1")
+    check encodeFrom(v).get == encode(v, emPretty).get
+
+kdl:
+  type BigU {.kdlNode: "big".} = object
+    n {.kdlProp.}: uint64
+
+suite "encodeFrom: uint64 bigint promotion (H1 regression)":
+  test "uint64 within int64.high encodes as plain int":
+    let r = encodeFrom(BigU(n: 12345'u64))
+    check r.isOk
+    check "n=12345" in r.get
+  test "uint64 above int64.high promotes to bigint, not negative":
+    # int64.high = 9223372036854775807; pick a value clearly above it.
+    let big: uint64 = 18446744073709551615'u64  # uint64.max
+    let r = encodeFrom(BigU(n: big))
+    check r.isOk
+    check "n=18446744073709551615" in r.get
+    check "-" notin r.get   # pre-fix this would have emitted "n=-1"
+  test "encodeFrom value matches legacy for the same big uint64":
+    let v = BigU(n: 18446744073709551614'u64)
+    check encodeFrom(v).get == encode(v, emPretty).get
