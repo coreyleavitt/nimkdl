@@ -7,21 +7,25 @@
 ## reader can diff them column-by-column.
 ##
 ## Paths timed:
-##   1. AST parse  — matches kdl-rs `KdlDocument::parse_v2`,
-##                   ckdl event-drain, knus `parse_ast`.
-##   2. Typed decode (legacy AST + walk) — matches the
-##                   `decode[seq[Service]]` path in the API surface.
-##   3. Typed decode (direct, issue #1)  — `parseInto[seq[Service]]`.
-##                   The apples-to-apples for knus `parse::<Vec<T>>`
-##                   and facet-kdl `from_str::<ServiceDoc>`.
-##   4. Typed encode (legacy)  — encode(seq[Service], emPretty),
-##                   via KdlNode/KdlDoc intermediate.
-##   5. Typed encode (direct, issue #1) — `encodeFrom(seq[Service])`.
-##                   Apples-to-apples for facet-kdl `to_string`.
-##   6. Typed encode (direct, NESTED)  — `encodeFrom(seq[Server])`
-##                   where Server has Action children. Same total
-##                   inner-node count (100) but the indent + recursion
-##                   path is exercised.
+##   1. AST parse           — matches kdl-rs `KdlDocument::parse_v2`,
+##                            ckdl event-drain, knus `parse_ast`.
+##   2. Typed decode        — `decode[seq[Service]]`. As of the visitor
+##                            collapse, decode[T] IS the typed-direct
+##                            path (one entry point, no slow fallback);
+##                            apples-to-apples for knus
+##                            `parse::<Vec<T>>` and facet-kdl
+##                            `from_str::<ServiceDoc>`.
+##   3. Typed encode AST    — encode(seq[Service], emPretty), via
+##                            KdlNode/KdlDoc intermediate. Apples-to-
+##                            apples for kdl-rs `to_string` (untyped
+##                            AST roundtrip).
+##   4. Typed encode direct — `encodeFrom(seq[Service])`. Direct typed-
+##                            value → string. Apples-to-apples for
+##                            facet-kdl `to_string`.
+##   5. Typed encode NESTED — `encodeFrom(seq[Server])` where Server
+##                            has Action children. Same inner-node
+##                            count (100) but exercises indent + child
+##                            recursion.
 ##
 ## The Service schema is identical to facet-kdl/main.rs and knus/main.rs
 ## (name arg + port/replicas/enabled props). Verify by reading those
@@ -111,26 +115,26 @@ proc main() =
       discard parse(c)
     report(name, c.len, iters, el)
 
-  # 2 + 3. Typed decode: both paths, same fixture.
+  # 2. Typed decode — single path now (the visitor; decode[T] dispatches
+  # straight to it). The pre-collapse 'AST-walk' vs 'direct' comparison
+  # is gone: both old names did the same fast thing as of the collapse.
   echo "\n=== nkdl typed decode (homogeneous-services-100.kdl) ===\n"
   echo "  Service schema: same as facet-kdl/main.rs + knus/main.rs"
   echo "  (name arg, port u16/int prop, replicas prop, enabled prop)\n"
   block:
     let el = timeIt(5_000):
       discard decode[seq[Service]](src)
-    report("nkdl decode[seq[Service]]  (AST + walk)", src.len, 5_000, el)
-  block:
-    let el = timeIt(5_000):
-      discard parseInto[seq[Service]](src)
-    report("nkdl parseInto[seq[Service]] (direct, #1)", src.len, 5_000, el)
+    report("nkdl decode[seq[Service]]", src.len, 5_000, el)
   echo ""
-  echo "  apples-to-apples competitors for the direct path:"
+  echo "  apples-to-apples competitors:"
   echo "    knus       parse::<Vec<Service>>           (see knus/main.rs)"
   echo "    facet-kdl  from_str::<ServiceDoc>          (see facet-kdl/main.rs)"
   echo "    kdl-rs     -- n/a, no typed decode path --"
   echo "    ckdl       -- n/a, no typed decode path --"
 
-  # 4 + 5. Typed encode on flat homogeneous shape.
+  # 3 + 4. Typed encode on flat homogeneous shape — both paths still
+  # exist on the encode side (encode is AST-roundtrip, encodeFrom is
+  # direct typed-value → string).
   echo "\n=== nkdl typed encode FLAT (100 Service nodes, no children) ===\n"
   let svcs = decode[seq[Service]](src)
   doAssert svcs.isOk
@@ -138,12 +142,12 @@ proc main() =
   block:
     let el = timeIt(5_000):
       discard encode(services, emPretty)
-    report("nkdl encode(seq[Service], emPretty)", src.len, 5_000, el)
+    report("nkdl encode(seq[Service], emPretty)  [AST roundtrip]", src.len, 5_000, el)
   block:
     let el = timeIt(5_000):
       let r = encodeFrom(services)
       discard r.get
-    report("nkdl encodeFrom(seq[Service])  (direct, #1)", src.len, 5_000, el)
+    report("nkdl encodeFrom(seq[Service])        [direct]", src.len, 5_000, el)
   echo ""
   echo "  apples-to-apples competitors for typed encode:"
   echo "    facet-kdl  to_string(&doc)                 (see facet-kdl/main.rs)"
@@ -151,7 +155,7 @@ proc main() =
   echo "    kdl-rs     to_string (untyped, AST roundtrip — different path)"
   echo "    ckdl       streaming emitter only — not directly comparable"
 
-  # 6. Typed encode on nested Server-with-Action children.
+  # 5. Typed encode on nested Server-with-Action children.
   echo "\n=== nkdl typed encode NESTED (25 Server x 4 Action children = 100 inner) ===\n"
   var servers = newSeq[Server](25)
   for i in 0 ..< 25:
@@ -163,12 +167,12 @@ proc main() =
   block:
     let el = timeIt(5_000):
       discard encode(servers, emPretty)
-    report("nkdl encode(seq[Server], emPretty)", encOut.len, 5_000, el)
+    report("nkdl encode(seq[Server], emPretty)   [AST roundtrip]", encOut.len, 5_000, el)
   block:
     let el = timeIt(5_000):
       let r = encodeFrom(servers)
       discard r.get
-    report("nkdl encodeFrom(seq[Server])  (direct, #1)", encOut.len, 5_000, el)
+    report("nkdl encodeFrom(seq[Server])         [direct]", encOut.len, 5_000, el)
   echo ""
   echo "  No directly comparable harness — facet-kdl's bench is flat-only."
   echo "  This row exists to defend against \"flat-only encode\" critique."
