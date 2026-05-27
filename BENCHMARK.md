@@ -52,38 +52,44 @@ A homogeneous fixture of 100 service nodes (~5KB,
 
 | Parser           | Path                                | ops/s   | vs leader |
 |------------------|-------------------------------------|--------:|----------:|
-| **knus**         | `parse::<Vec<Service>>` (typed)     | 23,200  | 1.0x      |
-| **nimkdl**       | `decode[seq[Service]]`              | 10,900  | 2.1x slower |
-| knus             | `parse_ast` (AST, untyped)          | 2,700   | 8.6x slower |
-| facet-kdl        | `from_str::<ServiceDoc>`            | 1,000   | 23x slower |
-| kdl-rs           | `KdlDocument::parse_v2` (AST)       | 1,000   | 23x slower |
+| **nimkdl**       | `parseInto[seq[Service]]` (typed-direct)  | **24,700**  | **1.00x (LEADER)** |
+| knus             | `parse::<Vec<Service>>` (typed)     | 23,200  | 1.07x slower |
+| nimkdl           | `decode[seq[Service]]` (AST + walk) | 10,300  | 2.40x slower |
+| knus             | `parse_ast` (AST, untyped)          | 2,700   | 9.1x slower |
+| facet-kdl        | `from_str::<ServiceDoc>`            | 1,000   | 25x slower |
+| kdl-rs           | `KdlDocument::parse_v2` (no typed path) | 1,000   | 25x slower |
 
-Two findings worth noting honestly.
+nimkdl now leads typed decode. `parseInto[seq[Service]]` is a new entry
+point built on a visitor-based architecture (issue #1) that skips
+`KdlDoc` construction when the target type is known. Same architectural
+pattern serde-json uses: the schema lets the parser write directly into
+typed fields, bypassing the intermediate representation.
 
-knus typed decode is the leader. Faster than knus's own `parse_ast`,
-which is the serde-style story working as advertised. Schema knowledge
-lets knus skip AST construction and write directly into the typed
-fields. nimkdl is 2x behind on this benchmark; the `deriveDecode`
-macro currently builds an intermediate `KdlDoc` and then decodes
-out of it, which doubles the work. There's a real optimization
-opportunity here (drive the decoder directly from the parser like
-knus does) that we haven't taken yet.
+Three perf wins closed the gap to knus once the architecture was in
+place. (1) `bytesEq` length-prefixed byte compare for property dispatch
+instead of `case openArrayToString(key) of "..."` — kills an alloc per
+prop. (2) Skip `interner.lookup` roundtrip for bare-ident node and prop
+names — read bytes directly from `source[tok.span]`. (3) `Interner.disabled`
+flag that no-ops `intern()` for the typed-direct caller (which never
+reads the handle); saves ~13.5% of CPU on `lex()`.
 
-facet-kdl is 23x slower than knus on the typed path despite being
-advertised as knus's successor. The structural reason is that
-facet-kdl is built on top of kdl-rs (it depends on `kdl ^6.5.0`),
-so its perf is bounded by kdl-rs's parser plus the facet deserialize
-layer. The "successor" framing is about the typed-decode interface
-improvements (a more general derive system), not about being a faster
-parser.
+The older AST-based `decode[seq[Service]]` path stays for consumers that
+want the doc for mutation or format-preserving encode. It's now 2.4x
+behind the new path on the same fixture but its semantics are unchanged.
+
+facet-kdl is 25x slower despite being advertised as knus's successor.
+Structural reason: facet-kdl depends on `kdl ^6.5.0` (kdl-rs), so its
+typed-decode perf is bounded by kdl-rs's parser plus the facet
+deserialize layer. The "successor" framing is about the typed-decode
+interface improvements (a more general derive system), not the parser.
 
 Earlier versions of this section claimed knus typed was the slowest
 of the bunch. That was wrong — the test fixture used bare `true`
 instead of KDL v2's required `#true`, which sent knus into expensive
 error-recovery paths on every parse. With a spec-valid fixture, knus
-typed is the fastest typed path measured. The mistake is preserved
-in git history as a warning about why fixture bytes need to be
-spec-correct across every harness.
+typed is competitive. The mistake is preserved in git history as a
+warning about why fixture bytes need to be spec-correct across every
+harness.
 
 ## Why ckdl is fast (and why we still beat it)
 

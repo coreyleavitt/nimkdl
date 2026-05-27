@@ -1,6 +1,6 @@
 # nimkdl
 
-A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. On realistic configs nimkdl runs about 1.4x faster than [ckdl](https://github.com/tjol/ckdl) (a hand-written C parser) and 8-18x faster than the Rust options (knus, kdl-rs). See [BENCHMARK.md](BENCHMARK.md).
+A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. On realistic configs nimkdl runs about 1.4x faster than [ckdl](https://github.com/tjol/ckdl) (a hand-written C parser) and 8-18x faster than the Rust options (knus, kdl-rs). On **typed decode** (parse + populate typed structures) we now run **1.07x faster than knus** at 24.7K ops/s. See [BENCHMARK.md](BENCHMARK.md).
 
 ```nim
 import kdl
