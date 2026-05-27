@@ -1322,7 +1322,61 @@ macro deriveEncode*(typ: typedesc): untyped =
         Result[KdlNode, ParseError] {.noSideEffect.} =
       `procBody`
 
-  result = encodeProc
+  # --- Direct-buffer emit (cycle E.1+) -------------------------------
+  # Walks the same `shape` and emits buf.add / appendFieldValue calls
+  # directly into a caller-provided `var string`. Skips KdlNode + KdlDoc
+  # construction entirely.
+  #
+  # Features supported in E.1 scope: kdlArg + kdlProp with primitive
+  # types (string/int/float/bool/enum). Anything else (kdlChild,
+  # variant, kdlReserved, Option[T]) falls back to the legacy KdlNode
+  # path — body just delegates so the public encodeFrom[T] surface is
+  # uniform across types; later slices replace the fallback per feature.
+  let bufIdent = ident("buf")
+  var hasUnsupported = shape.hasVariant
+  for f in shape.shared:
+    if f.kind == fkChild or f.expectedReserved.len > 0 or f.isOption:
+      hasUnsupported = true
+  var directBody = newStmtList()
+  if hasUnsupported:
+    # Delegate to legacy path for now.
+    directBody.add quote do:
+      var legacyDoc = newDoc()
+      let nRes = kdlEncodeImpl(`vIdent`, legacyDoc)
+      if nRes.isErr: return err[void, ParseError](nRes.getErr)
+      legacyDoc.nodes.add(nRes.get)
+      `bufIdent`.add(kdlEncode.encode(legacyDoc, emPretty))
+      ok(void, ParseError)
+  else:
+    directBody.add quote do:
+      `bufIdent`.add(`nodeNameLit`)
+    # Args first (positional, in source order)
+    for f in shape.shared:
+      if f.kind != fkArg: continue
+      let access = newDotExpr(vIdent, ident(f.nimName))
+      directBody.add quote do:
+        `bufIdent`.add(' ')
+        appendFieldValue(`bufIdent`, `access`)
+    # Props next (key=value)
+    for f in shape.shared:
+      if f.kind != fkAttr: continue
+      let access = newDotExpr(vIdent, ident(f.nimName))
+      let keyLit = newLit(f.kdlName)
+      directBody.add quote do:
+        `bufIdent`.add(' ')
+        appendIdent(`bufIdent`, `keyLit`)
+        `bufIdent`.add('=')
+        appendFieldValue(`bufIdent`, `access`)
+    directBody.add quote do:
+      `bufIdent`.add('\n')
+      ok(void, ParseError)
+
+  let encodeIntoProc = quote do:
+    proc kdlEncodeIntoImpl*(`vIdent`: `typ`, `bufIdent`: var string):
+        Result[void, ParseError] {.noSideEffect.} =
+      `directBody`
+
+  result = newStmtList(encodeProc, encodeIntoProc)
   when defined(dumpKdlGen):
     echo "=== kdlEncodeImpl for ", repr(typ), " ==="
     echo result.repr
@@ -1370,6 +1424,32 @@ proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
     return err[string, ParseError](nRes.getErr)
   doc.nodes.add(nRes.get)
   ok[string, ParseError](kdlEncode.encode(doc, mode))
+
+proc encodeFrom*[T: object](v: T): string =
+  ## Typed-direct encode (cycle E). Skips KdlNode + KdlDoc construction;
+  ## the macro-emitted `kdlEncodeIntoImpl` writes KDL bytes straight into
+  ## a string buffer in one pass. Symmetric with `parseInto[T]` on the
+  ## decode side.
+  ##
+  ## Output matches `encode(v, emPretty).get` byte-for-byte for types
+  ## that the direct path supports (cycle E.1 scope: object types with
+  ## kdlArg/kdlProp fields of string/int/float/bool). Other shapes (kdl
+  ## children, kdlReserved tags, Option[T]) land in later slices.
+  ##
+  ## Requires `deriveEncode(T)` to have been called.
+  mixin kdlEncodeIntoImpl
+  result = newStringOfCap(64)
+  discard kdlEncodeIntoImpl(v, result)
+
+proc encodeFrom*[T: object](vs: seq[T]): string =
+  ## seq[T] variant — each element becomes one top-level node, newline-
+  ## separated. Symmetric with `parseInto[seq[T]]`.
+  ##
+  ## Requires `deriveEncode(T)` to have been called.
+  mixin kdlEncodeIntoImpl
+  result = newStringOfCap(64 * vs.len + 32)
+  for v in vs:
+    discard kdlEncodeIntoImpl(v, result)
 
 proc encode*[T](vs: seq[T], mode = emPretty): Result[string, ParseError] =
   ## Render a sequence of typed values as KDL text: each element

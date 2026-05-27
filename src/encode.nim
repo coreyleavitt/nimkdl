@@ -134,6 +134,87 @@ func emitIdent(s: string): string {.inline.} =
   if canEmitBare(s): s else: quotedString(s)
 
 # ---------------------------------------------------------------------------
+# Direct-buffer emit primitives (cycle E — encodeFrom[T] fast path).
+#
+# These write KDL bytes straight into a caller-provided `var string` buffer.
+# Mirrors the per-allocation `emitX` family above but skips the intermediate
+# strings — the macro-emitted `kdlEncodeIntoImpl` per type chains these into
+# a single pass per value.
+# ---------------------------------------------------------------------------
+
+func appendEscapedBody*(buf: var string, s: string) {.noSideEffect, inline.} =
+  for ch in s:
+    case ch
+    of '\\':   buf.add('\\'); buf.add('\\')
+    of '"':    buf.add('\\'); buf.add('"')
+    of '\n':   buf.add('\\'); buf.add('n')
+    of '\r':   buf.add('\\'); buf.add('r')
+    of '\t':   buf.add('\\'); buf.add('t')
+    of '\b':   buf.add('\\'); buf.add('b')
+    of '\f':   buf.add('\\'); buf.add('f')
+    of '\x00'..'\x07', '\x0B', '\x0E'..'\x1F', '\x7F':
+      const Hex = "0123456789abcdef"
+      buf.add('\\'); buf.add('u'); buf.add('{')
+      let v = uint8(ch)
+      if v >= 0x10:
+        buf.add(Hex[int(v shr 4)])
+      buf.add(Hex[int(v and 0xF)])
+      buf.add('}')
+    else:      buf.add(ch)
+
+func appendIdent*(buf: var string, s: string) {.noSideEffect, inline.} =
+  ## Bare if possible, otherwise quoted.
+  if canEmitBare(s):
+    buf.add(s)
+  else:
+    buf.add('"'); appendEscapedBody(buf, s); buf.add('"')
+
+func appendStringValue*(buf: var string, s: string) {.noSideEffect, inline.} =
+  ## Canonical form prefers a bare-ident form for string values.
+  if canEmitBare(s):
+    buf.add(s)
+  else:
+    buf.add('"'); appendEscapedBody(buf, s); buf.add('"')
+
+func appendInt*(buf: var string, i: int64) {.noSideEffect, inline.} =
+  buf.add($i)
+
+func appendFloat*(buf: var string, f: float) {.noSideEffect.} =
+  if f == Inf: buf.add("#inf"); return
+  if f == NegInf: buf.add("#-inf"); return
+  if f != f: buf.add("#nan"); return
+  let s = $f
+  buf.add(s)
+  if '.' notin s and 'e' notin s and 'E' notin s:
+    buf.add(".0")
+
+func appendBool*(buf: var string, b: bool) {.noSideEffect, inline.} =
+  buf.add(if b: "#true" else: "#false")
+
+func appendNull*(buf: var string) {.noSideEffect, inline.} =
+  buf.add("#null")
+
+# Overload set used by the macro-emitted kdlEncodeIntoImpl. Lets the
+# generated code dispatch on the Nim field type without a per-type
+# `when` ladder.
+func appendFieldValue*(buf: var string, s: string) {.noSideEffect, inline.} =
+  appendStringValue(buf, s)
+func appendFieldValue*(buf: var string, i: int) {.noSideEffect, inline.} =
+  appendInt(buf, int64(i))
+func appendFieldValue*(buf: var string, i: int64) {.noSideEffect, inline.} =
+  appendInt(buf, i)
+func appendFieldValue*(buf: var string, f: float) {.noSideEffect, inline.} =
+  appendFloat(buf, f)
+func appendFieldValue*(buf: var string, f: float32) {.noSideEffect, inline.} =
+  appendFloat(buf, float(f))
+func appendFieldValue*(buf: var string, b: bool) {.noSideEffect, inline.} =
+  appendBool(buf, b)
+func appendFieldValue*[T: enum](buf: var string, e: T) {.noSideEffect, inline.} =
+  ## Enum fields encode as their string representation, matching the
+  ## legacy KdlDoc path which interns the enum's `$` form.
+  appendStringValue(buf, $e)
+
+# ---------------------------------------------------------------------------
 # Number emission
 # ---------------------------------------------------------------------------
 
