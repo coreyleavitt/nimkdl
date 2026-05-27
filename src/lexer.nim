@@ -1,7 +1,6 @@
 ## lexer — KDL v2 tokenizer (https://kdl.dev/spec/).
 ##
-## Hand-written, no regex (per project_no_libpcre — std/re fails at runtime
-## in the dev container, hand-written matchers are the convention).
+## Hand-written, no regex.
 ##
 ## ## What's tokenized
 ##

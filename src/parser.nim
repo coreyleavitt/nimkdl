@@ -1,10 +1,9 @@
 ## parser — KDL v2 public parse entry points.
 ##
-## Cycle 10 unification: parse() and parseAll() now drive
-## parseDocumentWith[DocBuilder] from typed_parser.nim + doc_builder.nim.
-## The hand-written recursive descent is gone — one grammar, one
-## conformance moat, two error-handling modes (single-shot via parse()
-## with errorBuf = nil; accumulating via parseAll() with errorBuf set).
+## `parse()` and `parseAll()` both drive `parseDocumentWith[DocBuilder]`
+## from `typed_parser` + `doc_builder` — one grammar, two error-handling
+## modes: single-shot via `parse()` (returns first error), accumulating
+## via `parseAll()` (returns partial doc + every error encountered).
 ##
 ## ## Grammar (informal)
 ##

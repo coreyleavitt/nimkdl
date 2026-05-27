@@ -10,7 +10,7 @@
 ## ## Usage
 ##
 ## ```nim
-## import kdl
+## import nkdl
 ##
 ## type
 ##   ActionKind* = enum

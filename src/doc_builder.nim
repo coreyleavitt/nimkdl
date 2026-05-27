@@ -1,21 +1,10 @@
 ## DocBuilder — visitor that reconstructs a `KdlDoc` from the
 ## capability-driven visitor protocol in `typed_parser.nim`.
 ##
-## Cycle 9'.1 scope (this slice):
-##   - bare-ident node names
-##   - recursive children of arbitrary depth
-##   - no args, no props, no annotations, no slashdash yet
-##
-## Later slices add:
-##   - 9'.2: type annotations (vcNodeAnno + vcValueAnno)
-##   - 9'.3: quoted/raw-string node names
-##   - 9'.4: slashdash (vcSlashdash)
-##   - etc., until DocBuilder reproduces parser.nim's KdlDoc on every
-##     conformance fixture (cycle 9'.9).
-##
-## When cycle 10 lands, `parse()` in `parser.nim` becomes
-## `parseDocumentWith[DocBuilder]` and the hand-written recursive
-## descent in `parser.nim` is deleted.
+## Used by `parser.parse()` and `parser.parseAll()`. Most users go
+## through those entry points rather than instantiating DocBuilder
+## directly. The visitor surface is exposed for advanced consumers who
+## want to write custom AST builders against the same grammar walker.
 
 import ./[ast, intern, spans, lexer, typed_parser, numlit, encode, fnv, reserved]
 

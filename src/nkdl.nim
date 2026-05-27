@@ -1,31 +1,68 @@
-## nkdl — public API surface (KDL v2 parser + type-driven codegen).
+## nkdl — fast KDL v2 parser for Nim with compile-time-validated
+## typed decode and byte-lossless format preservation.
 ##
-## See ``README.md`` in this directory for spec coverage, worked examples,
-## pragma reference, and the explicit decisions not to implement KSL or KQL.
+## ## Install
 ##
-## ## Public surface
+## ```
+## nimble install nkdl
+## ```
 ##
-## `import nkdl` gives the curated public API. Tests and advanced users
-## that need internals (the lexer's `Token` / `TokenKind`, `lex`, the
-## interner's `Entry` shape, the grammar's `InterpState`/`ParseNode`,
-## etc.) import the specific submodule directly: ``import nkdl/lexer``,
-## ``import nkdl/grammar``, etc.
+## ## Quick start
 ##
-## ## Modules
+## ```nim
+## import nkdl
 ##
-## - ``spans``   — Position / Span / ParseError / Result[T, E]
-## - ``intern``  — SBO string interner (InternedStr + Interner)
-## - ``lexer``   — KDL v2 tokenizer (internals only — `lex` is not in
-##                 the public surface; users go through `parse`)
-## - ``ast``     — KdlDoc / KdlNode / KdlValue object variants
-## - ``parser``  — hand-written recursive descent (``parse``)
-## - ``encode``  — canonical encoder (``encode``)
-## - ``grammar`` — grammar-as-value + reference interpreter
-##                 (``referenceInterpret`` + combinators for advanced use)
-## - ``codegen`` — pragmas + ``deriveDecode`` macro + ``decode[T]`` +
-##                 ``embed[T]``
-## - ``path``    — typed schema-path DSL (``path`` macro + ``where`` /
-##                 ``first`` / ``only`` templates)
+## type Service {.kdlNode: "service".} = object
+##   name {.kdlArg.}: string
+##   port {.kdlProp.}: int
+##   enabled {.kdlProp.}: bool = true
+##
+## deriveDecode(Service)
+##
+## let r = decode[seq[Service]](readFile("services.kdl"))
+## if r.isErr:
+##   stderr.writeLine r.getErr.formatError(readFile("services.kdl"))
+##   quit 1
+## for s in r.get:
+##   if s.enabled: echo s.name, " :", s.port
+## ```
+##
+## The same file can be embedded at compile time so a parse error fails
+## `nim c` rather than production:
+##
+## ```nim
+## const builtins = embed[seq[Service]]("services.kdl").get
+## ```
+##
+## ## Public API map
+##
+## | Operation | Entry point | Module |
+## |-----------|-------------|--------|
+## | Parse text → AST | `parse(src) -> Result[KdlDoc, ParseError]` | `parser` |
+## | Multi-error parse | `parseAll(src) -> (doc, errors)` | `parser` |
+## | Typed decode | `decode[T](src) -> Result[T, ParseError]` | `codegen` |
+## | Typed-direct decode | `parseInto[T](src) -> Result[T, ParseError]` | `typed_parser` |
+## | Compile-time embed | `embed[T]("path")` | `codegen` |
+## | Encode AST → text | `encode(doc, mode = emPreserve) -> string` | `encode` |
+## | Typed-direct encode | `encodeFrom[T](v) -> Result[string, ParseError]` | `codegen` |
+## | Typed query DSL | `path(items, [pred].field.chain)` | `path` |
+## | Differential oracle | `referenceInterpret(src)` | `grammar` |
+##
+## ## Pragmas
+##
+## Type-level: ``{.kdlNode: "name".}``.
+##
+## Field-level: ``{.kdlArg.}``, ``{.kdlProp.}``, ``{.kdlChild.}``,
+## ``{.kdlSkip.}``, ``{.kdlRename: "x".}``, ``{.kdlReserved: "ipv4".}``.
+##
+## Native Nim 2.x field defaults (``field: type = expr``) double as
+## fallback values for absent KDL props.
+##
+## ## See also
+##
+## - [BENCHMARK.md](https://github.com/coreyleavitt/nkdl/blob/main/BENCHMARK.md) — cross-impl perf + methodology.
+## - [README.md](https://github.com/coreyleavitt/nkdl) — overview, install, vs the alternatives.
+## - [kdl.dev](https://kdl.dev/) — the KDL v2 spec.
 
 import ./spans
 import ./intern

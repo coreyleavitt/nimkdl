@@ -16,7 +16,7 @@
 ## much; interning a 1KB rule description is pointless overhead.
 ##
 ## **Numbers store as int64 or float64.** KDL v2 numbers are conceptually
-## unbounded, but no real amoxtli config has integers outside int64 range
+## unbounded, but no real-world config has integers outside int64 range
 ## (timestamps, byte counts, depth limits all fit). Numbers larger than int64
 ## are filed as v0.2 work (`kvBigInt` variant carrying raw source text).
 ##
