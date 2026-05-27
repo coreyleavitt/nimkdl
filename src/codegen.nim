@@ -1131,31 +1131,6 @@ proc encodeNode*[T: object](v: T, doc: var KdlDoc):
   mixin kdlEncodeImpl
   kdlEncodeImpl(v, doc)
 
-proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
-  ## Render a typed value as KDL text. Default `mode` is `emPretty`
-  ## (multi-line, indented) — the right default for the typical call
-  ## site, which is constructing a value from scratch in Nim and
-  ## emitting it. `emCompact` produces single-line, `;`-separated
-  ## output. `emPreserve` falls through to canonical here because a
-  ## freshly-constructed value has no sourceText to preserve.
-  ##
-  ## Subject to Layer 1 `kdlReserved` validation — see `encodeNode`.
-  ##
-  ## **Error diagnostics:** the returned ParseError's `span` is
-  ## synthetic (`pointSpan(StartPosition)`) — there's no source file
-  ## to anchor it to. The useful diagnostic lives in `hint`, which
-  ## is prefixed with `TypeName.fieldName` so callers can point
-  ## directly at the offending field.
-  ##
-  ## `T` must be declared inside a `kdl:` block.
-  mixin kdlEncodeImpl
-  var doc = newDoc()
-  let nRes = encodeNode(v, doc)
-  if nRes.isErr:
-    return err[string, ParseError](nRes.getErr)
-  doc.nodes.add(nRes.get)
-  ok[string, ParseError](kdlEncode.encode(doc, mode))
-
 proc encodeFrom*[T: object](v: T, mode = emPretty):
     Result[string, ParseError] =
   ## Typed-direct encode. Skips KdlNode + KdlDoc construction; the
@@ -1188,20 +1163,33 @@ proc encodeFrom*[T: object](vs: seq[T], mode = emPretty):
     if r.isErr: return err[string, ParseError](r.getErr)
   ok[string, ParseError](buf)
 
-proc encode*[T](vs: seq[T], mode = emPretty): Result[string, ParseError] =
+proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
+  ## Render a typed value as KDL text. Default `mode` is `emPretty`
+  ## (multi-line, indented). `emCompact` produces single-line, `;`-
+  ## separated output. `emPreserve` falls through to `emPretty` here —
+  ## a freshly-constructed typed value has no sourceText to preserve.
+  ##
+  ## Subject to Layer 1 `kdlReserved` validation: a typed value with a
+  ## kdlReserved pragma whose content doesn't match its tag returns
+  ## `Err(peReservedTypeInvalid, ...)`.
+  ##
+  ## **Error diagnostics:** the returned ParseError's `span` is
+  ## synthetic (`pointSpan(StartPosition)`) — there's no source file
+  ## to anchor it to. The useful diagnostic lives in `hint`, which is
+  ## prefixed with `TypeName.fieldName` so callers can point directly
+  ## at the offending field.
+  ##
+  ## `T` must be declared inside a `kdl:` block.
+  encodeFrom(v, mode)
+
+proc encode*[T: object](vs: seq[T], mode = emPretty):
+    Result[string, ParseError] =
   ## Render a sequence of typed values as KDL text: each element
   ## becomes one top-level node. Symmetric with `decode[seq[T]]`.
   ## Stops at the first `kdlReserved` validation failure.
   ##
   ## `T` must be declared inside a `kdl:` block.
-  mixin kdlEncodeImpl
-  var doc = newDoc()
-  for v in vs:
-    let nRes = encodeNode(v, doc)
-    if nRes.isErr:
-      return err[string, ParseError](nRes.getErr)
-    doc.nodes.add(nRes.get)
-  ok[string, ParseError](kdlEncode.encode(doc, mode))
+  encodeFrom(vs, mode)
 
 # ---------------------------------------------------------------------------
 # parse[T]
