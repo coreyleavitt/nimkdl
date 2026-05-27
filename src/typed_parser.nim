@@ -182,17 +182,28 @@ proc parseNodeWith[V](source: string, visitor: var V,
   handleNodeAnno()       # optional (type) before node name
 
   let nameTok = peek()
-  if nameTok.kind != tkIdent:
+  if nameTok.kind notin {tkIdent, tkString, tkRawString}:
     return err[void, ParseError](initError(peParseExpected, nameTok.span,
       "expected node name"))
   inc cursor
 
-  # Read name bytes directly from source — skips interner.lookup
-  # roundtrip. Safe because tkIdent is always a bare ident.
-  let nameStart = nameTok.span.start.offset
-  let nameLast = nameTok.span.finish.offset - 1
-  let bRes = visitor.visitBeginNode(source.toOpenArray(nameStart, nameLast),
-                                     nameTok.span)
+  # Bare ident → read from source (skips interner roundtrip).
+  # Quoted/raw → use the lexer's payload table (escapes already
+  # resolved). The visitor sees the SAME unescaped bytes either way.
+  let bRes =
+    case nameTok.kind
+    of tkIdent:
+      let nameStart = nameTok.span.start.offset
+      let nameLast = nameTok.span.finish.offset - 1
+      visitor.visitBeginNode(source.toOpenArray(nameStart, nameLast),
+                              nameTok.span)
+    of tkString:
+      let p = stream.stringPayloads[nameTok.strIdx]
+      visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
+    of tkRawString:
+      let p = stream.rawStringPayloads[nameTok.rawIdx]
+      visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
+    else: ok(void, ParseError)   # unreachable (guarded above)
   if bRes.isErr: return bRes
 
   var argIdx = 0

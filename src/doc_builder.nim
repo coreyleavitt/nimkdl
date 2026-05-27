@@ -83,41 +83,55 @@ proc visitBeginNode*(b: var DocBuilder, nameStr: openArray[char],
   b.pendingNodeAnno = InvalidInterned
   ok(void, ParseError)
 
-proc visitArg*(b: var DocBuilder, idx: int, tok: Token,
-               stream: TokenStream): Result[void, ParseError] =
-  var val = case tok.kind
-    of tkString:    newStringValue(stream.stringPayloads[tok.strIdx], tok.span)
-    of tkRawString: newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span)
-    of tkKeyword:
-      case tok.keyword
+proc buildValue(b: DocBuilder, tok: Token,
+                stream: TokenStream): Result[KdlValue, ParseError] =
+  ## Token → KdlValue. Single source of truth shared by visitArg + visitProp.
+  ## Reads bare-ident bytes from b.source (interner is disabled in
+  ## parseDocumentWith, so tok.ident is InvalidInterned).
+  case tok.kind
+  of tkString:
+    ok[KdlValue, ParseError](
+      newStringValue(stream.stringPayloads[tok.strIdx], tok.span))
+  of tkRawString:
+    ok[KdlValue, ParseError](
+      newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span))
+  of tkKeyword:
+    let v = case tok.keyword
       of kwTrue:   newBoolValue(true, tok.span)
       of kwFalse:  newBoolValue(false, tok.span)
       of kwNull:   newNullValue(tok.span)
       of kwInf:    newFloatValue(Inf, tok.span)
       of kwNegInf: newFloatValue(NegInf, tok.span)
       of kwNan:    newFloatValue(NaN, tok.span)
-    of tkNumber:
-      let n = stream.numberPayloads[tok.numIdx]
-      if looksLikeFloat(n):
-        let fRes = decodeFloatFromToken(n, tok.span)
-        if fRes.isErr: return err[void, ParseError](fRes.getErr)
-        newFloatValue(fRes.get, tok.span)
-      else:
-        let iRes = decodeIntPromoting(n, tok.span)
-        if iRes.isErr: return err[void, ParseError](iRes.getErr)
-        let d = iRes.get
-        if d.fits64: newIntValue(d.intVal, tok.span)
-        else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
-    of tkIdent:
-      # Bare identifier as string value (KDL v2 §value). interner is
-      # disabled in parseDocumentWith; read bytes from source via span.
-      # Reserved-bareword guard lands in 9'.5.
-      let s = tok.span.start.offset
-      let f = tok.span.finish.offset - 1
-      newStringValue(b.source[s .. f], tok.span)
+    ok[KdlValue, ParseError](v)
+  of tkNumber:
+    let n = stream.numberPayloads[tok.numIdx]
+    if looksLikeFloat(n):
+      let fRes = decodeFloatFromToken(n, tok.span)
+      if fRes.isErr: return err[KdlValue, ParseError](fRes.getErr)
+      ok[KdlValue, ParseError](newFloatValue(fRes.get, tok.span))
     else:
-      return err[void, ParseError](initError(peParseExpected, tok.span,
-        "unsupported arg token kind"))
+      let iRes = decodeIntPromoting(n, tok.span)
+      if iRes.isErr: return err[KdlValue, ParseError](iRes.getErr)
+      let d = iRes.get
+      let v = if d.fits64: newIntValue(d.intVal, tok.span)
+              else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
+      ok[KdlValue, ParseError](v)
+  of tkIdent:
+    # Bare-ident as string value (KDL v2 §value). Reserved-bareword
+    # guard lands in 9'.5.
+    let s = tok.span.start.offset
+    let f = tok.span.finish.offset - 1
+    ok[KdlValue, ParseError](newStringValue(b.source[s .. f], tok.span))
+  else:
+    err[KdlValue, ParseError](initError(peParseExpected, tok.span,
+      "unsupported value token kind"))
+
+proc visitArg*(b: var DocBuilder, idx: int, tok: Token,
+               stream: TokenStream): Result[void, ParseError] =
+  let vRes = buildValue(b, tok, stream)
+  if vRes.isErr: return err[void, ParseError](vRes.getErr)
+  var val = vRes.get
   val.typeAnnotation = b.pendingValueAnno
   b.pendingValueAnno = InvalidInterned
   b.stack[^1].entries.add(KdlEntry(kind: keArgument, argValue: val,
@@ -127,35 +141,9 @@ proc visitArg*(b: var DocBuilder, idx: int, tok: Token,
 proc visitProp*(b: var DocBuilder, keyStr: openArray[char],
                 tok: Token, stream: TokenStream): Result[void, ParseError] =
   let key = b.doc.interner.intern(keyStr)
-  var val = case tok.kind
-    of tkString:    newStringValue(stream.stringPayloads[tok.strIdx], tok.span)
-    of tkRawString: newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span)
-    of tkKeyword:
-      case tok.keyword
-      of kwTrue:   newBoolValue(true, tok.span)
-      of kwFalse:  newBoolValue(false, tok.span)
-      of kwNull:   newNullValue(tok.span)
-      of kwInf:    newFloatValue(Inf, tok.span)
-      of kwNegInf: newFloatValue(NegInf, tok.span)
-      of kwNan:    newFloatValue(NaN, tok.span)
-    of tkNumber:
-      let n = stream.numberPayloads[tok.numIdx]
-      if looksLikeFloat(n):
-        let fRes = decodeFloatFromToken(n, tok.span)
-        if fRes.isErr: return err[void, ParseError](fRes.getErr)
-        newFloatValue(fRes.get, tok.span)
-      else:
-        let iRes = decodeIntPromoting(n, tok.span)
-        if iRes.isErr: return err[void, ParseError](iRes.getErr)
-        let d = iRes.get
-        if d.fits64: newIntValue(d.intVal, tok.span)
-        else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
-    of tkIdent:
-      let identStr = b.doc.interner.lookup(tok.ident)
-      newStringValue(identStr, tok.span)
-    else:
-      return err[void, ParseError](initError(peParseExpected, tok.span,
-        "unsupported prop value token kind"))
+  let vRes = buildValue(b, tok, stream)
+  if vRes.isErr: return err[void, ParseError](vRes.getErr)
+  var val = vRes.get
   val.typeAnnotation = b.pendingValueAnno
   b.pendingValueAnno = InvalidInterned
   b.stack[^1].entries.add(KdlEntry(kind: keProperty,

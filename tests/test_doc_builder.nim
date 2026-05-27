@@ -95,3 +95,21 @@ suite "DocBuilder type-annotation routing (cycle 9'.2)":
   test "arg string with type annotation":
     let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "arg_string_type.kdl")
     assertEquivalent(viaP, viaV)
+
+suite "DocBuilder quoted/raw node + prop names (cycle 9'.3)":
+
+  test "quoted node name \"0node\"":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "quoted_node_name.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "raw-string node name #\"\\node\"#":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "raw_node_name.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "quoted node type annotation (\"type/\")node":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "quoted_node_type.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "quoted prop name \"0prop\"=val":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "quoted_prop_name.kdl")
+    assertEquivalent(viaP, viaV)
