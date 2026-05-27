@@ -50,28 +50,36 @@ The headline bench measures parse-to-AST. Most consumers actually want parse-the
 A homogeneous fixture of 100 service nodes (~5KB,
 `benchmarks/fixtures/homogeneous-services-100.kdl`).
 
-| Parser           | Path                                | ops/s   | vs leader |
+| Parser           | Path                                | ops/s   | vs knus |
 |------------------|-------------------------------------|--------:|----------:|
-| **nimkdl**       | `parseInto[seq[Service]]` (typed-direct)  | **24,700**  | **1.00x (LEADER)** |
-| knus             | `parse::<Vec<Service>>` (typed)     | 23,200  | 1.07x slower |
-| nimkdl           | `decode[seq[Service]]` (AST + walk) | 10,300  | 2.40x slower |
-| knus             | `parse_ast` (AST, untyped)          | 2,700   | 9.1x slower |
-| facet-kdl        | `from_str::<ServiceDoc>`            | 1,000   | 25x slower |
-| kdl-rs           | `KdlDocument::parse_v2` (no typed path) | 1,000   | 25x slower |
+| nimkdl (peak, pre-validation)  | `parseInto[seq[Service]]`           | 24,700  | 1.07x faster |
+| **nimkdl (current)**           | `parseInto[seq[Service]]`           | **~22,000** | **parity** |
+| knus             | `parse::<Vec<Service>>` (typed)     | 23,200  | 1.00x |
+| nimkdl           | `decode[seq[Service]]` (AST + walk) | 10,300  | 2.20x slower |
+| knus             | `parse_ast` (AST, untyped)          | 2,700   | 9.0x slower |
+| facet-kdl        | `from_str::<ServiceDoc>`            | 1,000   | 23x slower |
+| kdl-rs           | `KdlDocument::parse_v2` (no typed path) | 1,000   | 23x slower |
 
-nimkdl now leads typed decode. `parseInto[seq[Service]]` is a new entry
-point built on a visitor-based architecture (issue #1) that skips
-`KdlDoc` construction when the target type is known. Same architectural
-pattern serde-json uses: the schema lets the parser write directly into
-typed fields, bypassing the intermediate representation.
+`parseInto[seq[Service]]` is built on a visitor-based architecture
+(issue #1) that skips `KdlDoc` construction when the target type is
+known — same pattern serde-json uses. The current ~22K is knus parity,
+down from a 24.7K peak. Why: cycle 9'.5+9'.7 added full KDL v2 grammar
+validation guards (reserved-bareword + bidi + precededByWs +
+entries-after-children + at-most-one-real-children-block). That's
+work the hand-written parser already did natively; with one grammar
+now serving both `parse()` and `parseInto[T]`, the typed path inherits
+it. The next move (cycle 11, macro-emit per-visitor state machine)
+folds the visitor and parser into a specialized hand-rolled per-type
+parser — what knus's serde-derive does internally — and gets us back
+ahead and beyond.
 
-Three perf wins closed the gap to knus once the architecture was in
-place. (1) `bytesEq` length-prefixed byte compare for property dispatch
-instead of `case openArrayToString(key) of "..."` — kills an alloc per
-prop. (2) Skip `interner.lookup` roundtrip for bare-ident node and prop
-names — read bytes directly from `source[tok.span]`. (3) `Interner.disabled`
-flag that no-ops `intern()` for the typed-direct caller (which never
-reads the handle); saves ~13.5% of CPU on `lex()`.
+Three perf wins drove the original gap-closing once the architecture
+was in place. (1) `bytesEq` length-prefixed byte compare for property
+dispatch instead of `case openArrayToString(key) of "..."` — kills an
+alloc per prop. (2) Skip `interner.lookup` roundtrip for bare-ident node
+and prop names — read bytes directly from `source[tok.span]`. (3)
+`Interner.disabled` flag that no-ops `intern()` for the typed-direct
+caller (which never reads the handle); saves ~13.5% of CPU on `lex()`.
 
 The older AST-based `decode[seq[Service]]` path stays for consumers that
 want the doc for mutation or format-preserving encode. It's now 2.4x
