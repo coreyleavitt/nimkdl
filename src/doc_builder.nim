@@ -24,17 +24,33 @@ type
     ## Visitor that produces a KdlDoc. State is a stack of currently-
     ## open KdlNode frames. visitBeginNode pushes; visitEndNode pops and
     ## attaches to the parent's children (or to doc.nodes at depth 0).
+    ##
+    ## Pending annotation slots are side-band: the parser emits
+    ## visitNodeTypeAnno BEFORE visitBeginNode, and visitValueTypeAnno
+    ## BEFORE the next visitArg / visitProp. The consuming method drains
+    ## the slot back to InvalidInterned.
     doc*: KdlDoc
     stack*: seq[KdlNode]
+    source*: string
+      ## Original input bytes. Needed to recover identifier bytes for
+      ## `tkIdent` arg/prop values — parseDocumentWith disables the
+      ## lex-side interner for typed-path perf, so the token's `ident`
+      ## handle is `InvalidInterned`; we read via the token's span instead.
+    pendingNodeAnno: InternedStr
+    pendingValueAnno: InternedStr
 
 template visitorCaps*(_: typedesc[DocBuilder]): set[VisitorCap] =
-  ## DocBuilder consumes the full event stream. Later slices add
-  ## vcNodeAnno, vcValueAnno, vcSlashdash as the corresponding routing
-  ## is wired into parseDocumentWith.
-  {vcArgs, vcProps, vcChildren}
+  ## DocBuilder consumes node-name annotations and value annotations
+  ## so it can faithfully reconstruct KdlNode.typeAnnotation and
+  ## KdlValue.typeAnnotation. Slashdash routing lands in 9'.4.
+  {vcArgs, vcProps, vcChildren, vcNodeAnno, vcValueAnno}
 
-proc newDocBuilder*(sourcePath = "<input>"): DocBuilder =
-  DocBuilder(doc: newDoc(sourcePath), stack: @[])
+proc newDocBuilder*(source: string = "", sourcePath = "<input>"): DocBuilder =
+  result = DocBuilder(doc: newDoc(sourcePath), stack: @[],
+                      source: source,
+                      pendingNodeAnno: InvalidInterned,
+                      pendingValueAnno: InvalidInterned)
+  result.doc.sourceText = source
 
 proc finish*(b: sink DocBuilder): KdlDoc =
   ## Caller invokes after `parseDocumentWith` returns ok. Returns the
@@ -46,19 +62,30 @@ proc finish*(b: sink DocBuilder): KdlDoc =
 # Visitor methods
 # ---------------------------------------------------------------------------
 
+proc visitNodeTypeAnno*(b: var DocBuilder, annoStr: openArray[char],
+                        annoSpan: Span): Result[void, ParseError] =
+  ## Stash for the next visitBeginNode to consume.
+  b.pendingNodeAnno = b.doc.interner.intern(annoStr)
+  ok(void, ParseError)
+
+proc visitValueTypeAnno*(b: var DocBuilder, annoStr: openArray[char],
+                         annoSpan: Span): Result[void, ParseError] =
+  ## Stash for the next visitArg / visitProp to consume.
+  b.pendingValueAnno = b.doc.interner.intern(annoStr)
+  ok(void, ParseError)
+
 proc visitBeginNode*(b: var DocBuilder, nameStr: openArray[char],
                      nodeSpan: Span): Result[void, ParseError] =
   let nameHandle = b.doc.interner.intern(nameStr)
   b.stack.add(KdlNode(name: nameHandle,
-                      typeAnnotation: InvalidInterned,
+                      typeAnnotation: b.pendingNodeAnno,
                       entries: @[], children: @[], span: nodeSpan))
+  b.pendingNodeAnno = InvalidInterned
   ok(void, ParseError)
 
 proc visitArg*(b: var DocBuilder, idx: int, tok: Token,
                stream: TokenStream): Result[void, ParseError] =
-  # 9'.1 scope: no args in test fixtures. Stub returns ok so test
-  # fixtures without args parse cleanly; real arg routing lands in 9'.2.
-  let val = case tok.kind
+  var val = case tok.kind
     of tkString:    newStringValue(stream.stringPayloads[tok.strIdx], tok.span)
     of tkRawString: newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span)
     of tkKeyword:
@@ -82,13 +109,17 @@ proc visitArg*(b: var DocBuilder, idx: int, tok: Token,
         if d.fits64: newIntValue(d.intVal, tok.span)
         else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
     of tkIdent:
-      # KDL v2 bare identifier as string value. Reserved-bareword guard
-      # lands in 9'.5; for 9'.1 we accept it as a string.
-      let identStr = b.doc.interner.lookup(tok.ident)
-      newStringValue(identStr, tok.span)
+      # Bare identifier as string value (KDL v2 §value). interner is
+      # disabled in parseDocumentWith; read bytes from source via span.
+      # Reserved-bareword guard lands in 9'.5.
+      let s = tok.span.start.offset
+      let f = tok.span.finish.offset - 1
+      newStringValue(b.source[s .. f], tok.span)
     else:
       return err[void, ParseError](initError(peParseExpected, tok.span,
-        "unsupported arg token kind for DocBuilder slice 9'.1"))
+        "unsupported arg token kind"))
+  val.typeAnnotation = b.pendingValueAnno
+  b.pendingValueAnno = InvalidInterned
   b.stack[^1].entries.add(KdlEntry(kind: keArgument, argValue: val,
                                     span: tok.span))
   ok(void, ParseError)
@@ -96,7 +127,7 @@ proc visitArg*(b: var DocBuilder, idx: int, tok: Token,
 proc visitProp*(b: var DocBuilder, keyStr: openArray[char],
                 tok: Token, stream: TokenStream): Result[void, ParseError] =
   let key = b.doc.interner.intern(keyStr)
-  let val = case tok.kind
+  var val = case tok.kind
     of tkString:    newStringValue(stream.stringPayloads[tok.strIdx], tok.span)
     of tkRawString: newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span)
     of tkKeyword:
@@ -124,7 +155,9 @@ proc visitProp*(b: var DocBuilder, keyStr: openArray[char],
       newStringValue(identStr, tok.span)
     else:
       return err[void, ParseError](initError(peParseExpected, tok.span,
-        "unsupported prop value token kind for DocBuilder slice 9'.1"))
+        "unsupported prop value token kind"))
+  val.typeAnnotation = b.pendingValueAnno
+  b.pendingValueAnno = InvalidInterned
   b.stack[^1].entries.add(KdlEntry(kind: keProperty,
                                     propName: key, propValue: val,
                                     span: tok.span))

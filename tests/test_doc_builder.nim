@@ -21,7 +21,7 @@ proc roundTrip(inputPath: string): tuple[viaParser, viaVisitor: KdlDoc] =
   doAssert pRes.isOk, "parser failed on " & inputPath & ": " & $pRes.getErr
   result.viaParser = pRes.get
 
-  var builder = newDocBuilder("test")
+  var builder = newDocBuilder(src, "test")
   let vRes = parseDocumentWith(src, builder)
   doAssert vRes.isOk, "visitor failed on " & inputPath & ": " & $vRes.getErr
   result.viaVisitor = builder.finish()
@@ -40,7 +40,7 @@ suite "DocBuilder tracer (cycle 9'.1)":
     check pRes.isOk
     let viaParser = pRes.get
 
-    var builder = newDocBuilder("test")
+    var builder = newDocBuilder(src, "test")
     let vRes = parseDocumentWith(src, builder)
     check vRes.isOk
     let viaVisitor = builder.finish()
@@ -51,7 +51,7 @@ suite "DocBuilder tracer (cycle 9'.1)":
     let src = "alpha\nbeta\ngamma\n"
     let pRes = parse(src)
     check pRes.isOk
-    var builder = newDocBuilder("test")
+    var builder = newDocBuilder(src, "test")
     let vRes = parseDocumentWith(src, builder)
     check vRes.isOk
     assertEquivalent(pRes.get, builder.finish())
@@ -60,7 +60,7 @@ suite "DocBuilder tracer (cycle 9'.1)":
     let src = "outer {\n  inner\n}\n"
     let pRes = parse(src)
     check pRes.isOk
-    var builder = newDocBuilder("test")
+    var builder = newDocBuilder(src, "test")
     let vRes = parseDocumentWith(src, builder)
     check vRes.isOk
     assertEquivalent(pRes.get, builder.finish())
@@ -73,7 +73,25 @@ suite "DocBuilder tracer (cycle 9'.1)":
     let src = "node {\n}\n"
     let pRes = parse(src)
     check pRes.isOk
-    var builder = newDocBuilder("test")
+    var builder = newDocBuilder(src, "test")
     let vRes = parseDocumentWith(src, builder)
     check vRes.isOk
     assertEquivalent(pRes.get, builder.finish())
+
+suite "DocBuilder type-annotation routing (cycle 9'.2)":
+
+  test "node type annotation (type)node":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "node_type.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "arg value type annotation node (type)arg":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "arg_type.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "prop value type annotation node key=(type)#true":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "prop_type.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "arg string with type annotation":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "arg_string_type.kdl")
+    assertEquivalent(viaP, viaV)

@@ -128,22 +128,58 @@ proc parseNodeWith[V](source: string, visitor: var V,
     if cursor + off < stream.tokens.len: stream.tokens[cursor + off]
     else: Token(kind: tkEof, span: pointSpan(StartPosition))
 
-  # Skip an optional `(IDENT)` type annotation. KDL v2 allows them
-  # before node names AND before any value (arg or prop).
-  # 9'.1 scope: still skipped, not routed. 9'.2 wires the cap gate.
-  template skipTypeAnno() =
+  # Optional `(IDENT|STRING|RAW_STRING)` type annotation. KDL v2 allows
+  # them before node names AND before any value (arg or prop). The
+  # `emit` parameter (compile-time bool) decides whether to fire the
+  # corresponding visitor method; either way the tokens are consumed.
+  #
+  # Bytes are read directly from source for tkIdent (interner is
+  # disabled on the lex side); payload tables for quoted forms.
+  template handleTypeAnno(emit: static bool, emitProc: untyped) =
     if peek().kind == tkLParen:
+      let lParenSpan = peek().span
       inc cursor
-      if peek().kind notin {tkIdent, tkString, tkRawString}:
-        return err[void, ParseError](initError(peParseExpected, peek().span,
+      let annoTok = peek()
+      if annoTok.kind notin {tkIdent, tkString, tkRawString}:
+        return err[void, ParseError](initError(peParseExpected, annoTok.span,
           "expected identifier or string inside type annotation"))
       inc cursor
       if peek().kind != tkRParen:
         return err[void, ParseError](initError(peParseExpected, peek().span,
           "expected ')' to close type annotation"))
+      let rParenSpan = peek().span
       inc cursor
+      when emit:
+        let annoSpan = initSpan(lParenSpan.start, rParenSpan.finish)
+        case annoTok.kind
+        of tkIdent:
+          let s = annoTok.span.start.offset
+          let l = annoTok.span.finish.offset - 1
+          let r = visitor.emitProc(source.toOpenArray(s, l), annoSpan)
+          if r.isErr: return r
+        of tkString:
+          let p = stream.stringPayloads[annoTok.strIdx]
+          let r = visitor.emitProc(p.toOpenArray(0, p.high), annoSpan)
+          if r.isErr: return r
+        of tkRawString:
+          let p = stream.rawStringPayloads[annoTok.rawIdx]
+          let r = visitor.emitProc(p.toOpenArray(0, p.high), annoSpan)
+          if r.isErr: return r
+        else: discard  # unreachable (guarded above)
 
-  skipTypeAnno()       # optional (type) before node name
+  template handleNodeAnno() =
+    when vcNodeAnno in caps:
+      handleTypeAnno(true, visitNodeTypeAnno)
+    else:
+      handleTypeAnno(false, visitNodeTypeAnno)
+
+  template handleValueAnno() =
+    when vcValueAnno in caps:
+      handleTypeAnno(true, visitValueTypeAnno)
+    else:
+      handleTypeAnno(false, visitValueTypeAnno)
+
+  handleNodeAnno()       # optional (type) before node name
 
   let nameTok = peek()
   if nameTok.kind != tkIdent:
@@ -161,7 +197,7 @@ proc parseNodeWith[V](source: string, visitor: var V,
 
   var argIdx = 0
   while true:
-    if peek().kind == tkLParen: skipTypeAnno()  # (type) prefix on arg value
+    if peek().kind == tkLParen: handleValueAnno()  # (type) prefix on arg value
     let t = peek()
     case t.kind
     of tkNewline, tkSemicolon, tkEof, tkRBrace:
@@ -203,7 +239,7 @@ proc parseNodeWith[V](source: string, visitor: var V,
       if peek(1).kind == tkEquals:
         let keyTok = peek()
         cursor += 2
-        skipTypeAnno()       # optional (type) before prop value
+        handleValueAnno()    # optional (type) before prop value
         let valueTok = peek()
         inc cursor
         when vcProps in caps:
