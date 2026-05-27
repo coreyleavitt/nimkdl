@@ -73,10 +73,27 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
     if cursor + off < stream.tokens.len: stream.tokens[cursor + off]
     else: Token(kind: tkEof, span: pointSpan(StartPosition))
 
+  # Skip an optional `(IDENT)` type annotation. KDL v2 allows them
+  # before node names AND before any value (arg or prop). The typed-
+  # direct path doesn't currently route annotations to the visitor —
+  # they're accepted and ignored.
+  template skipTypeAnno() =
+    if peek().kind == tkLParen:
+      inc cursor
+      if peek().kind notin {tkIdent, tkString, tkRawString}:
+        return err[void, ParseError](initError(peParseExpected, peek().span,
+          "expected identifier or string inside type annotation"))
+      inc cursor
+      if peek().kind != tkRParen:
+        return err[void, ParseError](initError(peParseExpected, peek().span,
+          "expected ')' to close type annotation"))
+      inc cursor
+
   while true:
     while peek().kind == tkNewline: inc cursor
     if peek().kind == tkEof: break
 
+    skipTypeAnno()       # optional (type) before node name
     let nameTok = peek()
     if nameTok.kind != tkIdent:
       return err[void, ParseError](initError(peParseExpected, nameTok.span,
@@ -91,6 +108,9 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
     var argIdx = 0
     var done = false
     while not done:
+      # A `(type)` annotation can prefix an arg value. (Prop keys
+      # can't be annotated; the annotation modifies a value.)
+      if peek().kind == tkLParen: skipTypeAnno()
       let t = peek()
       case t.kind
       of tkNewline, tkSemicolon, tkEof, tkRBrace:
@@ -111,6 +131,7 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
             return err[void, ParseError](initError(peParseExpected, peek().span,
               "expected `}` to close children block"))
           # recursive walk of one child node
+          skipTypeAnno()    # optional (type) before child node name
           let childTok = peek()
           if childTok.kind != tkIdent:
             return err[void, ParseError](initError(peParseExpected, childTok.span,
@@ -136,6 +157,7 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
                   of tkRawString: interner.intern(stream.rawStringPayloads[cKeyTok.rawIdx])
                   else: InvalidInterned
                 cursor += 2
+                skipTypeAnno()     # optional (type) before prop value
                 let cValTok = peek()
                 inc cursor
                 let cKeyStr = interner.lookup(cKeyHandle)
@@ -171,6 +193,7 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
             of tkRawString: interner.intern(stream.rawStringPayloads[keyTok.rawIdx])
             else: InvalidInterned
           cursor += 2
+          skipTypeAnno()       # optional (type) before prop value
           let valueTok = peek()
           inc cursor
           let keyStr = interner.lookup(keyHandle)

@@ -35,6 +35,7 @@ import ./encode
 import ./grammar
 import ./codegen
 import ./path
+import ./typed_parser
 # Note: ./lexer NOT imported here on purpose — keeps Token / TokenKind /
 # Lexer / lex out of the `import kdl` namespace. They're still accessible
 # via `import kdl/lexer` for tests and advanced consumers.
@@ -73,5 +74,8 @@ export codegen
 
 # Path DSL — full public surface.
 export path
+
+# Typed-direct path (issue #1) — parseInto[T] + parseWith[V].
+export typed_parser
 
 const KdlLibVersion* = "0.1.0"

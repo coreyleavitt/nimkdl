@@ -249,3 +249,48 @@ server "deploy-svc" {
     check r.isOk
     check r.get.name == "empty"
     check r.get.actions.len == 0
+
+# Cycle 8 slice 1: float field type.
+type Metric {.kdlNode: "metric".} = object
+  name {.kdlArg.}: string
+  weight {.kdlProp.}: float
+  ratio {.kdlProp.}: float = 1.0
+
+deriveVisitor(Metric)
+
+suite "typed parser — float fields (cycle 8 slice 1)":
+  test "decodes float prop":
+    let r = parseInto[Metric]("metric \"cpu\" weight=0.75 ratio=2.5")
+    check r.isOk
+    check r.get.name == "cpu"
+    check r.get.weight == 0.75
+    check r.get.ratio == 2.5
+
+  test "float field default fires":
+    let r = parseInto[Metric]("metric \"mem\" weight=0.5")
+    check r.isOk
+    check r.get.weight == 0.5
+    check r.get.ratio == 1.0
+
+  test "integer literal accepted in float field":
+    let r = parseInto[Metric]("metric \"x\" weight=2")
+    check r.isOk
+    check r.get.weight == 2.0
+
+# Cycle 8 slice 2: type annotations on values and on nodes.
+# Parser must skip them gracefully. Decoder uses the value as-is.
+suite "typed parser — type annotations (cycle 8 slice 2)":
+  test "type annotation on int value is accepted":
+    let r = parseInto[ServiceTyped]("service \"x\" port=(i32)8443")
+    check r.isOk
+    check r.get.port == 8443
+
+  test "type annotation on string arg is accepted":
+    let r = parseInto[ServiceTyped]("service (svc)\"x\" port=80")
+    check r.isOk
+    check r.get.name == "x"
+
+  test "type annotation on node name is accepted":
+    let r = parseInto[ServiceTyped]("(deployment)service \"x\" port=80")
+    check r.isOk
+    check r.get.name == "x"

@@ -1818,10 +1818,26 @@ macro deriveVisitor*(typ: typedesc): untyped =
                 `fieldLabel` & "`"))
             `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
             `seenStmt`
+        of "float", "float64":
+          quote do:
+            if `tokIdent`.kind != tkNumber:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected number for `" &
+                `fieldLabel` & "`"))
+            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+            if looksLikeFloat(n):
+              let d = decodeFloatFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              `bIdent`.result.`nimName` = d.get
+            else:
+              let d = decodeIntFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              `bIdent`.result.`nimName` = float(d.get)
+            `seenStmt`
         else:
           quote do:
             return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported arg type (cycle 2 scope)"))
+              `tokIdent`.span, "unsupported arg type for typed-direct path"))
       argCase.add(newNimNode(nnkOfBranch).add(lit).add(assignment))
       inc argSeen
   argCase.add(newNimNode(nnkElse).add quote do:
@@ -1907,10 +1923,26 @@ macro deriveVisitor*(typ: typedesc): untyped =
                 `fieldLabel` & "`"))
             `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
             `seenStmt`
+        of "float", "float64":
+          quote do:
+            if `tokIdent`.kind != tkNumber:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected number for `" &
+                `fieldLabel` & "`"))
+            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+            if looksLikeFloat(n):
+              let d = decodeFloatFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              `bIdent`.result.`nimName` = d.get
+            else:
+              let d = decodeIntFromToken(n, `tokIdent`.span)
+              if d.isErr: return err[void, ParseError](d.getErr)
+              `bIdent`.result.`nimName` = float(d.get)
+            `seenStmt`
         else:
           quote do:
             return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported prop type (cycle 2 scope)"))
+              `tokIdent`.span, "unsupported prop type for typed-direct path"))
       propCase.add(newNimNode(nnkOfBranch).add(kdlName).add(assignment))
   # Strict default per Decision 1: unknown property is an error.
   propCase.add(newNimNode(nnkElse).add quote do:
