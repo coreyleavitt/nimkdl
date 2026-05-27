@@ -1476,7 +1476,7 @@ proc encodeNode*[T: object](v: T, doc: var KdlDoc):
   ## kdlReserved pragma whose content doesn't match its tag returns
   ## `Err(peReservedTypeInvalid, ...)`.
   ##
-  ## Requires `deriveEncode(T)` to have been called.
+  ## `T` must be declared inside a `kdl:` block.
   mixin kdlEncodeImpl
   kdlEncodeImpl(v, doc)
 
@@ -1496,7 +1496,7 @@ proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
   ## is prefixed with `TypeName.fieldName` so callers can point
   ## directly at the offending field.
   ##
-  ## Requires `deriveEncode(T)` to have been called.
+  ## `T` must be declared inside a `kdl:` block.
   mixin kdlEncodeImpl
   var doc = newDoc()
   let nRes = encodeNode(v, doc)
@@ -1514,7 +1514,7 @@ proc encodeFrom*[T: object](v: T): Result[string, ParseError] =
   ## Output matches `encode(v, emPretty).get` byte-for-byte. Returns Err
   ## on kdlReserved validation failure (mirrors `encode[T]`).
   ##
-  ## Requires `deriveEncode(T)` to have been called.
+  ## `T` must be declared inside a `kdl:` block.
   mixin kdlEncodeIntoImpl
   var buf = newStringOfCap(64)
   let r = kdlEncodeIntoImpl(v, buf)
@@ -1526,7 +1526,7 @@ proc encodeFrom*[T: object](vs: seq[T]): Result[string, ParseError] =
   ## separated. Symmetric with `parseInto[seq[T]]`. Stops at the first
   ## kdlReserved validation failure.
   ##
-  ## Requires `deriveEncode(T)` to have been called.
+  ## `T` must be declared inside a `kdl:` block.
   mixin kdlEncodeIntoImpl
   var buf = newStringOfCap(64 * vs.len + 32)
   for v in vs:
@@ -1539,7 +1539,7 @@ proc encode*[T](vs: seq[T], mode = emPretty): Result[string, ParseError] =
   ## becomes one top-level node. Symmetric with `decode[seq[T]]`.
   ## Stops at the first `kdlReserved` validation failure.
   ##
-  ## Requires `deriveEncode(T)` to have been called.
+  ## `T` must be declared inside a `kdl:` block.
   mixin kdlEncodeImpl
   var doc = newDoc()
   for v in vs:
@@ -1627,7 +1627,7 @@ template embed*[T](path: static[string]): Result[T, ParseError] =
   embedAux(T, path, instantiationInfo(fullPaths = true).filename)
 
 proc kdlNodeNameImpl*(typ: typedesc): string =
-  ## Placeholder — `deriveDecode(T)` emits a typedesc[T] overload that
+  ## Placeholder — the `kdl:` block emits a typedesc[T] overload that
   ## returns the actual node name (per `{.kdlNode.}` pragma or
   ## type-name-lowercased fallback). This base version exists only so
   ## generic `parse[T]` typechecks when called on a type without a
@@ -1647,10 +1647,10 @@ proc decode*[T](source: string,
   ## - Otherwise, finds the single top-level node named per T's
   ##   `kdlNode` pragma and decodes it.
   ##
-  ## Requires `deriveDecode(T)` (or `deriveDecode(U)` if T=seq[U]) to have
-  ## been instantiated previously to provide the `kdlDecodeImpl` and
-  ## `kdlNodeNameImpl` overloads.
-  # `mixin` so the per-type overloads emitted by `deriveDecode` in the
+  ## `T` (or `U` if `T = seq[U]`) must be declared inside a `kdl:`
+  ## block, which generates the `kdlDecodeImpl` + `kdlNodeNameImpl`
+  ## overloads this proc dispatches to.
+  # `mixin` so the per-type overloads emitted by the `kdl:` block in the
   # caller's scope are resolved at instantiation time, not at the point
   # this generic proc is defined.
   mixin kdlDecodeImpl, kdlNodeNameImpl
