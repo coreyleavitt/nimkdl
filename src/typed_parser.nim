@@ -43,10 +43,11 @@
 
 import ./[lexer, intern, spans]
 
-const MaxParserDepth = 256
-  ## Maximum recursion depth through `{ children }` blocks. Matches
-  ## `parser.MaxParserDepth` (kept private to avoid ambiguity with the
-  ## parser's export — cycle 10 will unify them into one source).
+const MaxParserDepthValue* = 256
+  ## Maximum recursion depth through `{ children }` blocks. Re-exported
+  ## as `parser.MaxParserDepth` (re-export through a different name to
+  ## avoid the symbol clash when both modules are imported via `kdl`).
+const MaxParserDepth = MaxParserDepthValue
 
 type
   VisitorCap* = enum
@@ -75,6 +76,53 @@ func bytesEq*(s: openArray[char], lit: static string): bool
     if s[i] != lit[i]: return false
   true
 
+# ---------------------------------------------------------------------------
+# Recovery helpers (accumulating-mode only — used by parseAllWith)
+# ---------------------------------------------------------------------------
+
+proc skipToRecovery(stream: TokenStream, cursor: var int) {.noSideEffect.} =
+  ## Top-level node-level recovery: advance past the failed construct,
+  ## stop at + consume the next node terminator (newline, `;`, `}`, EOF).
+  while cursor < stream.tokens.len:
+    let k = stream.tokens[cursor].kind
+    if k == tkEof: return
+    if k == tkRBrace: return  # let the enclosing children loop handle
+    inc cursor
+    if k == tkNewline or k == tkSemicolon: return
+
+proc skipToBlockBoundary(stream: TokenStream, cursor: var int)
+    {.noSideEffect.} =
+  ## Children-block recovery: balanced-brace-aware skip. Stops at a
+  ## newline / `;` at depth 0 (consumed) or at the current scope's
+  ## closing `}` / EOF (not consumed).
+  var depth = 0
+  while cursor < stream.tokens.len:
+    let k = stream.tokens[cursor].kind
+    if k == tkEof: return
+    if depth == 0 and k == tkRBrace: return
+    if depth == 0 and (k == tkNewline or k == tkSemicolon):
+      inc cursor
+      return
+    if k == tkLBrace: inc depth
+    elif k == tkRBrace: dec depth
+    inc cursor
+
+proc skipToEntryBoundary(stream: TokenStream, cursor: var int)
+    {.noSideEffect.} =
+  ## Entry-level recovery inside a node: advance until the next safe
+  ## resume position — a node terminator OR a fresh entry-start token.
+  ## Doesn't consume terminators (the entry loop's normal break handles
+  ## them). Forward progress is the caller's responsibility.
+  while cursor < stream.tokens.len:
+    let k = stream.tokens[cursor].kind
+    if k in {tkNewline, tkSemicolon, tkLBrace, tkRBrace, tkEof}: return
+    # An entry-start token preceded by whitespace = safe resume point.
+    if stream.tokens[cursor].precededByWs and
+       k in {tkIdent, tkString, tkRawString, tkNumber, tkKeyword,
+             tkLParen, tkSlashDash}:
+      return
+    inc cursor
+
 proc parseInto*[T](source: string, sourcePath = "<input>"):
     Result[T, ParseError] =
   ## Typed entry point. Resolves the per-type visitor via
@@ -93,23 +141,34 @@ proc parseInto*[T](source: string, sourcePath = "<input>"):
 
 proc parseNodeWith[V](source: string, visitor: var V,
                       stream: TokenStream, cursor: var int,
-                      skip: bool = false, depth: int = 0):
+                      skip: bool = false, depth: int = 0,
+                      errorBuf: ptr seq[ParseError] = nil):
     Result[void, ParseError] {.noSideEffect.}
 
 proc parseDocumentWith*[V](source: string, visitor: var V,
-                           sourcePath = "<input>"):
+                           sourcePath = "<input>",
+                           errorBuf: ptr seq[ParseError] = nil):
     Result[void, ParseError] {.noSideEffect.} =
   ## Walks every top-level node in `source` through `visitor`.
+  ##
   ## A leading `/-` slashdash-marks the next node as discarded — its
   ## tokens are still parsed (so syntax errors inside it surface), but
   ## no visitor events fire for it.
+  ##
+  ## `errorBuf` (default nil) — when non-nil, switches to accumulating
+  ## mode: lex errors and parseNodeWith failures are pushed to the
+  ## buffer and the parser re-syncs at the next node terminator to keep
+  ## going (parseAll's contract). When nil, the first error returns
+  ## immediately (parse's contract).
   mixin visitorCaps
   var interner = initInterner()
   interner.disabled = true   # visitors read bytes from source directly
   let stream = lex(source, interner)
   for t in stream.tokens:
     if t.kind == tkError:
-      return err[void, ParseError](stream.errorPayloads[t.errIdx])
+      if errorBuf.isNil:
+        return err[void, ParseError](stream.errorPayloads[t.errIdx])
+      errorBuf[].add(stream.errorPayloads[t.errIdx])
 
   var cursor = 0
   template peek(off = 0): Token =
@@ -117,27 +176,36 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
     else: Token(kind: tkEof, span: pointSpan(StartPosition))
 
   while true:
-    # Inter-node separators: newline AND semicolon.
     while peek().kind == tkNewline or peek().kind == tkSemicolon: inc cursor
     var skipNode = false
     if peek().kind == tkSlashDash:
       let sdSpan = peek().span
       inc cursor
-      while peek().kind == tkNewline: inc cursor  # /- crosses newlines
+      while peek().kind == tkNewline: inc cursor
       skipNode = true
       if peek().kind == tkEof:
-        return err[void, ParseError](initError(peParseExpected, sdSpan,
+        if errorBuf.isNil:
+          return err[void, ParseError](initError(peParseExpected, sdSpan,
+            "'/-' must be followed by a node"))
+        errorBuf[].add(initError(peParseExpected, sdSpan,
           "'/-' must be followed by a node"))
+        break
     if peek().kind == tkEof: break
+    let savedCursor = cursor
     let r = parseNodeWith(source, visitor, stream, cursor,
-                          skip = skipNode, depth = 0)
-    if r.isErr: return r
+                          skip = skipNode, depth = 0, errorBuf = errorBuf)
+    if r.isErr:
+      if errorBuf.isNil: return r
+      errorBuf[].add(r.getErr)
+      if cursor == savedCursor: inc cursor
+      skipToRecovery(stream, cursor)
 
   ok(void, ParseError)
 
 proc parseNodeWith[V](source: string, visitor: var V,
                       stream: TokenStream, cursor: var int,
-                      skip: bool = false, depth: int = 0):
+                      skip: bool = false, depth: int = 0,
+                      errorBuf: ptr seq[ParseError] = nil):
     Result[void, ParseError] {.noSideEffect.} =
   ## Parse one node + its entries + (recursively) its children.
   ## When `skip` is true, tokens are still parsed (preserving syntax-
@@ -158,19 +226,36 @@ proc parseNodeWith[V](source: string, visitor: var V,
   # whether the event can fire at all (compile-time); `noEmit` lets the
   # caller suppress emission per-call (runtime, used for slashdash'd
   # entries within an otherwise emitting parse).
-  template handleTypeAnno(canEmit: static bool, emitProc: untyped,
+  # `inLoop: static bool` — when true, errors recover via push+skip+
+  # continue (entry-level); when false, errors return immediately
+  # (caller handles node-level recovery).
+  template handleTypeAnno(canEmit, inLoop: static bool, emitProc: untyped,
                           noEmit: bool) =
     if peek().kind == tkLParen:
       let lParenSpan = peek().span
       inc cursor
       let annoTok = peek()
       if annoTok.kind notin {tkIdent, tkString, tkRawString}:
-        return err[void, ParseError](initError(peParseExpected, annoTok.span,
-          "expected identifier or string inside type annotation"))
+        let e = initError(peParseExpected, annoTok.span,
+          "expected identifier or string inside type annotation")
+        when inLoop:
+          if errorBuf.isNil: return err[void, ParseError](e)
+          errorBuf[].add(e)
+          skipToEntryBoundary(stream, cursor)
+          continue
+        else:
+          return err[void, ParseError](e)
       inc cursor
       if peek().kind != tkRParen:
-        return err[void, ParseError](initError(peParseExpected, peek().span,
-          "expected ')' to close type annotation"))
+        let e = initError(peParseExpected, peek().span,
+          "expected ')' to close type annotation")
+        when inLoop:
+          if errorBuf.isNil: return err[void, ParseError](e)
+          errorBuf[].add(e)
+          skipToEntryBoundary(stream, cursor)
+          continue
+        else:
+          return err[void, ParseError](e)
       let rParenSpan = peek().span
       inc cursor
       when canEmit:
@@ -194,15 +279,15 @@ proc parseNodeWith[V](source: string, visitor: var V,
 
   template handleNodeAnno(noEmit: bool) =
     when vcNodeAnno in caps:
-      handleTypeAnno(true, visitNodeTypeAnno, noEmit)
+      handleTypeAnno(true, false, visitNodeTypeAnno, noEmit)
     else:
-      handleTypeAnno(false, visitNodeTypeAnno, noEmit)
+      handleTypeAnno(false, false, visitNodeTypeAnno, noEmit)
 
   template handleValueAnno(noEmit: bool) =
     when vcValueAnno in caps:
-      handleTypeAnno(true, visitValueTypeAnno, noEmit)
+      handleTypeAnno(true, true, visitValueTypeAnno, noEmit)
     else:
-      handleTypeAnno(false, visitValueTypeAnno, noEmit)
+      handleTypeAnno(false, true, visitValueTypeAnno, noEmit)
 
   handleNodeAnno(skip)   # optional (type) before node name
 
@@ -320,9 +405,16 @@ proc parseNodeWith[V](source: string, visitor: var V,
             return err[void, ParseError](initError(peParseExpected, sdSpan,
               "'/-' must be followed by a child node"))
         when vcChildren in caps:
+          let savedCursor = cursor
           let cRes = parseNodeWith(source, visitor, stream, cursor,
-                                   skip = innerSkip, depth = depth + 1)
-          if cRes.isErr: return cRes
+                                   skip = innerSkip, depth = depth + 1,
+                                   errorBuf = errorBuf)
+          if cRes.isErr:
+            if errorBuf.isNil: return cRes
+            errorBuf[].add(cRes.getErr)
+            if cursor == savedCursor: inc cursor
+            skipToBlockBoundary(stream, cursor)
+            continue
         else:
           # Cap absent — walk and discard without recursion.
           var depth = 1
@@ -343,13 +435,23 @@ proc parseNodeWith[V](source: string, visitor: var V,
       # slice 9'.7). Loop to continue eating remaining /-{} blocks.
       continue
     of tkIdent, tkString, tkRawString:
-      # Entry-shape validation (fires only on actual entry tokens).
+      # Entry-shape validation. In accumulating mode, push the err and
+      # skip to entry boundary so the node keeps going with its remaining
+      # entries (matches parser.nim's parseAll behavior).
       if not sawSlashdash and not entryStartTok.precededByWs:
-        return err[void, ParseError](initError(peParseExpected,
-          entryStartTok.span, "whitespace required before this entry"))
+        let e = initError(peParseExpected, entryStartTok.span,
+          "whitespace required before this entry")
+        if errorBuf.isNil: return err[void, ParseError](e)
+        errorBuf[].add(e)
+        skipToEntryBoundary(stream, cursor)
+        continue
       if seenChildrenBlock:
-        return err[void, ParseError](initError(peParseUnexpected, t.span,
-          "entries are not permitted after a children block"))
+        let e = initError(peParseUnexpected, t.span,
+          "entries are not permitted after a children block")
+        if errorBuf.isNil: return err[void, ParseError](e)
+        errorBuf[].add(e)
+        skipToEntryBoundary(stream, cursor)
+        continue
       if peek(1).kind == tkEquals:
         if hadValueAnno:
           return err[void, ParseError](initError(peParseExpected, t.span,
@@ -378,7 +480,11 @@ proc parseNodeWith[V](source: string, visitor: var V,
             if not entrySkip:
               let pRes = visitor.visitProp(source.toOpenArray(ks, kl),
                                           valueTok, stream, entrySpan)
-              if pRes.isErr: return pRes
+              if pRes.isErr:
+                if errorBuf.isNil: return pRes
+                errorBuf[].add(pRes.getErr)
+                skipToEntryBoundary(stream, cursor)
+                continue
         of tkString:
           let p = stream.stringPayloads[keyTok.strIdx]
           if containsBidiControl(p):
@@ -388,7 +494,11 @@ proc parseNodeWith[V](source: string, visitor: var V,
             if not entrySkip:
               let pRes = visitor.visitProp(p.toOpenArray(0, p.high),
                                           valueTok, stream, entrySpan)
-              if pRes.isErr: return pRes
+              if pRes.isErr:
+                if errorBuf.isNil: return pRes
+                errorBuf[].add(pRes.getErr)
+                skipToEntryBoundary(stream, cursor)
+                continue
         of tkRawString:
           let p = stream.rawStringPayloads[keyTok.rawIdx]
           if containsBidiControl(p):
@@ -398,7 +508,11 @@ proc parseNodeWith[V](source: string, visitor: var V,
             if not entrySkip:
               let pRes = visitor.visitProp(p.toOpenArray(0, p.high),
                                           valueTok, stream, entrySpan)
-              if pRes.isErr: return pRes
+              if pRes.isErr:
+                if errorBuf.isNil: return pRes
+                errorBuf[].add(pRes.getErr)
+                skipToEntryBoundary(stream, cursor)
+                continue
         else: discard   # unreachable
       else:
         # Arg value. tkIdent as arg is a bare-id string per KDL v2,
@@ -426,11 +540,13 @@ proc parseNodeWith[V](source: string, visitor: var V,
         inc cursor
         when vcArgs in caps:
           if not entrySkip:
-            # Entry span = entryStartTok.start (covers `(type)` if present)
-            # through t.finish (the value token).
             let entrySpan = initSpan(entryStartTok.span.start, t.span.finish)
             let aRes = visitor.visitArg(argIdx, t, stream, entrySpan)
-            if aRes.isErr: return aRes
+            if aRes.isErr:
+              if errorBuf.isNil: return aRes
+              errorBuf[].add(aRes.getErr)
+              skipToEntryBoundary(stream, cursor)
+              continue
             inc argIdx
     of tkNumber, tkKeyword:
       if not sawSlashdash and not entryStartTok.precededByWs:
@@ -444,11 +560,23 @@ proc parseNodeWith[V](source: string, visitor: var V,
         if not entrySkip:
           let entrySpan = initSpan(entryStartTok.span.start, t.span.finish)
           let aRes = visitor.visitArg(argIdx, t, stream, entrySpan)
-          if aRes.isErr: return aRes
+          if aRes.isErr:
+            if errorBuf.isNil: return aRes
+            errorBuf[].add(aRes.getErr)
+            skipToEntryBoundary(stream, cursor)
+            continue
           inc argIdx
     else:
-      return err[void, ParseError](initError(peParseUnexpected, t.span,
-        "unexpected token in node entries"))
+      let e = initError(peParseUnexpected, t.span,
+        "unexpected token in node entries")
+      if errorBuf.isNil: return err[void, ParseError](e)
+      errorBuf[].add(e)
+      # Ensure forward progress — `else`-branch tokens (e.g. tkEquals)
+      # are NOT consumed by the case above, so skipToEntryBoundary would
+      # stop right here. Bump once first.
+      if cursor < stream.tokens.len: inc cursor
+      skipToEntryBoundary(stream, cursor)
+      continue
 
   if not skip:
     # Final span = start of first consumed token to end of last consumed
