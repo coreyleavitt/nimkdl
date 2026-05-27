@@ -1640,10 +1640,28 @@ macro deriveVisitor*(typ: typedesc): untyped =
   let nameStrIdent = ident("nameStr")
   let idxIdent = ident("idx")
 
-  # 1. Hidden builder type.
-  let builderType = quote do:
-    type `builderName` = object
-      result: `typSym`
+  # Track required fields (no defaultExpr → required).
+  # Assigns each required field a unique uint8 id used as a set element.
+  # Map: nimName -> id. Used by arg/prop to mark "seen" and by endNode
+  # to detect missing required fields.
+  var requiredIds: Table[string, int]   # fieldNimName -> id
+  var requiredNames: seq[string]        # ordered list for error msgs
+  for f in shape.shared:
+    if f.defaultExpr.kind == nnkEmpty and f.kind in {fkArg, fkAttr}:
+      requiredIds[f.nimName] = requiredNames.len
+      requiredNames.add(f.nimName)
+
+  # 1. Hidden builder type — adds `seen` set if any required fields exist.
+  let builderType =
+    if requiredNames.len > 0:
+      quote do:
+        type `builderName` = object
+          result: `typSym`
+          seen: set[uint8]
+    else:
+      quote do:
+        type `builderName` = object
+          result: `typSym`
 
   # 2. visitBeginNode: name match + apply field defaults.
   var defaultsBody = newStmtList()
@@ -1680,6 +1698,12 @@ macro deriveVisitor*(typ: typedesc): untyped =
       let lit = newLit(argSeen)
       let typeName = $f.typeNode
       let fieldLabel = newLit(typName & "." & f.nimName)
+      # Mark this field "seen" for the required-field check in endNode.
+      let seenStmt =
+        if requiredIds.hasKey(f.nimName):
+          let idLit = newLit(uint8(requiredIds[f.nimName]))
+          quote do: `bIdent`.seen.incl(`idLit`)
+        else: newStmtList()
       let assignment =
         case typeName
         of "string":
@@ -1688,9 +1712,11 @@ macro deriveVisitor*(typ: typedesc): untyped =
             of tkString:
               `bIdent`.result.`nimName` =
                 `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+              `seenStmt`
             of tkRawString:
               `bIdent`.result.`nimName` =
                 `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+              `seenStmt`
             else:
               return err[void, ParseError](initError(peTypeMismatch,
                 `tokIdent`.span, "expected string for `" &
@@ -1699,21 +1725,25 @@ macro deriveVisitor*(typ: typedesc): untyped =
           quote do:
             if `tokIdent`.kind != tkNumber:
               return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected int"))
+                `tokIdent`.span, "expected int for `" &
+                `fieldLabel` & "`"))
             let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
             let d = decodeIntFromToken(n, `tokIdent`.span)
             if d.isErr: return err[void, ParseError](d.getErr)
             `bIdent`.result.`nimName` = int(d.get)
+            `seenStmt`
         of "bool":
           quote do:
             if `tokIdent`.kind != tkKeyword:
               return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected bool"))
+                `tokIdent`.span, "expected bool for `" &
+                `fieldLabel` & "`"))
             `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
+            `seenStmt`
         else:
           quote do:
             return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported visitArg type (cycle 2 scope)"))
+              `tokIdent`.span, "unsupported arg type (cycle 2 scope)"))
       argCase.add(newNimNode(nnkOfBranch).add(lit).add(assignment))
       inc argSeen
   argCase.add(newNimNode(nnkElse).add quote do:
@@ -1735,6 +1765,11 @@ macro deriveVisitor*(typ: typedesc): untyped =
       let kdlName = newLit(f.kdlName)
       let typeName = $f.typeNode
       let fieldLabel = newLit(typName & "." & f.nimName)
+      let seenStmt =
+        if requiredIds.hasKey(f.nimName):
+          let idLit = newLit(uint8(requiredIds[f.nimName]))
+          quote do: `bIdent`.seen.incl(`idLit`)
+        else: newStmtList()
       let assignment =
         case typeName
         of "string":
@@ -1743,9 +1778,11 @@ macro deriveVisitor*(typ: typedesc): untyped =
             of tkString:
               `bIdent`.result.`nimName` =
                 `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+              `seenStmt`
             of tkRawString:
               `bIdent`.result.`nimName` =
                 `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+              `seenStmt`
             else:
               return err[void, ParseError](initError(peTypeMismatch,
                 `tokIdent`.span, "expected string for `" &
@@ -1760,6 +1797,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
             let d = decodeIntFromToken(n, `tokIdent`.span)
             if d.isErr: return err[void, ParseError](d.getErr)
             `bIdent`.result.`nimName` = int(d.get)
+            `seenStmt`
         of "bool":
           quote do:
             if `tokIdent`.kind != tkKeyword:
@@ -1767,10 +1805,11 @@ macro deriveVisitor*(typ: typedesc): untyped =
                 `tokIdent`.span, "expected bool for `" &
                 `fieldLabel` & "`"))
             `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
+            `seenStmt`
         else:
           quote do:
             return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported visitProp type (cycle 2 scope)"))
+              `tokIdent`.span, "unsupported prop type (cycle 2 scope)"))
       propCase.add(newNimNode(nnkOfBranch).add(kdlName).add(assignment))
   # Strict default per Decision 1: unknown property is an error.
   propCase.add(newNimNode(nnkElse).add quote do:
@@ -1786,13 +1825,25 @@ macro deriveVisitor*(typ: typedesc): untyped =
       `propCase`
       ok(void, ParseError)
 
-  # 5/6/7. Children + visitEndNode: no-op for flat case (cycle 7 adds children).
+  # 5/6/7. Children: no-op for flat case (cycle 7 adds children).
+  # visitEndNode: required-field check fires here.
+  var requiredCheckBody = newStmtList()
+  if requiredNames.len > 0:
+    for i, name in requiredNames:
+      let idLit = newLit(uint8(i))
+      let nameLit = newLit(typName & "." & name)
+      requiredCheckBody.add quote do:
+        if `idLit` notin `bIdent`.seen:
+          return err[void, ParseError](initError(peTypeMissingRequired,
+            pointSpan(StartPosition),
+            "required field `" & `nameLit` & "` was not set"))
   let restProcs = quote do:
     proc visitBeginChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
       ok(void, ParseError)
     proc visitEndChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
       ok(void, ParseError)
     proc visitEndNode(`bIdent`: var `builderName`): Result[void, ParseError] =
+      `requiredCheckBody`
       ok(void, ParseError)
 
   # 8. kdlVisitorParse — the macro-emitted entry the generic parseInto[T]

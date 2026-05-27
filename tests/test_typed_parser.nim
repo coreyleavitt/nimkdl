@@ -8,7 +8,7 @@
 ## Acceptance for this cycle: parseInto[Service]("...") returns a
 ## populated Service with default values firing for missing fields.
 
-import std/unittest
+import std/[unittest, strutils]
 import ../src/[lexer, intern, numlit, spans, typed_parser]
 import ../src/codegen   # for kdlNode, kdlArg, kdlProp pragmas
 
@@ -159,3 +159,57 @@ suite "typed parser — seq[T] (cycle 3)":
     let r = parseInto[seq[ServiceTyped]]("")
     check r.isOk
     check r.get.len == 0
+
+# Cycle 4: wrong type for a property returns structured error with span.
+suite "typed parser — type-mismatch errors (cycle 4)":
+  test "wrong type for int property returns peTypeMismatch":
+    let src = "service \"x\" port=\"not-a-number\""
+    let r = parseInto[ServiceTyped](src)
+    check r.isErr
+    check r.getErr.code == peTypeMismatch
+    check "port" in r.getErr.hint   # err names the field
+    # span should point at the bad value, not the whole node
+    check r.getErr.span.offset > 0  # nonzero offset into "service \"x\" port=..."
+
+  test "wrong type for bool property returns peTypeMismatch":
+    let src = "service \"x\" port=80 enabled=42"
+    let r = parseInto[ServiceTyped](src)
+    check r.isErr
+    check r.getErr.code == peTypeMismatch
+    check "enabled" in r.getErr.hint
+
+# Cycle 5: missing required field (a field without a default) errors.
+suite "typed parser — missing required field (cycle 5)":
+  test "missing required `port` field returns peTypeMissingRequired":
+    # Service.port has no default, so it's required.
+    let src = "service \"x\""
+    let r = parseInto[ServiceTyped](src)
+    check r.isErr
+    check r.getErr.code == peTypeMissingRequired
+    check "port" in r.getErr.hint
+
+  test "missing required `name` arg returns peTypeMissingRequired":
+    # Service.name is a positional arg with no default — required.
+    let src = "service port=80"
+    let r = parseInto[ServiceTyped](src)
+    check r.isErr
+    check r.getErr.code == peTypeMissingRequired
+    check "name" in r.getErr.hint
+
+# Cycle 6: unknown property is strict by default (Decision 1).
+suite "typed parser — unknown property strict (cycle 6)":
+  test "unknown property returns peTypeUnknownField":
+    let src = "service \"x\" port=80 unknown_field=\"y\""
+    let r = parseInto[ServiceTyped](src)
+    check r.isErr
+    check r.getErr.code == peTypeUnknownField
+    check "unknown_field" in r.getErr.hint
+    check "service" in r.getErr.hint   # err names the node type too
+
+  test "unknown node returns peTypeMismatch":
+    # parseInto[ServiceTyped] expects a `service` node; getting `route` errors.
+    let src = "route \"/api\" method=\"GET\""
+    let r = parseInto[ServiceTyped](src)
+    check r.isErr
+    check r.getErr.code == peTypeMismatch
+    check "service" in r.getErr.hint
