@@ -304,14 +304,10 @@ proc parseNodeWith[V](source: string, visitor: var V,
   # whether or not we'll emit — KDL v2 forbids these regardless.
   case nameTok.kind
   of tkIdent:
+    # Reserved-bareword rejection happens at lex time (lexer emits
+    # tkError for `inf`/`nan`/etc. before they ever reach here).
     let s = nameTok.span.start.offset
     let l = nameTok.span.finish.offset - 1
-    if isReservedBareword(source.toOpenArray(s, l)):
-      let name = source[s .. l]
-      return err[void, ParseError](initError(peLexReservedKeyword, nameTok.span,
-        "reserved keyword '" & name &
-        "' cannot be used as a bare node name; quote it or use '#" &
-        name & "'"))
     if not skip:
       let bRes = visitor.visitBeginNode(source.toOpenArray(s, l), nameTok.span)
       if bRes.isErr: return bRes
@@ -473,13 +469,9 @@ proc parseNodeWith[V](source: string, visitor: var V,
         let entrySpan = initSpan(keyTok.span.start, valueTok.span.finish)
         case keyTok.kind
         of tkIdent:
+          # Bare-keyword rejection already handled at lex time.
           let ks = keyTok.span.start.offset
           let kl = keyTok.span.finish.offset - 1
-          if isReservedBareword(source.toOpenArray(ks, kl)):
-            return err[void, ParseError](initError(peLexReservedKeyword,
-              keyTok.span,
-              "reserved keyword '" & source[ks .. kl] &
-              "' cannot be used as a property key"))
           when vcProps in caps:
             if not entrySkip:
               let pRes = visitor.visitProp(source.toOpenArray(ks, kl),
@@ -519,19 +511,11 @@ proc parseNodeWith[V](source: string, visitor: var V,
                 continue
         else: discard   # unreachable
       else:
-        # Arg value. tkIdent as arg is a bare-id string per KDL v2,
-        # but must not be a reserved keyword.
-        if t.kind == tkIdent:
-          let s = t.span.start.offset
-          let l = t.span.finish.offset - 1
-          if isReservedBareword(source.toOpenArray(s, l)):
-            let name = source[s .. l]
-            return err[void, ParseError](initError(peLexReservedKeyword,
-              t.span,
-              "reserved keyword '" & name &
-              "' cannot be used as a bare value; quote it or use '#" &
-              name & "'"))
-        elif t.kind == tkString:
+        # Arg value. tkIdent here is a bare-id string per KDL v2; the
+        # reserved-keyword rejection happens at lex time so anything
+        # reaching here is admissible. Bidi-control rejection for quoted
+        # strings still happens here (lexer doesn't yet pre-classify those).
+        if t.kind == tkString:
           let p = stream.stringPayloads[t.strIdx]
           if containsBidiControl(p):
             return err[void, ParseError](initError(peLexInvalidIdentifier,

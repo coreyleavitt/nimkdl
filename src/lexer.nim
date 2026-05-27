@@ -1332,6 +1332,17 @@ proc lexBareIdent(lx: var Lexer, interner: var Interner) =
                  "KDL v1 raw-string syntax `r\"...\"` is not valid in v2; " &
                  "use `#\"...\"#` instead")
     return
+  # Reserved-bareword rejection at lex time. KDL v2 forbids bare
+  # `true`/`false`/`null`/`inf`/`-inf`/`nan` as identifiers in any
+  # position (node name, property key, arg value). The lexer is the
+  # only place that touches every bareword byte, so doing this check
+  # here removes the per-call cost on the parser hot path.
+  if isReservedBareword(lx.source.toOpenArray(start.offset, textLast)):
+    lx.emitError(peLexReservedKeyword, span,
+      "reserved keyword '" &
+      lx.source[start.offset .. textLast] &
+      "' must be quoted or `#`-prefixed; bare use is forbidden in KDL v2")
+    return
   let handle = interner.intern(lx.source.toOpenArray(start.offset, textLast))
   lx.emit(Token(kind: tkIdent, ident: handle, span: span))
 
