@@ -188,3 +188,17 @@ suite "DocBuilder reserved-bareword + keyword-as-key + bidi (cycle 9'.5)":
   test "bare-id with `null` PREFIX is accepted (nulled)":
     let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "null_prefix_in_bare_id.kdl")
     assertEquivalent(viaP, viaV)
+
+suite "DocBuilder repeated prop keys + same-name arg/prop (cycle 9'.6)":
+
+  test "repeated_prop: later assignment wins":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "repeated_prop.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "arg and prop with same name coexist":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "arg_and_prop_same_name.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "repeated_arg: all args preserved (no dedup on args)":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "repeated_arg.kdl")
+    assertEquivalent(viaP, viaV)

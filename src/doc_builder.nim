@@ -146,6 +146,17 @@ proc visitProp*(b: var DocBuilder, keyStr: openArray[char],
   var val = vRes.get
   val.typeAnnotation = b.pendingValueAnno
   b.pendingValueAnno = InvalidInterned
+  # KDL v2: when a property key repeats within a node, the later
+  # assignment wins. Delete any earlier prop entry with the same key
+  # before appending. Args with the same name do NOT dedupe (they're
+  # positional, not keyed).
+  var i = 0
+  while i < b.stack[^1].entries.len:
+    let e = b.stack[^1].entries[i]
+    if e.kind == keProperty and e.propName == key:
+      b.stack[^1].entries.delete(i)
+    else:
+      inc i
   b.stack[^1].entries.add(KdlEntry(kind: keProperty,
                                     propName: key, propValue: val,
                                     span: tok.span))
