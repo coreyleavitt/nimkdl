@@ -12,26 +12,28 @@ use std::fs;
 use std::time::Instant;
 use facet::Facet;
 use facet_kdl as kdl;
-use facet_kdl::from_str;
+use facet_kdl::{from_str, to_string};
 
+#[allow(dead_code)]
 #[derive(Facet, Debug)]
 struct Service {
     #[facet(kdl::argument)]
-    _name: String,
+    name: String,
     #[facet(kdl::property)]
-    _port: u16,
+    port: u16,
     #[facet(kdl::property)]
-    _replicas: u16,
+    replicas: u16,
     #[facet(kdl::property)]
-    _enabled: bool,
+    enabled: bool,
 }
 
 // facet-kdl requires a Doc wrapper around Vec<T> for a list of
 // homogeneous top-level nodes — that's the pattern in their own tests.
+#[allow(dead_code)]
 #[derive(Facet, Debug)]
 struct ServiceDoc {
     #[facet(kdl::children)]
-    _services: Vec<Service>,
+    services: Vec<Service>,
 }
 
 fn time<F: FnMut()>(iters: u64, mut f: F) -> f64 {
@@ -57,4 +59,15 @@ fn main() {
         let _: Result<ServiceDoc, _> = from_str(&content);
     });
     report("typed ServiceDoc (~100 nodes)", content.len(), 5_000, el);
+
+    println!("\n=== facet-kdl encode (to_string from typed ServiceDoc, canonical) ===\n");
+    // Parse once, then time the encode loop. facet-kdl's to_string
+    // serializes from a typed value back to KDL — canonical output
+    // (no trivia preservation since the typed value discarded format
+    // info at decode time). Comparable to nimkdl's emPretty.
+    let doc: ServiceDoc = from_str(&content).unwrap();
+    let el = time(5_000, || {
+        let _: Result<String, _> = to_string(&doc);
+    });
+    report("encode ServiceDoc -> string", content.len(), 5_000, el);
 }
