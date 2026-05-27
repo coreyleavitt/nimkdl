@@ -1336,7 +1336,9 @@ macro deriveEncode*(typ: typedesc): untyped =
   let indentIdent = ident("indent")
   var hasUnsupported = shape.hasVariant
   for f in shape.shared:
-    if f.expectedReserved.len > 0 or f.isOption:
+    # Option[T] supported only on kdlProp fields in E.4 scope. On kdlArg
+    # (positional optional) the semantics get fuzzier; defer.
+    if f.isOption and f.kind != fkAttr:
       hasUnsupported = true
     # Non-seq kdlChild (single-object nested) — needs a per-field child
     # call that doesn't iterate. Defer to a later slice; fall back today.
@@ -1372,16 +1374,42 @@ macro deriveEncode*(typ: typedesc): untyped =
       directBody.add quote do:
         `bufIdent`.add(' ')
         appendFieldValue(`bufIdent`, `access`)
-    # Props next (key=value)
+    # Props next (key=value). Option[T] props are conditional: only emit
+    # when isSome. Non-Option props always emit. Fields with a
+    # `kdlReserved: "tag"` pragma get a `(tag)` prefix on the value AND
+    # run Layer-1 validation (validateReserved); failure short-circuits
+    # the encode with peReservedTypeInvalid.
     for f in shape.shared:
       if f.kind != fkAttr: continue
       let access = newDotExpr(vIdent, ident(f.nimName))
       let keyLit = newLit(f.kdlName)
-      directBody.add quote do:
+      let tagLit = newLit(f.expectedReserved)
+      let hasTag = f.expectedReserved.len > 0
+      # Build the (potentially validated, potentially tagged) emit body
+      # for the value side of `key=value`.
+      let getExpr = if f.isOption: newDotExpr(access, ident("get")) else: access
+      var valueEmit = newStmtList()
+      if hasTag:
+        # Validate: construct a transient KdlValue to feed validateReserved.
+        # Only fires for kdlReserved'd fields, which are rare on hot paths.
+        valueEmit.add quote do:
+          let tmpVal = newStringValue($(`getExpr`))
+          let rcheck = validateReserved(`tagLit`, tmpVal)
+          if rcheck.isErr: return err[void, ParseError](rcheck.getErr)
+          `bufIdent`.add('('); `bufIdent`.add(`tagLit`); `bufIdent`.add(')')
+      valueEmit.add quote do:
+        appendFieldValue(`bufIdent`, `getExpr`)
+      let emitProp = quote do:
         `bufIdent`.add(' ')
         appendIdent(`bufIdent`, `keyLit`)
         `bufIdent`.add('=')
-        appendFieldValue(`bufIdent`, `access`)
+        `valueEmit`
+      if f.isOption:
+        directBody.add quote do:
+          if `access`.isSome:
+            `emitProp`
+      else:
+        directBody.add(emitProp)
     # Children: emit `{` block with each child recursing at indent+1.
     # Skip the block entirely when ALL kdlChild fields are empty seqs
     # (matches legacy behavior of not emitting `{}` for absent children).
@@ -1473,31 +1501,34 @@ proc encode*[T: object](v: T, mode = emPretty): Result[string, ParseError] =
   doc.nodes.add(nRes.get)
   ok[string, ParseError](kdlEncode.encode(doc, mode))
 
-proc encodeFrom*[T: object](v: T): string =
+proc encodeFrom*[T: object](v: T): Result[string, ParseError] =
   ## Typed-direct encode (cycle E). Skips KdlNode + KdlDoc construction;
   ## the macro-emitted `kdlEncodeIntoImpl` writes KDL bytes straight into
   ## a string buffer in one pass. Symmetric with `parseInto[T]` on the
   ## decode side.
   ##
-  ## Output matches `encode(v, emPretty).get` byte-for-byte for types
-  ## that the direct path supports (cycle E.1 scope: object types with
-  ## kdlArg/kdlProp fields of string/int/float/bool). Other shapes (kdl
-  ## children, kdlReserved tags, Option[T]) land in later slices.
+  ## Output matches `encode(v, emPretty).get` byte-for-byte. Returns Err
+  ## on kdlReserved validation failure (mirrors `encode[T]`).
   ##
   ## Requires `deriveEncode(T)` to have been called.
   mixin kdlEncodeIntoImpl
-  result = newStringOfCap(64)
-  discard kdlEncodeIntoImpl(v, result)
+  var buf = newStringOfCap(64)
+  let r = kdlEncodeIntoImpl(v, buf)
+  if r.isErr: return err[string, ParseError](r.getErr)
+  ok[string, ParseError](buf)
 
-proc encodeFrom*[T: object](vs: seq[T]): string =
+proc encodeFrom*[T: object](vs: seq[T]): Result[string, ParseError] =
   ## seq[T] variant — each element becomes one top-level node, newline-
-  ## separated. Symmetric with `parseInto[seq[T]]`.
+  ## separated. Symmetric with `parseInto[seq[T]]`. Stops at the first
+  ## kdlReserved validation failure.
   ##
   ## Requires `deriveEncode(T)` to have been called.
   mixin kdlEncodeIntoImpl
-  result = newStringOfCap(64 * vs.len + 32)
+  var buf = newStringOfCap(64 * vs.len + 32)
   for v in vs:
-    discard kdlEncodeIntoImpl(v, result)
+    let r = kdlEncodeIntoImpl(v, buf)
+    if r.isErr: return err[string, ParseError](r.getErr)
+  ok[string, ParseError](buf)
 
 proc encode*[T](vs: seq[T], mode = emPretty): Result[string, ParseError] =
   ## Render a sequence of typed values as KDL text: each element
