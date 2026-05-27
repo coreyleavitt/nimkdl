@@ -9,6 +9,9 @@ benchmarks/bench
 benchmarks/profile_deep
 benchmarks/perf_deep_chain
 benchmarks/typed_decode
+benchmarks/typed_parseInto
+benchmarks/perf_typed_parseInto
+benchmarks/typed_encode
 src/reserved
 src/spans
 

@@ -2129,9 +2129,19 @@ macro deriveVisitor*(typ: typedesc): untyped =
       if r.isErr: return err[seq[`typSym`], ParseError](r.getErr)
       ok[seq[`typSym`], ParseError](sb.results)
 
+  # Capability declaration. Generated visitors consume the core protocol
+  # only (args, props, children). Annotation routing + slashdash are not
+  # required for typed decode — opting out lets parseDocumentWith skip
+  # the corresponding gate code via `when X in caps:` branches.
+  let capsTemplate = quote do:
+    template visitorCaps*(_: typedesc[`builderName`]): set[VisitorCap] =
+      {vcArgs, vcProps, vcChildren}
+    template visitorCaps*(_: typedesc[`seqBuilderName`]): set[VisitorCap] =
+      {vcArgs, vcProps, vcChildren}
+
   result = newStmtList(
     builderType, beginNodeProc, argProc, propProc, restProcs, kvpProc,
-    seqBuilderType, seqWrapProcs, kvpSeqProc)
+    seqBuilderType, seqWrapProcs, capsTemplate, kvpSeqProc)
   when defined(dumpKdlGen):
     echo "=== deriveVisitor for ", repr(typ), " ==="
     echo result.repr

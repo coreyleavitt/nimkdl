@@ -30,6 +30,9 @@ type ServiceBuilder = object
   inNode: bool
   nodeSpan: Span
 
+template visitorCaps*(_: typedesc[ServiceBuilder]): set[VisitorCap] =
+  {vcArgs, vcProps, vcChildren}
+
 proc visitBeginNode(b: var ServiceBuilder,
                nameStr: openArray[char], nodeSpan: Span):
     Result[void, ParseError] =

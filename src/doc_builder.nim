@@ -1,0 +1,149 @@
+## DocBuilder — visitor that reconstructs a `KdlDoc` from the
+## capability-driven visitor protocol in `typed_parser.nim`.
+##
+## Cycle 9'.1 scope (this slice):
+##   - bare-ident node names
+##   - recursive children of arbitrary depth
+##   - no args, no props, no annotations, no slashdash yet
+##
+## Later slices add:
+##   - 9'.2: type annotations (vcNodeAnno + vcValueAnno)
+##   - 9'.3: quoted/raw-string node names
+##   - 9'.4: slashdash (vcSlashdash)
+##   - etc., until DocBuilder reproduces parser.nim's KdlDoc on every
+##     conformance fixture (cycle 9'.9).
+##
+## When cycle 10 lands, `parse()` in `parser.nim` becomes
+## `parseDocumentWith[DocBuilder]` and the hand-written recursive
+## descent in `parser.nim` is deleted.
+
+import ./[ast, intern, spans, lexer, typed_parser, numlit]
+
+type
+  DocBuilder* = object
+    ## Visitor that produces a KdlDoc. State is a stack of currently-
+    ## open KdlNode frames. visitBeginNode pushes; visitEndNode pops and
+    ## attaches to the parent's children (or to doc.nodes at depth 0).
+    doc*: KdlDoc
+    stack*: seq[KdlNode]
+
+template visitorCaps*(_: typedesc[DocBuilder]): set[VisitorCap] =
+  ## DocBuilder consumes the full event stream. Later slices add
+  ## vcNodeAnno, vcValueAnno, vcSlashdash as the corresponding routing
+  ## is wired into parseDocumentWith.
+  {vcArgs, vcProps, vcChildren}
+
+proc newDocBuilder*(sourcePath = "<input>"): DocBuilder =
+  DocBuilder(doc: newDoc(sourcePath), stack: @[])
+
+proc finish*(b: sink DocBuilder): KdlDoc =
+  ## Caller invokes after `parseDocumentWith` returns ok. Returns the
+  ## fully-assembled doc.
+  result = b.doc
+  result.parseTopLevelCount = int32(result.nodes.len)
+
+# ---------------------------------------------------------------------------
+# Visitor methods
+# ---------------------------------------------------------------------------
+
+proc visitBeginNode*(b: var DocBuilder, nameStr: openArray[char],
+                     nodeSpan: Span): Result[void, ParseError] =
+  let nameHandle = b.doc.interner.intern(nameStr)
+  b.stack.add(KdlNode(name: nameHandle,
+                      typeAnnotation: InvalidInterned,
+                      entries: @[], children: @[], span: nodeSpan))
+  ok(void, ParseError)
+
+proc visitArg*(b: var DocBuilder, idx: int, tok: Token,
+               stream: TokenStream): Result[void, ParseError] =
+  # 9'.1 scope: no args in test fixtures. Stub returns ok so test
+  # fixtures without args parse cleanly; real arg routing lands in 9'.2.
+  let val = case tok.kind
+    of tkString:    newStringValue(stream.stringPayloads[tok.strIdx], tok.span)
+    of tkRawString: newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span)
+    of tkKeyword:
+      case tok.keyword
+      of kwTrue:   newBoolValue(true, tok.span)
+      of kwFalse:  newBoolValue(false, tok.span)
+      of kwNull:   newNullValue(tok.span)
+      of kwInf:    newFloatValue(Inf, tok.span)
+      of kwNegInf: newFloatValue(NegInf, tok.span)
+      of kwNan:    newFloatValue(NaN, tok.span)
+    of tkNumber:
+      let n = stream.numberPayloads[tok.numIdx]
+      if looksLikeFloat(n):
+        let fRes = decodeFloatFromToken(n, tok.span)
+        if fRes.isErr: return err[void, ParseError](fRes.getErr)
+        newFloatValue(fRes.get, tok.span)
+      else:
+        let iRes = decodeIntPromoting(n, tok.span)
+        if iRes.isErr: return err[void, ParseError](iRes.getErr)
+        let d = iRes.get
+        if d.fits64: newIntValue(d.intVal, tok.span)
+        else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
+    of tkIdent:
+      # KDL v2 bare identifier as string value. Reserved-bareword guard
+      # lands in 9'.5; for 9'.1 we accept it as a string.
+      let identStr = b.doc.interner.lookup(tok.ident)
+      newStringValue(identStr, tok.span)
+    else:
+      return err[void, ParseError](initError(peParseExpected, tok.span,
+        "unsupported arg token kind for DocBuilder slice 9'.1"))
+  b.stack[^1].entries.add(KdlEntry(kind: keArgument, argValue: val,
+                                    span: tok.span))
+  ok(void, ParseError)
+
+proc visitProp*(b: var DocBuilder, keyStr: openArray[char],
+                tok: Token, stream: TokenStream): Result[void, ParseError] =
+  let key = b.doc.interner.intern(keyStr)
+  let val = case tok.kind
+    of tkString:    newStringValue(stream.stringPayloads[tok.strIdx], tok.span)
+    of tkRawString: newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span)
+    of tkKeyword:
+      case tok.keyword
+      of kwTrue:   newBoolValue(true, tok.span)
+      of kwFalse:  newBoolValue(false, tok.span)
+      of kwNull:   newNullValue(tok.span)
+      of kwInf:    newFloatValue(Inf, tok.span)
+      of kwNegInf: newFloatValue(NegInf, tok.span)
+      of kwNan:    newFloatValue(NaN, tok.span)
+    of tkNumber:
+      let n = stream.numberPayloads[tok.numIdx]
+      if looksLikeFloat(n):
+        let fRes = decodeFloatFromToken(n, tok.span)
+        if fRes.isErr: return err[void, ParseError](fRes.getErr)
+        newFloatValue(fRes.get, tok.span)
+      else:
+        let iRes = decodeIntPromoting(n, tok.span)
+        if iRes.isErr: return err[void, ParseError](iRes.getErr)
+        let d = iRes.get
+        if d.fits64: newIntValue(d.intVal, tok.span)
+        else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
+    of tkIdent:
+      let identStr = b.doc.interner.lookup(tok.ident)
+      newStringValue(identStr, tok.span)
+    else:
+      return err[void, ParseError](initError(peParseExpected, tok.span,
+        "unsupported prop value token kind for DocBuilder slice 9'.1"))
+  b.stack[^1].entries.add(KdlEntry(kind: keProperty,
+                                    propName: key, propValue: val,
+                                    span: tok.span))
+  ok(void, ParseError)
+
+proc visitBeginChildren*(b: var DocBuilder): Result[void, ParseError] =
+  # No state change — parseNodeWith recursion handles nesting.
+  # The stack push happens in visitBeginNode for each child node.
+  ok(void, ParseError)
+
+proc visitEndChildren*(b: var DocBuilder): Result[void, ParseError] =
+  ok(void, ParseError)
+
+proc visitEndNode*(b: var DocBuilder): Result[void, ParseError] =
+  ## Pop current node frame and attach to its parent (depth>=1) or
+  ## directly to doc.nodes (depth 0).
+  let n = b.stack.pop()
+  if b.stack.len == 0:
+    b.doc.nodes.add(n)
+  else:
+    b.stack[^1].children.add(n)
+  ok(void, ParseError)
