@@ -229,3 +229,29 @@ suite "DocBuilder adjacency + ordering (cycle 9'.7)":
 
   test "entry after a real children block rejected":
     bothReject("node { a }; foo=1\n")
+
+suite "DocBuilder depth bound (cycle 9'.8)":
+
+  test "deeply nested children beyond MaxParserDepth rejected":
+    # 300 levels of `n {` then 300 `}` — exceeds MaxParserDepth=256.
+    var src = ""
+    const Depth = 300
+    for i in 0 ..< Depth: src.add "n {\n"
+    for i in 0 ..< Depth: src.add "}\n"
+    let pRes = parse(src)
+    check pRes.isErr
+    var b = newDocBuilder(src, "test")
+    let vRes = parseDocumentWith(src, b)
+    check vRes.isErr
+
+  test "shallow nesting (10 levels) still accepted":
+    var src = ""
+    const Depth = 10
+    for i in 0 ..< Depth: src.add "n {\n"
+    for i in 0 ..< Depth: src.add "}\n"
+    let pRes = parse(src)
+    check pRes.isOk
+    var b = newDocBuilder(src, "test")
+    let vRes = parseDocumentWith(src, b)
+    check vRes.isOk
+    assertEquivalent(pRes.get, b.finish())

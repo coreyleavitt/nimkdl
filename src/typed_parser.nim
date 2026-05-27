@@ -43,6 +43,11 @@
 
 import ./[lexer, intern, spans]
 
+const MaxParserDepth = 256
+  ## Maximum recursion depth through `{ children }` blocks. Matches
+  ## `parser.MaxParserDepth` (kept private to avoid ambiguity with the
+  ## parser's export — cycle 10 will unify them into one source).
+
 type
   VisitorCap* = enum
     ## Capabilities a visitor opts into. parseDocumentWith gates routing
@@ -88,7 +93,7 @@ proc parseInto*[T](source: string, sourcePath = "<input>"):
 
 proc parseNodeWith[V](source: string, visitor: var V,
                       stream: TokenStream, cursor: var int,
-                      skip: bool = false):
+                      skip: bool = false, depth: int = 0):
     Result[void, ParseError]
 
 proc parseDocumentWith*[V](source: string, visitor: var V,
@@ -119,24 +124,30 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
       while peek().kind == tkNewline: inc cursor  # /- crosses newlines
       skipNode = true
     if peek().kind == tkEof: break
-    let r = parseNodeWith(source, visitor, stream, cursor, skip = skipNode)
+    let r = parseNodeWith(source, visitor, stream, cursor,
+                          skip = skipNode, depth = 0)
     if r.isErr: return r
 
   ok(void, ParseError)
 
 proc parseNodeWith[V](source: string, visitor: var V,
                       stream: TokenStream, cursor: var int,
-                      skip: bool = false):
+                      skip: bool = false, depth: int = 0):
     Result[void, ParseError] =
   ## Parse one node + its entries + (recursively) its children.
   ## When `skip` is true, tokens are still parsed (preserving syntax-
   ## error surfaces) but no visitor events fire — used by slashdash.
+  ## `depth` bounds children-block recursion at MaxParserDepth.
   mixin visitorCaps
   const caps = visitorCaps(V)
 
   template peek(off = 0): Token =
     if cursor + off < stream.tokens.len: stream.tokens[cursor + off]
     else: Token(kind: tkEof, span: pointSpan(StartPosition))
+
+  if depth >= MaxParserDepth:
+    return err[void, ParseError](initError(peParseDepthExceeded, peek().span,
+      "nesting depth exceeded MaxParserDepth"))
 
   # Optional `(IDENT|STRING|RAW_STRING)` type annotation. Caps decide
   # whether the event can fire at all (compile-time); `noEmit` lets the
@@ -311,7 +322,7 @@ proc parseNodeWith[V](source: string, visitor: var V,
           innerSkip = true
         when vcChildren in caps:
           let cRes = parseNodeWith(source, visitor, stream, cursor,
-                                   skip = innerSkip)
+                                   skip = innerSkip, depth = depth + 1)
           if cRes.isErr: return cRes
         else:
           # Cap absent — walk and discard without recursion.
