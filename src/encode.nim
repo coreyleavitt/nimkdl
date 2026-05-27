@@ -194,6 +194,13 @@ func appendBool*(buf: var string, b: bool) {.noSideEffect, inline.} =
 func appendNull*(buf: var string) {.noSideEffect, inline.} =
   buf.add("#null")
 
+func appendIndent*(buf: var string, depth: int) {.noSideEffect, inline.} =
+  ## Pretty-mode indent. Reuses the precomputed `Indents` table.
+  if depth >= 0 and depth < PrecomputedIndentLevels:
+    buf.add(Indents[depth])
+  else:
+    buf.add(PrettyIndent.repeat(depth))
+
 # Overload set used by the macro-emitted kdlEncodeIntoImpl. Lets the
 # generated code dispatch on the Nim field type without a per-type
 # `when` ladder.

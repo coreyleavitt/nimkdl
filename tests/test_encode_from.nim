@@ -38,3 +38,29 @@ suite "encodeFrom[T] tracer (cycle E.1)":
     let viaLegacy = encode(s, emPretty)
     check viaLegacy.isOk
     check encodeFrom(s) == viaLegacy.get
+
+# Cycle E.5 — children blocks
+type Action {.kdlNode: "action".} = object
+  tmpl {.kdlArg, kdlRename: "template".}: string
+type Server {.kdlNode: "server".} = object
+  name {.kdlArg.}: string
+  actions {.kdlChild.}: seq[Action]
+
+deriveEncode(Action)
+deriveEncode(Server)
+
+suite "encodeFrom[T] children blocks (cycle E.5)":
+
+  test "Server with seq[Action] children — direct matches legacy":
+    let s = Server(name: "web", actions: @[
+      Action(tmpl: "log"),
+      Action(tmpl: "alert")])
+    let viaLegacy = encode(s, emPretty)
+    check viaLegacy.isOk
+    check encodeFrom(s) == viaLegacy.get
+
+  test "Server with empty children seq emits no block":
+    let s = Server(name: "minimal", actions: @[])
+    let viaLegacy = encode(s, emPretty)
+    check viaLegacy.isOk
+    check encodeFrom(s) == viaLegacy.get

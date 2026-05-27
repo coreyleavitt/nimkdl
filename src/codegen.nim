@@ -1333,22 +1333,37 @@ macro deriveEncode*(typ: typedesc): untyped =
   # path — body just delegates so the public encodeFrom[T] surface is
   # uniform across types; later slices replace the fallback per feature.
   let bufIdent = ident("buf")
+  let indentIdent = ident("indent")
   var hasUnsupported = shape.hasVariant
   for f in shape.shared:
-    if f.kind == fkChild or f.expectedReserved.len > 0 or f.isOption:
+    if f.expectedReserved.len > 0 or f.isOption:
+      hasUnsupported = true
+    # Non-seq kdlChild (single-object nested) — needs a per-field child
+    # call that doesn't iterate. Defer to a later slice; fall back today.
+    if f.kind == fkChild and
+       (f.typeNode.kind != nnkBracketExpr or
+        f.typeNode.len < 1 or
+        $f.typeNode[0] != "seq"):
       hasUnsupported = true
   var directBody = newStmtList()
   if hasUnsupported:
-    # Delegate to legacy path for now.
+    # Delegate to legacy path for now (E.4 / E.6 add direct emit for
+    # Option[T] and kdlReserved; until then, indent prefix happens here
+    # too so nested children call sites stay correct).
     directBody.add quote do:
       var legacyDoc = newDoc()
       let nRes = kdlEncodeImpl(`vIdent`, legacyDoc)
       if nRes.isErr: return err[void, ParseError](nRes.getErr)
       legacyDoc.nodes.add(nRes.get)
-      `bufIdent`.add(kdlEncode.encode(legacyDoc, emPretty))
+      appendIndent(`bufIdent`, `indentIdent`)
+      let s = kdlEncode.encode(legacyDoc, emPretty)
+      # Legacy emit already includes trailing newline; strip-and-re-add
+      # if our caller is nesting (indent > 0) — but for now just append.
+      `bufIdent`.add(s)
       ok(void, ParseError)
   else:
     directBody.add quote do:
+      appendIndent(`bufIdent`, `indentIdent`)
       `bufIdent`.add(`nodeNameLit`)
     # Args first (positional, in source order)
     for f in shape.shared:
@@ -1367,12 +1382,45 @@ macro deriveEncode*(typ: typedesc): untyped =
         appendIdent(`bufIdent`, `keyLit`)
         `bufIdent`.add('=')
         appendFieldValue(`bufIdent`, `access`)
+    # Children: emit `{` block with each child recursing at indent+1.
+    # Skip the block entirely when ALL kdlChild fields are empty seqs
+    # (matches legacy behavior of not emitting `{}` for absent children).
+    var childFields: seq[FieldSpec] = @[]
+    for f in shape.shared:
+      if f.kind == fkChild: childFields.add(f)
+    if childFields.len > 0:
+      # Build a runtime "any non-empty?" predicate. For seq fields:
+      # `v.f.len > 0`. For non-seq single-object kdlChild: always true
+      # (the child is structurally present). v0 only supports seq.
+      var anyNonEmpty: NimNode = newLit(false)
+      for f in childFields:
+        let access = newDotExpr(vIdent, ident(f.nimName))
+        let lenExpr = quote do: `access`.len > 0
+        anyNonEmpty = infix(anyNonEmpty, "or", lenExpr)
+      directBody.add quote do:
+        if `anyNonEmpty`:
+          `bufIdent`.add(" {\n")
+      for f in childFields:
+        let access = newDotExpr(vIdent, ident(f.nimName))
+        directBody.add quote do:
+          for child in `access`:
+            let cRes = kdlEncodeIntoImpl(child, `bufIdent`, `indentIdent` + 1)
+            if cRes.isErr: return cRes
+      directBody.add quote do:
+        if `anyNonEmpty`:
+          appendIndent(`bufIdent`, `indentIdent`)
+          `bufIdent`.add("}\n")
+        else:
+          `bufIdent`.add('\n')
+    else:
+      directBody.add quote do:
+        `bufIdent`.add('\n')
     directBody.add quote do:
-      `bufIdent`.add('\n')
       ok(void, ParseError)
 
   let encodeIntoProc = quote do:
-    proc kdlEncodeIntoImpl*(`vIdent`: `typ`, `bufIdent`: var string):
+    proc kdlEncodeIntoImpl*(`vIdent`: `typ`, `bufIdent`: var string,
+                            `indentIdent`: int = 0):
         Result[void, ParseError] {.noSideEffect.} =
       `directBody`
 
