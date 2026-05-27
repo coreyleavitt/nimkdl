@@ -16,11 +16,32 @@ The other kdl-org samples (`Cargo.kdl`, `ci.kdl`, `website.kdl`) are real KDL bu
 
 ![Per-fixture comparison](docs/charts/per-fixture.svg)
 
-Every fixture, every parser, same container, same iteration counts. Bars show throughput as a percentage of nimkdl (which is always 100%).
+Every fixture, every parser, same container, same iteration counts. Bars are normalized to the row leader so whichever parser wins each row hits 100%.
 
-ckdl is consistently the closest competitor. On `unicode-heavy.kdl` it actually edges us by 4%, effectively a dead heat. The fact that we're matching a hand-written C parser is the result worth pointing at.
+Honest caveat. This chart is **apples-to-ish-apples**. Each library is called with its idiomatic "give me my default parse output" API. The output shapes differ:
 
-knus and kdl-rs are both 10-20x behind ckdl and nimkdl across the board. Both prioritize features we deferred (knus is serde-style typed decode in one shot; kdl-rs carries per-token whitespace storage and BigInt-by-default), so this isn't a clean comparison of "parser quality." It's a comparison of "how fast does parse-to-AST run in this library, with the defaults that ship."
+- ckdl drains SAX events with no AST construction (theoretical floor)
+- knus `parse_ast` builds a `Document` with spans
+- kdl-rs `KdlDocument::parse_v2` builds the full AST with per-token whitespace storage (the heaviest of the bunch)
+- nimkdl `parse()` builds a `KdlDoc` with per-node span (no per-token trivia by default)
+
+So they're apples-to-apples on **input cost and flag profile** but doing different amounts of representation work. ckdl in particular is doing strictly less because its harness throws events on the floor. We still beat it on most rows, but the comparison isn't "we beat a C parser at C's game" — it's "AST-building Nim parser is competitive with event-streaming C parser once the value-copy bugs are eliminated."
+
+Row-by-row.
+
+| Fixture                       | nimkdl | ckdl   | knus  | kdl-rs | Winner |
+|-------------------------------|-------:|-------:|------:|-------:|--------|
+| realistic-config.kdl (5.6KB)  | 21.9K  | 15.4K  | 2.6K  |  1.2K  | nimkdl 1.4x |
+| Cargo.kdl (238B)              | 271K   | 228K   |  15K  |   24K  | nimkdl 1.2x |
+| ci.kdl (1KB)                  | 80.4K  | 52.6K  | 3.0K  |  4.9K  | nimkdl 1.5x |
+| website.kdl (2KB)             | 54.9K  | 38.2K  | 2.9K  |  3.6K  | nimkdl 1.4x |
+| flat-deps-100.kdl (4KB)       | 14.9K  | 14.1K  | 0.7K  |  1.2K  | nimkdl 1.06x (tie) |
+| tree-d8-b3.kdl (794KB)        | 104    | 102    |   4   |    8   | nimkdl 1.02x (tie) |
+| **deep-chain-100.kdl** (2.7KB)| 16.2K  | **20.8K** | 0.6K | 1.2K | **ckdl 1.28x** |
+| unicode-heavy.kdl (1.2KB)     | 60.9K  | 58.5K  | 3.1K  |  5.3K  | nimkdl 1.04x (tie) |
+| homogeneous-services-100.kdl  | 10.9K dec | 9.5K | **22.5K typed** | 1.0K | knus typed decode wins |
+
+The picture is more textured than a single headline. nimkdl wins 5 of 8 parse rows outright, ties on 3, and loses 1 to ckdl. ckdl wins on shapes with very simple node structure (deep-chain is just `levelN { ... }` repeated). The typed-decode row goes to knus, see the [typed decode](#typed-decode) section for why.
 
 ## Typed decode
 
