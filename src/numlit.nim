@@ -48,7 +48,8 @@ func radixOf*(base: NumberBase): int {.inline.} =
   of nbOctal: 8
   of nbBinary: 2
 
-func decodeIntFromToken*(n: NumberPayload, span: Span): Result[int64, ParseError] =
+func decodeIntFromToken*(n: NumberPayload, span: Span):
+    Result[int64, ParseError] {.inline.} =
   ## Decode a `tkNumber` token's raw integer text into `int64`, respecting
   ## sign and base. Handles `int64.low` correctly via uint64 accumulation
   ## (a value the naïve decode-magnitude-then-negate path can't represent).
@@ -137,7 +138,8 @@ func mulAdd128(hi, lo: var uint64, mul: uint64, add: uint64): bool =
   hi = (r3 shl 32) or r2
   false
 
-func decodeIntPromoting*(n: NumberPayload, span: Span): Result[IntDecode, ParseError] =
+func decodeIntPromoting*(n: NumberPayload, span: Span):
+    Result[IntDecode, ParseError] {.inline.} =
   ## Decode an integer literal that may exceed int64.high. Produces
   ## `fits64 = true` when the value fits int64 (with int64.low special-
   ## cased like `decodeIntFromToken`); otherwise produces a 128-bit
@@ -190,7 +192,8 @@ func decodeIntPromoting*(n: NumberPayload, span: Span): Result[IntDecode, ParseE
 # Float decode
 # ---------------------------------------------------------------------------
 
-func decodeFloatFromToken*(n: NumberPayload, span: Span): Result[float, ParseError] =
+func decodeFloatFromToken*(n: NumberPayload, span: Span):
+    Result[float, ParseError] {.inline.} =
   ## Decode a `tkNumber` token's raw float text. Non-raising — uses
   ## `parseutils.parseFloat` which returns 0 on failure rather than
   ## raising `ValueError`. This is the property `parser.nim`'s

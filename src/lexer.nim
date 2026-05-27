@@ -1346,18 +1346,34 @@ proc lexKeyword(lx: var Lexer) =
     lx.advanceOne()
   while not lx.atEof and isIdentCont(lx.peek):
     lx.advanceOne()
-  let text = lx.source[textStart.offset ..< lx.pos.offset]
+  # Byte-level dispatch against the six v2 keywords. Avoids allocating a
+  # slice + case-on-string on the hot path (fixtures with many #true/#false
+  # values hit this per token). Length-prefilter then per-byte compare —
+  # all six keywords have distinct (length, first-byte) shapes.
   let span = initSpan(start, lx.pos)
-  var matched = true
+  let s = textStart.offset
+  let n = lx.pos.offset - s
+  template byteAt(i: int): char = lx.source[s + i]
   var kw: KeywordKind
-  case text
-  of "true":  kw = kwTrue
-  of "false": kw = kwFalse
-  of "null":  kw = kwNull
-  of "inf":   kw = kwInf
-  of "-inf":  kw = kwNegInf
-  of "nan":   kw = kwNan
-  else:       matched = false
+  var matched = false
+  case n
+  of 3:                           # inf | nan
+    if byteAt(0) == 'i' and byteAt(1) == 'n' and byteAt(2) == 'f':
+      kw = kwInf; matched = true
+    elif byteAt(0) == 'n' and byteAt(1) == 'a' and byteAt(2) == 'n':
+      kw = kwNan; matched = true
+  of 4:                           # true | null | -inf
+    if byteAt(0) == 't' and byteAt(1) == 'r' and byteAt(2) == 'u' and byteAt(3) == 'e':
+      kw = kwTrue; matched = true
+    elif byteAt(0) == 'n' and byteAt(1) == 'u' and byteAt(2) == 'l' and byteAt(3) == 'l':
+      kw = kwNull; matched = true
+    elif byteAt(0) == '-' and byteAt(1) == 'i' and byteAt(2) == 'n' and byteAt(3) == 'f':
+      kw = kwNegInf; matched = true
+  of 5:                           # false
+    if byteAt(0) == 'f' and byteAt(1) == 'a' and byteAt(2) == 'l' and
+       byteAt(3) == 's' and byteAt(4) == 'e':
+      kw = kwFalse; matched = true
+  else: discard
   if matched:
     lx.emit(Token(kind: tkKeyword, keyword: kw, span: span))
   else:

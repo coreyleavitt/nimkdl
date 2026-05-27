@@ -343,25 +343,29 @@ proc parseNodeWith[V](source: string, visitor: var V,
     # Entry-level slashdash: skips the next single entry OR children block.
     # Chained `/- /-` isn't valid grammar (the second /- has no entry to
     # skip), so single-`if` lookahead suffices and stays branch-predictable.
+    # Single peek per iteration in the hot path. Cache up front; only
+    # re-read after we've advanced cursor (slashdash consume / annotation
+    # consume). Eliminates 2-3 redundant array-indexed reads per entry.
+    var entryStartTok = peek()
     var entrySkip = skip
     var sawSlashdash = false
-    if peek().kind == tkSlashDash:
-      let sdSpan = peek().span
+    if entryStartTok.kind == tkSlashDash:
+      let sdSpan = entryStartTok.span
       inc cursor
       while peek().kind == tkNewline: inc cursor
       entrySkip = true
       sawSlashdash = true
-      if peek().kind in {tkNewline, tkSemicolon, tkEof, tkRBrace}:
+      entryStartTok = peek()    # re-read after consuming /- and newlines
+      if entryStartTok.kind in {tkNewline, tkSemicolon, tkEof, tkRBrace}:
         return err[void, ParseError](initError(peParseExpected, sdSpan,
           "'/-' must be followed by an entry or '{' children block"))
 
-    # One peek snapshot up front. precededByWs check folded into the
-    # hot-path case branches that actually need it (terminators + LBrace
-    # don't, so we don't pay for the predicate on the early-exit path).
-    let entryStartTok = peek()
     let hadValueAnno = entryStartTok.kind == tkLParen
-    if hadValueAnno: handleValueAnno(entrySkip)
-    let t = peek()
+    var t = entryStartTok
+    if hadValueAnno:
+      handleValueAnno(entrySkip)
+      # cursor advanced past `(type)` — refresh the value-token cache
+      t = peek()
 
     # Fast-path dispatch. Cold-validation arms (hadValueAnno follow-ups,
     # entries-after-children, precededByWs) live inside the case branches
