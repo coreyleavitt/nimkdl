@@ -1639,8 +1639,6 @@ proc decode*[T](source: string,
                 sourcePath: string = "<input>"): Result[T, ParseError]
     {.noSideEffect.} =
   ## Parse `source` as a KDL document and decode into `T`.
-  ## (Named `decode` rather than `parse` to disambiguate from
-  ## `parser.parse`, which returns the untyped KdlDoc.)
   ##
   ## - If `T = seq[U]`, decodes every top-level node named per U's
   ##   `kdlNode` pragma.
@@ -1648,47 +1646,17 @@ proc decode*[T](source: string,
   ##   `kdlNode` pragma and decodes it.
   ##
   ## `T` (or `U` if `T = seq[U]`) must be declared inside a `kdl:`
-  ## block, which generates the `kdlDecodeImpl` + `kdlNodeNameImpl`
-  ## overloads this proc dispatches to.
-  # `mixin` so the per-type overloads emitted by the `kdl:` block in the
-  # caller's scope are resolved at instantiation time, not at the point
-  # this generic proc is defined.
-  mixin kdlDecodeImpl, kdlNodeNameImpl
-  var parsed = parser.parse(source, sourcePath)
-  if parsed.isErr:
-    return err[T, ParseError](parsed.getErr)
-  var doc = parsed.get
+  ## block, which generates the visitor machinery this dispatches to.
+  ##
+  ## Single typed-decode entry point. Internally routes to the visitor
+  ## emitted by the `kdl:` block — same fast path that `parseInto[T]`
+  ## used during the transitional cycle.
+  mixin kdlBuildVisitor, kdlBuildVisitorSeq
   when T is seq:
     type Elem = typeof(default(T)[0])
-    let wantName = kdlNodeNameImpl(typeof(Elem))
-    let nameKey = doc.interner.intern(wantName)
-    var elems: T = @[]
-    for i in 0 ..< doc.nodes.len:
-      if doc.nodes[i].name == nameKey:
-        var elem: Elem
-        let r = kdlDecodeImpl(elem, doc.nodes[i], doc)
-        if r.isErr:
-          return err[T, ParseError](r.getErr)
-        elems.add(elem)
-    ok[T, ParseError](elems)
+    kdlBuildVisitorSeq(Elem, source, sourcePath)
   else:
-    let wantName = kdlNodeNameImpl(typeof(T))
-    let nameKey = doc.interner.intern(wantName)
-    var outValue: T
-    var found = false
-    for i in 0 ..< doc.nodes.len:
-      if doc.nodes[i].name == nameKey:
-        let r = kdlDecodeImpl(outValue, doc.nodes[i], doc)
-        if r.isErr:
-          return err[T, ParseError](r.getErr)
-        found = true
-        break
-    if not found:
-      err[T, ParseError](initError(peTypeMissingRequired,
-        pointSpan(StartPosition),
-        "expected node '" & wantName & "' at top level"))
-    else:
-      ok[T, ParseError](outValue)
+    kdlBuildVisitor(T, source, sourcePath)
 
 proc decodeAll*[T](source: string,
                    sourcePath: string = "<input>"):
@@ -1896,6 +1864,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
   builderFields.add newIdentDefs(ident("result"), typSym)
   builderFields.add newIdentDefs(ident("nodeSpan"), ident("Span"))
   builderFields.add newIdentDefs(ident("pendingValueAnno"), ident("string"))
+  builderFields.add newIdentDefs(ident("pendingNodeAnno"), ident("string"))
 
   for f in shape.shared:
     builderFields.add newIdentDefs(ident(f.nimName & "_local"), f.typeNode)
@@ -1936,6 +1905,24 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
           `bIdent`.`loc` = `dExpr`
 
   let nodeLit = newLit(nodeName)
+  let typeReserved = extractTypeReserved(typSym)
+  let typeReservedLit = newLit(typeReserved)
+  let typeAnnoCheckBody =
+    if typeReserved.len > 0:
+      quote do:
+        if `bIdent`.pendingNodeAnno.len == 0:
+          return err[void, ParseError](initError(peTypeReservedMismatch,
+            `spanIdent`,
+            "type expects (" & `typeReservedLit` & ") tag on its node " &
+            "but source has no annotation"))
+        if `bIdent`.pendingNodeAnno != `typeReservedLit`:
+          return err[void, ParseError](initError(peTypeReservedMismatch,
+            `spanIdent`,
+            "type expects (" & `typeReservedLit` & ") tag on its node " &
+            "but source has (" & `bIdent`.pendingNodeAnno & ")"))
+        `bIdent`.pendingNodeAnno = ""
+    else:
+      newStmtList()
   let beginNodeProc = quote do:
     proc visitBeginNode(`bIdent`: var `builderName`,
                    `nameStrIdent`: openArray[char],
@@ -1950,6 +1937,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       if not match:
         return err[void, ParseError](initError(peTypeMismatch,
           `spanIdent`, "expected node `" & `nodeLit` & "`"))
+      `typeAnnoCheckBody`
       `defaultsBody`
       ok(void, ParseError)
 
@@ -2035,6 +2023,13 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
           `bIdent`.`seenFlagIdent` = true
         of tkRawString:
           let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+          `v`
+          `bIdent`.`targetIdent` = `strSym`
+          `bIdent`.`seenFlagIdent` = true
+        of tkIdent:
+          let s0 = `tokIdent`.span.start.offset
+          let s1 = `tokIdent`.span.finish.offset - 1
+          let `strSym` = `streamIdent`.source[s0 .. s1]
           `v`
           `bIdent`.`targetIdent` = `strSym`
           `bIdent`.`seenFlagIdent` = true
@@ -2187,7 +2182,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       `propCase`
       ok(void, ParseError)
 
-  # ---------- visitValueTypeAnno ----------
+  # ---------- visitValueTypeAnno + visitNodeTypeAnno ----------
   let valueAnnoProc = quote do:
     proc visitValueTypeAnno(`bIdent`: var `builderName`,
                             `annoStrIdent`: openArray[char],
@@ -2195,34 +2190,47 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         Result[void, ParseError] {.noSideEffect.} =
       `bIdent`.pendingValueAnno = openArrayToString(`annoStrIdent`)
       ok(void, ParseError)
+    proc visitNodeTypeAnno(`bIdent`: var `builderName`,
+                           `annoStrIdent`: openArray[char],
+                           `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.pendingNodeAnno = openArrayToString(`annoStrIdent`)
+      ok(void, ParseError)
 
   # ---------- visitEndNode ----------
   # Discriminator required-check → case-on-disc → per-branch required-
   # field check + atomic object construction.
   var endCase = newNimNode(nnkCaseStmt).add(quote do:
     `bIdent`.`discLocalIdent`)
+  proc requiredMsg(f: FieldSpec): NimNode =
+    case f.kind
+    of fkArg:  newLit("missing required positional arg " & $f.argIndex &
+                      " ('" & f.kdlName & "')")
+    of fkAttr: newLit("missing required property '" & f.kdlName & "'")
+    of fkChild: newLit("missing required child node '" & f.kdlName & "'")
+    of fkSkip: newLit("")  # unreachable: skip fields aren't required
   for branch in shape.variant.branches:
     let branchPrefix = $branch.discValue
     var branchBody = newStmtList()
-    # Required-field checks: shared first, then branch.
+    # Required-field checks: shared first, then branch. Wording mirrors
+    # the AST-walk path's emitArgDecode / emitAttrDecode emit so the
+    # error hint is identical across both decode paths.
     for f in shape.shared:
       if f.defaultExpr.kind == nnkEmpty:
         let seenFlag = ident(f.nimName & "_seen")
-        let nameLit = newLit(typName & "." & f.nimName)
+        let msgLit = requiredMsg(f)
         branchBody.add quote do:
           if not `bIdent`.`seenFlag`:
             return err[void, ParseError](initError(peTypeMissingRequired,
-              `bIdent`.nodeSpan,
-              "required field `" & `nameLit` & "` was not set"))
+              `bIdent`.nodeSpan, `msgLit`))
     for f in branch.fields:
       if f.defaultExpr.kind == nnkEmpty:
         let seenFlag = ident(branchPrefix & "_" & f.nimName & "_seen")
-        let nameLit = newLit(typName & "." & f.nimName)
+        let msgLit = requiredMsg(f)
         branchBody.add quote do:
           if not `bIdent`.`seenFlag`:
             return err[void, ParseError](initError(peTypeMissingRequired,
-              `bIdent`.nodeSpan,
-              "required field `" & `nameLit` & "` was not set"))
+              `bIdent`.nodeSpan, `msgLit`))
     # Atomic construction.
     let construction = nnkObjConstr.newTree(typSym)
     construction.add(nnkExprColonExpr.newTree(discNimIdent, branch.discValue))
@@ -2268,12 +2276,15 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
     type `seqBuilderName` = object
       results: seq[`typSym`]
       cur: `builderName`
+      pendingNodeAnno: string
   let seqWrapProcs = quote do:
     proc visitBeginNode(`bIdent`: var `seqBuilderName`,
                    `nameStrIdent`: openArray[char],
                    `spanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
       `bIdent`.cur = `builderName`()
+      `bIdent`.cur.pendingNodeAnno = `bIdent`.pendingNodeAnno
+      `bIdent`.pendingNodeAnno = ""
       visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
     proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
              `tokIdent`: Token, `streamIdent`: TokenStream,
@@ -2293,6 +2304,12 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
                             `annoSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
       visitValueTypeAnno(`bIdent`.cur, `annoStrIdent`, `annoSpanIdent`)
+    proc visitNodeTypeAnno(`bIdent`: var `seqBuilderName`,
+                           `annoStrIdent`: openArray[char],
+                           `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.pendingNodeAnno = openArrayToString(`annoStrIdent`)
+      ok(void, ParseError)
     proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
       visitBeginChildren(`bIdent`.cur)
@@ -2316,9 +2333,9 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
 
   let capsTemplate = quote do:
     template visitorCaps*(_: typedesc[`builderName`]): set[VisitorCap] =
-      {vcArgs, vcProps, vcChildren, vcValueAnno}
+      {vcArgs, vcProps, vcChildren, vcValueAnno, vcNodeAnno}
     template visitorCaps*(_: typedesc[`seqBuilderName`]): set[VisitorCap] =
-      {vcArgs, vcProps, vcChildren, vcValueAnno}
+      {vcArgs, vcProps, vcChildren, vcValueAnno, vcNodeAnno}
 
   result = newStmtList(
     builderType, beginNodeProc, argProc, propProc, valueAnnoProc, endNodeProc,
@@ -2369,6 +2386,7 @@ macro deriveVisitor(typ: typedesc): untyped =
     elemTypeName: string    ## element type for instantiation (Action / Server / etc.)
     isSeq: bool
     isOption: bool          ## true ⇒ field type is `Option[Inner]`
+    expectedReserved: string  ## non-empty ⇒ child node MUST carry this tag
   var children: seq[ChildField]
   var unsupportedChildren: seq[string]  # for runtime-error reporting
   for f in shape.shared:
@@ -2399,6 +2417,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         elemTypeName: $elemTypeNode,
         isSeq: isSeq,
         isOption: f.isOption,
+        expectedReserved: f.expectedReserved,
       )
 
   # Track required fields (no defaultExpr → required).
@@ -2437,6 +2456,9 @@ macro deriveVisitor(typ: typedesc): untyped =
   # consumed (and cleared) by the next visitArg/visitProp. Empty string
   # = no pending annotation.
   builderFields.add newIdentDefs(ident("pendingValueAnno"), ident("string"))
+  # Holds the most recent node-level annotation set by visitNodeTypeAnno
+  # — read by visitBeginNode to enforce type-level `{.kdlReserved.}`.
+  builderFields.add newIdentDefs(ident("pendingNodeAnno"), ident("string"))
   if children.len > 0:
     builderFields.add newIdentDefs(ident("inChildren"), ident("bool"))
     builderFields.add newIdentDefs(ident("curChildName"), ident("string"))
@@ -2448,6 +2470,12 @@ macro deriveVisitor(typ: typedesc): untyped =
       if c.isOption:
         builderFields.add newIdentDefs(
           ident(c.nimName & "_present"), ident("bool"))
+      elif not c.isSeq:
+        # Singular required child — track seen so visitEndNode can
+        # surface a "missing required child" error when absent (matches
+        # the AST-walk path's R2-H1 behavior).
+        builderFields.add newIdentDefs(
+          ident(c.nimName & "_seen"), ident("bool"))
   let builderType = newNimNode(nnkTypeSection).add(
     newNimNode(nnkTypeDef).add(builderName, newEmptyNode(),
       newNimNode(nnkObjectTy).add(newEmptyNode(), newEmptyNode(),
@@ -2464,6 +2492,30 @@ macro deriveVisitor(typ: typedesc): untyped =
   let nodeLit = newLit(nodeName)
   let spanIdent = ident("nodeSpan")
 
+  # Type-level kdlReserved check: if the type carries {.kdlReserved: "tag".},
+  # the node MUST arrive with that tag. visitNodeTypeAnno fires before
+  # visitBeginNode, so we read pendingNodeAnno and validate here.
+  let typeReserved = extractTypeReserved(typSym)
+  let typeReservedLit = newLit(typeReserved)
+  let typeAnnoCheckBody =
+    if typeReserved.len > 0:
+      quote do:
+        if `bIdent`.pendingNodeAnno.len == 0:
+          return err[void, ParseError](initError(peTypeReservedMismatch,
+            `spanIdent`,
+            "type expects (" & `typeReservedLit` & ") tag on its node " &
+            "but source has no annotation"))
+        if `bIdent`.pendingNodeAnno != `typeReservedLit`:
+          return err[void, ParseError](initError(peTypeReservedMismatch,
+            `spanIdent`,
+            "type expects (" & `typeReservedLit` & ") tag on its node " &
+            "but source has (" & `bIdent`.pendingNodeAnno & ")"))
+        `bIdent`.pendingNodeAnno = ""
+    else:
+      # No constraint — leave pendingNodeAnno populated for child-slot
+      # forwarding (used by parent's child dispatch).
+      newStmtList()
+
   # Child-dispatch body for visitBeginNode when inChildren is true.
   # Routes the child node name to the right per-field builder slot.
   var childBeginDispatch = newNimNode(nnkCaseStmt).add(quote do:
@@ -2471,15 +2523,51 @@ macro deriveVisitor(typ: typedesc): untyped =
   for c in children:
     let kdlLit = newLit(c.kdlName)
     let slot = ident(c.nimName & "_b")
+    let expectedLit = newLit(c.expectedReserved)
+    let nimNameLit = newLit(c.nimName)
+    # Child-field-level kdlReserved: validate parent.pendingNodeAnno
+    # matches the field's expected tag (or that the source supplied any
+    # tag at all). Then forward parent.pendingNodeAnno to the child
+    # slot so the child's own type-level kdlReserved check sees it.
+    let childValidate =
+      if c.expectedReserved.len > 0:
+        quote do:
+          if `bIdent`.pendingNodeAnno.len == 0:
+            return err[void, ParseError](initError(peTypeReservedMismatch,
+              `spanIdent`,
+              "child `" & `nimNameLit` & "` expects (" & `expectedLit` &
+              ") tag but source child has no annotation"))
+          if `bIdent`.pendingNodeAnno != `expectedLit`:
+            return err[void, ParseError](initError(peTypeReservedMismatch,
+              `spanIdent`,
+              "child `" & `nimNameLit` & "` expects (" & `expectedLit` &
+              ") tag but source has (" & `bIdent`.pendingNodeAnno & ")"))
+      else:
+        newStmtList()
     if c.isOption:
       let presentFlag = ident(c.nimName & "_present")
       childBeginDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
         `bIdent`.curChildName = `kdlLit`
         `bIdent`.`presentFlag` = true
+        `childValidate`
+        `bIdent`.`slot`.pendingNodeAnno = `bIdent`.pendingNodeAnno
+        `bIdent`.pendingNodeAnno = ""
         return visitBeginNode(`bIdent`.`slot`, `nameStrIdent`, `spanIdent`))
-    else:
+    elif c.isSeq:
       childBeginDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
         `bIdent`.curChildName = `kdlLit`
+        `childValidate`
+        `bIdent`.`slot`.pendingNodeAnno = `bIdent`.pendingNodeAnno
+        `bIdent`.pendingNodeAnno = ""
+        return visitBeginNode(`bIdent`.`slot`, `nameStrIdent`, `spanIdent`))
+    else:
+      let seenFlag = ident(c.nimName & "_seen")
+      childBeginDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
+        `bIdent`.curChildName = `kdlLit`
+        `bIdent`.`seenFlag` = true
+        `childValidate`
+        `bIdent`.`slot`.pendingNodeAnno = `bIdent`.pendingNodeAnno
+        `bIdent`.pendingNodeAnno = ""
         return visitBeginNode(`bIdent`.`slot`, `nameStrIdent`, `spanIdent`))
   if children.len > 0:
     childBeginDispatch.add(newNimNode(nnkElse).add quote do:
@@ -2506,6 +2594,7 @@ macro deriveVisitor(typ: typedesc): untyped =
             return err[void, ParseError](initError(peTypeMismatch,
               `spanIdent`,
               "expected node `" & `nodeLit` & "`"))
+          `typeAnnoCheckBody`
           `defaultsBody`
           ok(void, ParseError)
     else:
@@ -2524,6 +2613,7 @@ macro deriveVisitor(typ: typedesc): untyped =
             return err[void, ParseError](initError(peTypeMismatch,
               `spanIdent`,
               "expected node `" & `nodeLit` & "`"))
+          `typeAnnoCheckBody`
           `defaultsBody`
           ok(void, ParseError)
 
@@ -2648,6 +2738,13 @@ macro deriveVisitor(typ: typedesc): untyped =
           `strAssign`
         of tkRawString:
           let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+          `strAssign`
+        of tkIdent:
+          # KDL v2: a bareword identifier in value position is a string.
+          # Mirror DocBuilder's lenient handling.
+          let s0 = `tokIdent`.span.start.offset
+          let s1 = `tokIdent`.span.finish.offset - 1
+          let `strSym` = `streamIdent`.source[s0 .. s1]
           `strAssign`
         else:
           return err[void, ParseError](initError(peTypeMismatch,
@@ -2835,17 +2932,38 @@ macro deriveVisitor(typ: typedesc): untyped =
           ok(void, ParseError)
 
   # 5/6/7. Children: no-op for flat case (cycle 7 adds children).
-  # visitEndNode: required-field check fires here.
+  # visitEndNode: required-field check fires here. Error wording mirrors
+  # the AST-walk path (emitArgDecode / emitAttrDecode / emitChildDecode)
+  # so consumer error-message matching is identical across both paths.
   var requiredCheckBody = newStmtList()
   if requiredNames.len > 0:
-    for i, name in requiredNames:
-      let idLit = newLit(uint8(i))
-      let nameLit = newLit(typName & "." & name)
+    for f in shape.shared:
+      if f.kind notin {fkArg, fkAttr}: continue
+      if f.defaultExpr.kind != nnkEmpty or f.isOption: continue
+      if not requiredIds.hasKey(f.nimName): continue
+      let idLit = newLit(uint8(requiredIds[f.nimName]))
+      let msgLit =
+        case f.kind
+        of fkArg:  newLit("missing required positional arg " &
+                          $f.argIndex & " ('" & f.kdlName & "')")
+        of fkAttr: newLit("missing required property '" & f.kdlName & "'")
+        else: newLit("")  # unreachable per guard above
       requiredCheckBody.add quote do:
         if `idLit` notin `bIdent`.seen:
           return err[void, ParseError](initError(peTypeMissingRequired,
-            `bIdent`.nodeSpan,
-            "required field `" & `nameLit` & "` was not set"))
+            `bIdent`.nodeSpan, `msgLit`))
+  # Singular required children: no default + not Option + not seq.
+  for c in children:
+    if c.isSeq or c.isOption: continue
+    # All singular non-Option children are treated as required (matches
+    # AST-walk: emitChildDecode emits a missing-required error when the
+    # child node isn't found).
+    let seenFlag = ident(c.nimName & "_seen")
+    let nameLit = newLit("missing required child node '" & c.kdlName & "'")
+    requiredCheckBody.add quote do:
+      if not `bIdent`.`seenFlag`:
+        return err[void, ParseError](initError(peTypeMissingRequired,
+          `bIdent`.nodeSpan, `nameLit`))
   # End-children: commit each child slot's accumulated results into
   # the matching parent.result.<nimName> field, then clear the
   # inChildren flag.
@@ -2923,12 +3041,21 @@ macro deriveVisitor(typ: typedesc): untyped =
 
   # 9. Seq variant. Uses a wrapping visitor that holds a seq + per-node
   # builder; visitEndNode commits to the seq and resets the builder for the
-  # next sibling. parseDocumentWith drives the loop over top-level nodes.
+  # next sibling. parseDocumentWith drives the loop over top-level nodes,
+  # so we filter by name: non-matching top-level nodes are silently
+  # skipped (matches AST-walk's "decode[seq[T]] only collects nodes
+  # whose name matches T's kdlNode").
+  # pendingNodeAnno on the wrapper survives the per-node `cur` reset so a
+  # parent's child-dispatch can stash an annotation onto the seq slot
+  # before each visitBeginNode forwards it into the fresh `cur`.
   let seqBuilderName = ident(typName & "VBuilderSeq")
+  let nodeNameLit = newLit(nodeName)
   let seqBuilderType = quote do:
     type `seqBuilderName` = object
       results: seq[`typSym`]
       cur: `builderName`
+      pendingNodeAnno: string
+      skipping: bool
   let annoStrIdent = ident("annoStr")
   let annoSpanIdent = ident("annoSpan")
   let valueAnnoProc = quote do:
@@ -2938,38 +3065,75 @@ macro deriveVisitor(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       `bIdent`.pendingValueAnno = openArrayToString(`annoStrIdent`)
       ok(void, ParseError)
+    proc visitNodeTypeAnno(`bIdent`: var `builderName`,
+                           `annoStrIdent`: openArray[char],
+                           `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.pendingNodeAnno = openArrayToString(`annoStrIdent`)
+      ok(void, ParseError)
   let seqWrapProcs = quote do:
     proc visitBeginNode(`bIdent`: var `seqBuilderName`,
                    `nameStrIdent`: openArray[char],
                    `spanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      # Top-level name filter: only nodes named per T's kdlNode are
+      # decoded. Others (e.g. other top-level node kinds in the same
+      # document) are silently skipped — matches AST-walk decode[seq[T]].
+      var nameMatch = `nameStrIdent`.len == `nodeNameLit`.len
+      if nameMatch:
+        for i in 0 ..< `nameStrIdent`.len:
+          if `nameStrIdent`[i] != `nodeNameLit`[i]:
+            nameMatch = false; break
+      if not nameMatch:
+        `bIdent`.skipping = true
+        `bIdent`.pendingNodeAnno = ""
+        return ok(void, ParseError)
+      `bIdent`.skipping = false
       `bIdent`.cur = `builderName`()
+      `bIdent`.cur.pendingNodeAnno = `bIdent`.pendingNodeAnno
+      `bIdent`.pendingNodeAnno = ""
       visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
     proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
              `tokIdent`: Token, `streamIdent`: TokenStream,
              `entrySpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping: return ok(void, ParseError)
       visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`, `entrySpanIdent`)
     proc visitProp(`bIdent`: var `seqBuilderName`,
               `keyStrIdent`: openArray[char],
               `tokIdent`: Token, `streamIdent`: TokenStream,
               `entrySpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping: return ok(void, ParseError)
       visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`, `streamIdent`,
                 entrySpan)
     proc visitValueTypeAnno(`bIdent`: var `seqBuilderName`,
                             `annoStrIdent`: openArray[char],
                             `annoSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping: return ok(void, ParseError)
       visitValueTypeAnno(`bIdent`.cur, `annoStrIdent`, `annoSpanIdent`)
+    proc visitNodeTypeAnno(`bIdent`: var `seqBuilderName`,
+                           `annoStrIdent`: openArray[char],
+                           `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      # Stash on the wrapper — `cur` gets recreated on the next
+      # visitBeginNode, which then forwards into the fresh cur.
+      `bIdent`.pendingNodeAnno = openArrayToString(`annoStrIdent`)
+      ok(void, ParseError)
     proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping: return ok(void, ParseError)
       visitBeginChildren(`bIdent`.cur)
     proc visitEndChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping: return ok(void, ParseError)
       visitEndChildren(`bIdent`.cur)
     proc visitEndNode(`bIdent`: var `seqBuilderName`, `nodeFullSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping:
+        `bIdent`.skipping = false
+        return ok(void, ParseError)
       let r = visitEndNode(`bIdent`.cur, `nodeFullSpanIdent`)
       if r.isErr: return r
       `bIdent`.results.add(`bIdent`.cur.result)
@@ -2983,15 +3147,11 @@ macro deriveVisitor(typ: typedesc): untyped =
       if r.isErr: return err[seq[`typSym`], ParseError](r.getErr)
       ok[seq[`typSym`], ParseError](sb.results)
 
-  # Capability declaration. Generated visitors consume the core protocol
-  # only (args, props, children). Annotation routing + slashdash are not
-  # required for typed decode — opting out lets parseDocumentWith skip
-  # the corresponding gate code via `when X in caps:` branches.
   let capsTemplate = quote do:
     template visitorCaps*(_: typedesc[`builderName`]): set[VisitorCap] =
-      {vcArgs, vcProps, vcChildren, vcValueAnno}
+      {vcArgs, vcProps, vcChildren, vcValueAnno, vcNodeAnno}
     template visitorCaps*(_: typedesc[`seqBuilderName`]): set[VisitorCap] =
-      {vcArgs, vcProps, vcChildren, vcValueAnno}
+      {vcArgs, vcProps, vcChildren, vcValueAnno, vcNodeAnno}
 
   result = newStmtList(
     builderType, beginNodeProc, argProc, propProc, valueAnnoProc, restProcs,
