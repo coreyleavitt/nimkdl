@@ -14,13 +14,11 @@ The other kdl-org samples (`Cargo.kdl`, `ci.kdl`, `website.kdl`) are real KDL bu
 
 ## Per-fixture comparison
 
-![Per-fixture comparison](docs/charts/per-fixture.svg)
+Every fixture, every parser, same container, same iteration counts.
 
-Every fixture, every parser, same container, same iteration counts. Bars are normalized to the row leader so whichever parser wins each row hits 100%.
+facet-kdl is absent from these rows because it wraps kdl-rs's parser — its parse number is kdl-rs's.
 
-facet-kdl is absent from the parse rows because it wraps kdl-rs's parser — its parse number is kdl-rs's.
-
-Honest caveat. This chart is **apples-to-ish-apples**. Each library is called with its idiomatic "give me my default parse output" API. The output shapes differ:
+Honest caveat. This is **apples-to-apples-ish**. Each library is called with its idiomatic "give me my default parse output" API. The output shapes differ:
 
 - ckdl drains SAX events with no AST construction (theoretical floor)
 - knus `parse_ast` builds a `Document` with spans
@@ -46,8 +44,6 @@ nimkdl wins 7 of 8 parse rows outright (3 by 1.5x or more), ties 1, and loses 1 
 
 The headline bench measures parse-to-AST. Most consumers actually want parse-then-decode-into-typed-structures in one shot. This is what `nimkdl parseInto[T]`, `knus parse::<Vec<T>>`, and `serde_json::from_str::<T>` all promise.
 
-![Typed decode comparison](docs/charts/typed-decode.svg)
-
 A homogeneous fixture of 100 service nodes (~5KB, `benchmarks/fixtures/homogeneous-services-100.kdl`).
 
 | Parser           | Path                                | ops/s   | vs knus |
@@ -62,8 +58,6 @@ The Service schema (name arg + 3 typed props) is identical across all three deri
 facet-kdl is 25× slower despite being advertised as knus's successor. Structural reason: facet-kdl depends on `kdl ^6.5.0` (kdl-rs), so its typed-decode perf is bounded by kdl-rs's parser plus the facet deserialize layer. The "successor" framing is about the typed-decode interface improvements (a more general derive system), not the parser.
 
 ## Typed encode
-
-![Encode comparison](docs/charts/encode.svg)
 
 Two shapes. Flat: 100 identically-shaped `service` nodes. Nested: 25 Server × 4 Action children = 100 inner nodes (same total work but exercises indent + recursion).
 
