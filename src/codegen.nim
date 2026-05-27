@@ -718,7 +718,7 @@ macro deriveEncode(typ: typedesc): untyped =
   # Features supported in E.1 scope: kdlArg + kdlProp with primitive
   # types (string/int/float/bool/enum). Anything else (kdlChild,
   # variant, kdlReserved, Option[T]) falls back to the legacy KdlNode
-  # path — body just delegates so the public encodeFrom[T] surface is
+  # path — body just delegates so the public encode[T] surface is
   # uniform across types; later slices replace the fallback per feature.
   let bufIdent = ident("buf")
   let indentIdent = ident("indent")
@@ -751,7 +751,7 @@ macro deriveEncode(typ: typedesc): untyped =
         "manually if you need this shape encoded."))
   else:
     # Type-level kdlReserved: emit `(tag)nodename` to match the spec
-    # behavior. Without this, encodeFrom would silently drop the
+    # behavior. Without this, encode[T] would silently drop the
     # type-level annotation for any type carrying `{.kdlReserved: "X".}`.
     let typeReservedLit = newLit(typeReserved)
     # Indent + tag + name. The tag is either:
@@ -2845,7 +2845,7 @@ macro deriveVisitor(typ: typedesc): untyped =
 # kdl: — block macro. The ONLY public surface for setting up KDL-mapped
 # types. Wraps a block containing one or more `type T {.kdlNode: "n".}`
 # definitions and emits the visitor + encode machinery for each, so
-# `decode[T]` / `decodeAll[T]` / `embed[T]` / `encode[T]` / `encodeFrom[T]`
+# `decode[T]` / `decodeAll[T]` / `embed[T]` / `encode[T]` / `encode[T]`
 # all work without per-type derive calls.
 #
 # Usage:
@@ -2897,7 +2897,7 @@ macro kdl*(body: untyped): untyped =
   ##   type Action {.kdlNode: "action".} = object
   ##     tmpl {.kdlArg, kdlRename: "template".}: string
   ##
-  ## # decode[Service], parseInto[Service], encodeFrom[Service] all work.
+  ## # decode[Service], parseInto[Service], encode[Service] all work.
   ## # Same for Action.
   ## ```
   ##

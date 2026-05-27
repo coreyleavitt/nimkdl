@@ -15,14 +15,11 @@
 ##                            apples-to-apples for knus
 ##                            `parse::<Vec<T>>` and facet-kdl
 ##                            `from_str::<ServiceDoc>`.
-##   3. Typed encode AST    — encode(seq[Service], emPretty), via
-##                            KdlNode/KdlDoc intermediate. Apples-to-
-##                            apples for kdl-rs `to_string` (untyped
-##                            AST roundtrip).
-##   4. Typed encode direct — `encodeFrom(seq[Service])`. Direct typed-
-##                            value → string. Apples-to-apples for
-##                            facet-kdl `to_string`.
-##   5. Typed encode NESTED — `encodeFrom(seq[Server])` where Server
+##   3. Typed encode        — `encode(seq[Service])`. Direct typed-value
+##                            → string (one path, post-collapse).
+##                            Apples-to-apples for facet-kdl
+##                            `to_string`.
+##   4. Typed encode NESTED — `encode(seq[Server])` where Server
 ##                            has Action children. Same inner-node
 ##                            count (100) but exercises indent + child
 ##                            recursion.
@@ -132,47 +129,39 @@ proc main() =
   echo "    kdl-rs     -- n/a, no typed decode path --"
   echo "    ckdl       -- n/a, no typed decode path --"
 
-  # 3 + 4. Typed encode on flat homogeneous shape — both paths still
-  # exist on the encode side (encode is AST-roundtrip, encodeFrom is
-  # direct typed-value → string).
+  # 3. Typed encode on flat homogeneous shape — single path now (the
+  # AST-roundtrip typed encode was removed; `encode[T]` IS the direct
+  # path). One row instead of the old direct-vs-AST split.
   echo "\n=== nkdl typed encode FLAT (100 Service nodes, no children) ===\n"
   let svcs = decode[seq[Service]](src)
   doAssert svcs.isOk
   let services = svcs.get
   block:
     let el = timeIt(5_000):
-      discard encode(services, emPretty)
-    report("nkdl encode(seq[Service], emPretty)  [AST roundtrip]", src.len, 5_000, el)
-  block:
-    let el = timeIt(5_000):
-      let r = encodeFrom(services)
+      let r = encode(services)
       discard r.get
-    report("nkdl encodeFrom(seq[Service])        [direct]", src.len, 5_000, el)
+    report("nkdl encode(seq[Service])", src.len, 5_000, el)
   echo ""
-  echo "  apples-to-apples competitors for typed encode:"
+  echo "  apples-to-apples competitors:"
   echo "    facet-kdl  to_string(&doc)                 (see facet-kdl/main.rs)"
   echo "    knus       -- n/a, knus has no encode path --"
   echo "    kdl-rs     to_string (untyped, AST roundtrip — different path)"
   echo "    ckdl       streaming emitter only — not directly comparable"
 
-  # 5. Typed encode on nested Server-with-Action children.
+  # 4. Typed encode on nested Server-with-Action children.
   echo "\n=== nkdl typed encode NESTED (25 Server x 4 Action children = 100 inner) ===\n"
   var servers = newSeq[Server](25)
   for i in 0 ..< 25:
-    servers[i] = Server(name: "host-" & $i, port: 1000 + i, actions: @[
+    servers[i] = Server(name: "host-" & $i, actions: @[
       Action(tmpl: "log"), Action(tmpl: "alert"),
       Action(tmpl: "metric"), Action(tmpl: "trace")])
   # synthetic input; report bytes-out instead of bytes-in.
-  let encOut = encodeFrom(servers).get
+  let encOut = encode(servers).get
   block:
     let el = timeIt(5_000):
-      discard encode(servers, emPretty)
-    report("nkdl encode(seq[Server], emPretty)   [AST roundtrip]", encOut.len, 5_000, el)
-  block:
-    let el = timeIt(5_000):
-      let r = encodeFrom(servers)
+      let r = encode(servers)
       discard r.get
-    report("nkdl encodeFrom(seq[Server])         [direct]", encOut.len, 5_000, el)
+    report("nkdl encode(seq[Server])", encOut.len, 5_000, el)
   echo ""
   echo "  No directly comparable harness — facet-kdl's bench is flat-only."
   echo "  This row exists to defend against \"flat-only encode\" critique."
