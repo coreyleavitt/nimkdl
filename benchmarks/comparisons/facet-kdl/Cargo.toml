@@ -10,3 +10,11 @@ facet-kdl = "0.42"
 [profile.release]
 lto = true
 codegen-units = 1
+
+[[bin]]
+name = "facet-kdl-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "facet-kdl-mem"
+path = "src/mem.rs"

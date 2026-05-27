@@ -8,3 +8,11 @@ miette = "5"
 [profile.release]
 lto = true
 codegen-units = 1
+
+[[bin]]
+name = "knus-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "knus-mem"
+path = "src/mem.rs"

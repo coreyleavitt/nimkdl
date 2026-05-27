@@ -109,8 +109,8 @@ run_knus() {
     -w /work \
     docker.io/library/rust:1.86 \
     sh -c '
-      mkdir -p src && cp main.rs src/main.rs
-      cargo build --release 2>&1 | tail -3
+      mkdir -p src && cp main.rs src/main.rs && cp mem.rs src/mem.rs
+      cargo build --release --bin knus-bench 2>&1 | tail -3
       ./target/release/knus-bench
     '
   echo ""
@@ -127,8 +127,8 @@ run_facet_kdl() {
     -w /work \
     docker.io/library/rust:1.90 \
     sh -c '
-      mkdir -p src && cp main.rs src/main.rs
-      cargo build --release 2>&1 | tail -3
+      mkdir -p src && cp main.rs src/main.rs && cp mem.rs src/mem.rs
+      cargo build --release --bin facet-kdl-bench 2>&1 | tail -3
       ./target/release/facet-kdl-bench
     '
   echo ""
@@ -151,12 +151,112 @@ run_kdl_rs() {
   echo ""
 }
 
+# Canonical fixtures for memory matrix — the three that exercise the
+# distinct regimes: huge tree (peak-driven), small realistic (held-doc-
+# driven), and typed homogeneous (apples-to-apples typed decode).
+MEM_FIXTURES=(tree-d8-b3.kdl realistic-config.kdl homogeneous-services-100.kdl)
+
+run_memory() {
+  echo "================================================================"
+  echo "  Memory footprint (Linux VmPeak, KB)"
+  echo "  One fresh process per (parser, fixture) — VmPeak is monotonic."
+  echo "================================================================"
+
+  # nimkdl mem — build once, run per fixture.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$REPO_ROOT:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/nimlang/nim:2.2.0 \
+    sh -c '
+      set -e
+      nim c --hints:off -d:release -d:lto \
+        -p:/work/src -o:/tmp/nimkdl-mem \
+        benchmarks/comparisons/nimkdl/mem.nim 2>&1 | tail -1 >&2
+      for f in '"${MEM_FIXTURES[*]}"'; do
+        /tmp/nimkdl-mem /fixtures/$f
+      done
+    '
+
+  # ckdl mem — build alongside the existing bench binary.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/ckdl:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/library/gcc:13 \
+    sh -c '
+      set -e
+      apt-get update -qq >/dev/null 2>&1
+      apt-get install -y -qq cmake git >/dev/null 2>&1
+      if [ ! -d ckdl ]; then
+        git clone --depth 1 https://github.com/tjol/ckdl.git
+        cd ckdl
+        cmake -B build -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_KDL_SHARED_LIBRARY=OFF -DBUILD_KDLPP=OFF \
+          -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF >/dev/null 2>&1
+        cmake --build build -j >/dev/null 2>&1
+        cd ..
+      fi
+      gcc -O3 -DNDEBUG -I ckdl/include -o ckdl-mem mem.c ckdl/build/libkdl.a -lm
+      for f in '"${MEM_FIXTURES[*]}"'; do
+        ./ckdl-mem /fixtures/$f
+      done
+    '
+
+  # knus mem.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/knus:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/library/rust:1.86 \
+    sh -c '
+      set -e
+      mkdir -p src && cp main.rs src/main.rs && cp mem.rs src/mem.rs
+      cargo build --release --bin knus-mem 2>&1 | tail -1 >&2
+      for f in '"${MEM_FIXTURES[*]}"'; do
+        ./target/release/knus-mem /fixtures/$f
+      done
+    '
+
+  # facet-kdl mem (only homogeneous-services is supported; others
+  # print a SKIPPED line — see harness comment for the asymmetry).
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/facet-kdl:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/library/rust:1.90 \
+    sh -c '
+      set -e
+      mkdir -p src && cp main.rs src/main.rs && cp mem.rs src/mem.rs
+      cargo build --release --bin facet-kdl-mem 2>&1 | tail -1 >&2
+      for f in '"${MEM_FIXTURES[*]}"'; do
+        ./target/release/facet-kdl-mem /fixtures/$f
+      done
+    '
+
+  # kdl-rs mem.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$HERE/kdl-rs:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/library/rust:1.83 \
+    sh -c '
+      set -e
+      cargo build --release --bin kdlrs-mem 2>&1 | tail -1 >&2
+      for f in '"${MEM_FIXTURES[*]}"'; do
+        ./target/release/kdlrs-mem /fixtures/$f
+      done
+    '
+  echo ""
+}
+
 if [ $# -eq 0 ]; then
   run_nimkdl
   run_ckdl
   run_knus
   run_facet_kdl
   run_kdl_rs
+  run_memory
   exit 0
 fi
 
@@ -168,6 +268,7 @@ for target in "$@"; do
     knus)          run_knus ;;
     facet-kdl)     run_facet_kdl ;;
     kdl-rs)        run_kdl_rs ;;
-    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs)" >&2; exit 1 ;;
+    memory)        run_memory ;;
+    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs|memory)" >&2; exit 1 ;;
   esac
 done

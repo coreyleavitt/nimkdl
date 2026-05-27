@@ -33,8 +33,23 @@
 ## Container: docker.io/nimlang/nim:2.2.0 (Debian trixie, glibc).
 ## Build flags: -d:release -d:nimCallDepthLimit=20000 -p:/work/src.
 
-import std/[os, times, strformat, monotimes]
+import std/[os, strutils, times, strformat, monotimes]
 import kdl
+
+proc peakRssKb(): int =
+  ## High-water-mark resident set size in KB. Reads /proc/self/status's
+  ## VmPeak — Linux-only; returns -1 on other platforms.
+  when defined(linux):
+    for line in lines("/proc/self/status"):
+      if line.startsWith("VmPeak:"):
+        for tok in line.splitWhitespace():
+          if tok.len > 0 and tok[0] in {'0'..'9'}: return parseInt(tok)
+    return -1
+  else:
+    return -1
+
+proc memReport(label: string, baselineKb, peakKb: int) =
+  echo &"  {label:<45} baseline {baselineKb:>6} KB   peak {peakKb:>6} KB   delta {peakKb - baselineKb:>6} KB"
 
 # Service: name arg + 3 typed props. Identical schema to:
 #   facet-kdl/main.rs   (Service)

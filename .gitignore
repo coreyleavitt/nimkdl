@@ -18,6 +18,7 @@ src/spans
 # Comparison benchmark build artifacts
 benchmarks/comparisons/ckdl/ckdl/
 benchmarks/comparisons/ckdl/bench
+benchmarks/comparisons/ckdl/ckdl-mem
 benchmarks/comparisons/knus/target/
 benchmarks/comparisons/knus/Cargo.lock
 benchmarks/comparisons/knus/src/
@@ -31,3 +32,4 @@ benchmarks/encode_from
 
 # Comparison run transcript
 benchmarks/comparisons/last-run.txt
+benchmarks/comparisons/last-mem.txt

@@ -93,6 +93,92 @@ Our parser does recursive descent directly into the AST. Each node allocates exa
 
 So the comparison isn't "Nim parser beats C parser at C parser's game." It's "AST-building Nim parser is faster than event-stream C parser if you eliminate the allocation overhead." That happens to be the apples-to-apples comparison for "how fast does my program get a usable tree out of a KDL file."
 
+## Memory footprint
+
+Peak resident memory (Linux `VmPeak`) after parsing each fixture N
+times with one final result held in scope. Captures both held-doc
+cost and transient allocator high-water — the number that matters
+for "will my container OOM."
+
+Same container per parser, same fixtures, glibc. `VmPeak` is
+monotonic per process, so each `(parser, fixture)` pair runs in a
+fresh process — otherwise an earlier fixture's peak contaminates
+later measurements.
+
+### `tree-d8-b3.kdl` (795 KB input, ~9,841 AST nodes)
+
+The peak-driven regime: a single huge document dominates allocator
+high-water.
+
+| Parser    | Baseline | Peak       | Delta      |
+|-----------|---------:|-----------:|-----------:|
+| ckdl      |  4.2 MB  |  20.6 MB   | **16.0 MB** |
+| nimkdl    |  4.1 MB  |  29.5 MB   | **24.7 MB** |
+| knus      |  4.3 MB  |  92.3 MB   | 85.8 MB    |
+| kdl-rs    |  4.0 MB  | 102.4 MB   | 96.0 MB    |
+| facet-kdl | — | — | _skipped, no untyped path_ |
+
+### `realistic-config.kdl` (6 KB, mixed top-level nodes)
+
+The held-doc regime on a small input: most parsers' deltas are
+dominated by allocator slack rather than the doc itself.
+
+| Parser    | Baseline | Peak     | Delta     |
+|-----------|---------:|---------:|----------:|
+| nimkdl    |  3.4 MB  |  3.4 MB  | **0 KB**  |
+| ckdl      |  3.4 MB  |  3.7 MB  | 260 KB    |
+| knus      |  3.6 MB  |  4.0 MB  | 340 KB    |
+| kdl-rs    |  3.3 MB  |  3.8 MB  | 528 KB    |
+| facet-kdl | — | — | _skipped, no untyped path_ |
+
+The 0 KB nimkdl number is real but a measurement artifact: Nim's
+preallocated heap absorbs the post-baseline allocations entirely
+before `VmPeak` ticks up. The held doc still exists — it's just
+under the runtime's already-resident page budget.
+
+### `homogeneous-services-100.kdl` (6 KB, typed Vec<Service>)
+
+Apples-to-apples typed decode — every parser holds a typed value of
+the same logical shape.
+
+| Parser    | Baseline | Peak     | Delta     |
+|-----------|---------:|---------:|----------:|
+| nimkdl    |  3.4 MB  |  3.4 MB  | **0 KB**  |
+| knus      |  3.6 MB  |  4.0 MB  | 336 KB    |
+| kdl-rs    |  3.3 MB  |  3.8 MB  | 528 KB    |
+| facet-kdl |  4.3 MB  |  4.8 MB  | 572 KB    |
+| ckdl      |  3.4 MB  |  5.2 MB  | 1,848 KB  |
+
+ckdl's footprint here is high because the same parse-event drain
+runs 200× on a small input — each parser instantiation is a fresh
+allocation cycle that the same-process measurement folds into the
+peak. The other parsers reuse allocator pages more aggressively
+across iterations.
+
+### Caveats
+
+`VmPeak` includes runtime baseline + allocator fragmentation + held
+doc + transient peaks during parse. It's an upper-bound "OOM risk"
+number, not a pure "doc structural cost in bytes." For per-byte
+structural cost, a heap profiler (Massif, dhat, custom allocator
+hooks) would give cleaner numbers — but those don't compare uniformly
+across language runtimes the way `VmPeak` does.
+
+**ckdl asymmetry.** ckdl is SAX-style — there is no AST built, so
+there is nothing structural to "hold" between iterations. ckdl's
+delta therefore captures only transient parse-state high-water, not
+held-doc cost. The other four parsers' deltas include both. This
+asymmetry is real and reflects an actual API difference, not a
+methodology bug: streaming parsers fundamentally have a smaller
+memory footprint than AST builders for the same input.
+
+**facet-kdl asymmetry.** facet-kdl exposes only a typed `from_str::<T>`
+entry point — no untyped path. We measure it on the one fixture
+with a defined typed shape (`homogeneous-services-100.kdl`) and
+skip the others rather than route them through facet-kdl's
+transitive kdl-rs dependency (which would just duplicate kdl-rs's
+numbers under a different label).
+
 ## Methodology
 
 Cross-implementation benchmarks lie easily. The discipline that makes this comparison hold up to outside scrutiny.
@@ -111,16 +197,17 @@ Cross-implementation benchmarks lie easily. The discipline that makes this compa
 
 ## What we don't measure
 
-Error rendering (we have rustc-style diagnostics; kdl-rs has miette's colored carets which do more work per error), mutation API throughput, and memory footprint. All asymmetric across libraries.
+Error rendering (we have rustc-style diagnostics; kdl-rs has miette's colored carets which do more work per error) and mutation API throughput. Both asymmetric across libraries.
 
 ## How to reproduce
 
 All four bench harnesses (nimkdl, ckdl, knus, kdl-rs) are vendored into this repo at `benchmarks/comparisons/`. One script runs them all back-to-back in matched containers.
 
 ```bash
-benchmarks/comparisons/run.sh           # all four
+benchmarks/comparisons/run.sh           # all five + memory matrix
 benchmarks/comparisons/run.sh nimkdl    # one specific
 benchmarks/comparisons/run.sh ckdl knus # multiple
+benchmarks/comparisons/run.sh memory    # memory footprint matrix only
 ```
 
 Requires `podman` (or set `CONTAINER_RUNTIME=docker`).
