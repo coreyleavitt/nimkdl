@@ -10,13 +10,12 @@ import std/[strutils, unittest]
 
 import ../src/[ast, codegen, encode, reserved, spans]
 
-type Service {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  replicas {.kdlProp.}: int = 1
-  enabled {.kdlProp.}: bool = true
-
-deriveEncode(Service)
+kdl:
+  type Service {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    replicas {.kdlProp.}: int = 1
+    enabled {.kdlProp.}: bool = true
 
 suite "encodeFrom[T] tracer (cycle E.1)":
 
@@ -41,14 +40,12 @@ suite "encodeFrom[T] tracer (cycle E.1)":
     check encodeFrom(s).get == viaLegacy.get
 
 # Cycle E.5 — children blocks
-type Action {.kdlNode: "action".} = object
-  tmpl {.kdlArg, kdlRename: "template".}: string
-type Server {.kdlNode: "server".} = object
-  name {.kdlArg.}: string
-  actions {.kdlChild.}: seq[Action]
-
-deriveEncode(Action)
-deriveEncode(Server)
+kdl:
+  type Action {.kdlNode: "action".} = object
+    tmpl {.kdlArg, kdlRename: "template".}: string
+  type Server {.kdlNode: "server".} = object
+    name {.kdlArg.}: string
+    actions {.kdlChild.}: seq[Action]
 
 suite "encodeFrom[T] children blocks (cycle E.5)":
 
@@ -67,12 +64,11 @@ suite "encodeFrom[T] children blocks (cycle E.5)":
     check encodeFrom(s).get == viaLegacy.get
 
 # Cycle E.4 — Option[T] fields
-type WithOpt {.kdlNode: "task".} = object
-  name {.kdlArg.}: string
-  retries {.kdlProp.}: Option[int]
-  desc {.kdlProp.}: Option[string]
-
-deriveEncode(WithOpt)
+kdl:
+  type WithOpt {.kdlNode: "task".} = object
+    name {.kdlArg.}: string
+    retries {.kdlProp.}: Option[int]
+    desc {.kdlProp.}: Option[string]
 
 suite "encodeFrom[T] Option[T] (cycle E.4)":
 
@@ -96,10 +92,9 @@ suite "encodeFrom[T] Option[T] (cycle E.4)":
     check encodeFrom(t).get == viaLegacy.get
 
 # Cycle E.6 — kdlReserved tag emission + validation
-type Tagged {.kdlNode: "tagged".} = object
-  bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
-
-deriveEncode(Tagged)
+kdl:
+  type Tagged {.kdlNode: "tagged".} = object
+    bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
 
 suite "encodeFrom[T] kdlReserved (cycle E.6)":
 

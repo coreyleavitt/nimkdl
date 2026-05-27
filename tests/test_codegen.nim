@@ -12,46 +12,38 @@ import ../src/spans
 # Type fixtures
 # ---------------------------------------------------------------------------
 
-type
-  SimpleAttrs {.kdlNode: "simple".} = object
-    name {.kdlProp.}: string
-    count {.kdlProp.}: int
-    enabled {.kdlProp.}: bool
+kdl:
+  type
+    SimpleAttrs {.kdlNode: "simple".} = object
+      name {.kdlProp.}: string
+      count {.kdlProp.}: int
+      enabled {.kdlProp.}: bool
 
-  WithArg {.kdlNode: "rule".} = object
-    id {.kdlArg.}: string
-    enabled {.kdlProp.}: bool = false   # default → optional
+    WithArg {.kdlNode: "rule".} = object
+      id {.kdlArg.}: string
+      enabled {.kdlProp.}: bool = false   # default → optional
 
-  WithDefault {.kdlNode: "config".} = object
-    threshold {.kdlProp.}: int = 50
-    label {.kdlProp.}: string = "unset"
+    WithDefault {.kdlNode: "config".} = object
+      threshold {.kdlProp.}: int = 50
+      label {.kdlProp.}: string = "unset"
 
-  WithRename {.kdlNode: "renamed".} = object
-    apiKey {.kdlProp, kdlRename: "api-key".}: string
+    WithRename {.kdlNode: "renamed".} = object
+      apiKey {.kdlProp, kdlRename: "api-key".}: string
 
-  WithSkip {.kdlNode: "skipme".} = object
-    keep {.kdlProp.}: string
-    nope {.kdlSkip.}: int
+    WithSkip {.kdlNode: "skipme".} = object
+      keep {.kdlProp.}: string
+      nope {.kdlSkip.}: int
 
-  Inner {.kdlNode: "inner".} = object
-    value {.kdlProp.}: int
+    Inner {.kdlNode: "inner".} = object
+      value {.kdlProp.}: int
 
-  WithChild {.kdlNode: "outer".} = object
-    label {.kdlProp.}: string
-    inner: Inner
+    WithChild {.kdlNode: "outer".} = object
+      label {.kdlProp.}: string
+      inner: Inner
 
-  WithSeqChild {.kdlNode: "container".} = object
-    label {.kdlProp.}: string
-    inner: seq[Inner]
-
-deriveDecode(SimpleAttrs)
-deriveDecode(WithArg)
-deriveDecode(WithDefault)
-deriveDecode(WithRename)
-deriveDecode(WithSkip)
-deriveDecode(Inner)
-deriveDecode(WithChild)
-deriveDecode(WithSeqChild)
+    WithSeqChild {.kdlNode: "container".} = object
+      label {.kdlProp.}: string
+      inner: seq[Inner]
 
 template parseOk[T](src: string, body: untyped) =
   let r = decode[T](src)
@@ -163,14 +155,13 @@ rule "c"
 
 # H8 fixture types must live at module scope: `deriveDecode` emits an
 # exported proc, and `proc ... *` is invalid inside a `suite` block.
-type
-  Natural16 = uint16
-  WidePrims {.kdlNode: "wide".} = object
-    a {.kdlProp.}: uint8
-    b {.kdlProp.}: int16
-    c {.kdlProp.}: Natural16   # alias
-
-deriveDecode(WidePrims)
+kdl:
+  type
+    Natural16 = uint16
+    WidePrims {.kdlNode: "wide".} = object
+      a {.kdlProp.}: uint8
+      b {.kdlProp.}: int16
+      c {.kdlProp.}: Natural16   # alias
 
 suite "codegen: H8 — non-string-allowlist primitives":
   # The previous typeNodeIsObject string-name allowlist missed types

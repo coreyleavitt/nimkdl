@@ -14,46 +14,32 @@ import ../src/encode
 import ../src/parser
 import ../src/spans
 
-type
-  Simple {.kdlNode: "simple".} = object
-    name {.kdlProp.}: string
-    count {.kdlProp.}: int
+kdl:
+  type
+    Simple {.kdlNode: "simple".} = object
+      name {.kdlProp.}: string
+      count {.kdlProp.}: int
 
-  WithArg {.kdlNode: "item".} = object
-    id {.kdlArg.}: string
-    enabled {.kdlProp.}: bool
+    WithArg {.kdlNode: "item".} = object
+      id {.kdlArg.}: string
+      enabled {.kdlProp.}: bool
 
-  Tagged {.kdlNode: "config".} = object
-    bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
+    Tagged {.kdlNode: "config".} = object
+      bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
 
-  Color = enum
-    cRed = "red"
-    cBlue = "blue"
+    Color = enum
+      cRed = "red"
+      cBlue = "blue"
 
-  WithEnum {.kdlNode: "fav".} = object
-    color {.kdlProp.}: Color
+    WithEnum {.kdlNode: "fav".} = object
+      color {.kdlProp.}: Color
 
-  Inner {.kdlNode: "inner".} = object
-    label {.kdlProp.}: string
+    Inner {.kdlNode: "inner".} = object
+      label {.kdlProp.}: string
 
-  Outer {.kdlNode: "outer".} = object
-    name {.kdlProp.}: string
-    inner {.kdlChild.}: Inner
-
-deriveEncode(Simple)
-deriveEncode(WithArg)
-deriveEncode(Tagged)
-deriveEncode(WithEnum)
-deriveEncode(Inner)
-deriveEncode(Outer)
-
-# For round-trip testing, also derive the decoders.
-deriveDecode(Simple)
-deriveDecode(WithArg)
-deriveDecode(Tagged)
-deriveDecode(WithEnum)
-deriveDecode(Inner)
-deriveDecode(Outer)
+    Outer {.kdlNode: "outer".} = object
+      name {.kdlProp.}: string
+      inner {.kdlChild.}: Inner
 
 suite "deriveEncode — primitives":
   test "encodes attributes":

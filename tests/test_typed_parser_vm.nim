@@ -14,12 +14,11 @@ import std/unittest
 import ../src/[lexer, intern, numlit, spans, typed_parser]
 import ../src/codegen
 
-type ServiceVM {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  replicas {.kdlProp.}: int = 1
-
-deriveVisitor(ServiceVM)
+kdl:
+  type ServiceVM {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    replicas {.kdlProp.}: int = 1
 
 # This block runs at compile time. If parseInto[ServiceVM] can't
 # execute in the VM, this fails to compile.

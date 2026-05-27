@@ -54,28 +54,23 @@ proc memReport(label: string, baselineKb, peakKb: int) =
 # Service: name arg + 3 typed props. Identical schema to:
 #   facet-kdl/main.rs   (Service)
 #   knus/main.rs        (Service)
-type Service {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  replicas {.kdlProp.}: int = 1
-  enabled {.kdlProp.}: bool = true
+kdl:
+  type Service {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    replicas {.kdlProp.}: int = 1
+    enabled {.kdlProp.}: bool = true
 
-# Nested shape for the encode bench: 25 Servers x 4 Actions = 100
-# inner nodes (same total work as the flat 100-Service shape, but
-# tests the indent + child-block recursion path).
-type Action {.kdlNode: "action".} = object
-  tmpl {.kdlArg, kdlRename: "template".}: string
+  # Nested shape for the encode bench: 25 Servers x 4 Actions = 100
+  # inner nodes (same total work as the flat 100-Service shape, but
+  # tests the indent + child-block recursion path).
+  type Action {.kdlNode: "action".} = object
+    tmpl {.kdlArg, kdlRename: "template".}: string
 
-type Server {.kdlNode: "server".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  actions {.kdlChild.}: seq[Action]
-
-deriveDecode(Service)
-deriveVisitor(Service)
-deriveEncode(Service)
-deriveEncode(Action)
-deriveEncode(Server)
+  type Server {.kdlNode: "server".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    actions {.kdlChild.}: seq[Action]
 
 proc report(name: string, contentLen: int, iters: int, elapsed: float) =
   let us = elapsed / iters.float * 1_000_000.0

@@ -6,12 +6,11 @@ import ../src/ast
 import ../src/codegen
 import ../src/spans
 
-type
-  Rule {.kdlNode: "rule".} = object
-    id {.kdlArg.}: string
-    enabled {.kdlProp.}: bool = false   # optional → defaults when absent
-
-deriveDecode(Rule)
+kdl:
+  type
+    Rule {.kdlNode: "rule".} = object
+      id {.kdlArg.}: string
+      enabled {.kdlProp.}: bool = false   # optional → defaults when absent
 
 # Files referenced are resolved relative to this .nim file's directory
 # (same rule as staticRead's lookup behavior).

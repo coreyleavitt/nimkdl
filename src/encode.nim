@@ -212,6 +212,23 @@ func appendFieldValue*(buf: var string, i: int) {.noSideEffect, inline.} =
   appendInt(buf, int64(i))
 func appendFieldValue*(buf: var string, i: int64) {.noSideEffect, inline.} =
   appendInt(buf, i)
+func appendFieldValue*[T: int8|int16|int32](buf: var string, i: T)
+    {.noSideEffect, inline.} =
+  appendInt(buf, int64(i))
+func appendFieldValue*[T: uint8|uint16|uint32](buf: var string, i: T)
+    {.noSideEffect, inline.} =
+  ## Sub-int unsigned widths fit losslessly into int64. The kdl:
+  ## block macro emits encode for any primitive field, so the
+  ## overload set must cover what decode[T] does (which already
+  ## accepts SomeUnsignedInt via kdlDecodeValue).
+  appendInt(buf, int64(i))
+func appendFieldValue*(buf: var string, i: uint) {.noSideEffect, inline.} =
+  # `uint` is 64-bit on common targets; values above int64.high don't
+  # fit. Emit as int64; callers needing the full uint64 range should
+  # encode through the KdlDoc path which uses kvBigInt.
+  appendInt(buf, int64(i))
+func appendFieldValue*(buf: var string, i: uint64) {.noSideEffect, inline.} =
+  appendInt(buf, int64(i))
 func appendFieldValue*(buf: var string, f: float) {.noSideEffect, inline.} =
   appendFloat(buf, f)
 func appendFieldValue*(buf: var string, f: float32) {.noSideEffect, inline.} =

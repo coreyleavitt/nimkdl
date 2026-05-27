@@ -12,12 +12,11 @@ import std/unittest
 import ../src/codegen
 import ../src/spans
 
-type
-  Rule {.kdlNode: "rule".} = object
-    id {.kdlArg.}: string
-    enabled {.kdlProp.}: bool = false
-
-deriveDecode(Rule)
+kdl:
+  type
+    Rule {.kdlNode: "rule".} = object
+      id {.kdlArg.}: string
+      enabled {.kdlProp.}: bool = false
 
 # The acid test: if this `const` compiles, decode[T] runs at compile time.
 const compileTimeDecoded = decode[Rule]("rule \"baked-in\" enabled=#true")

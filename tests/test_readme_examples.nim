@@ -11,27 +11,25 @@ import ../src/nkdl
 
 # Top-level types (Nim doesn't allow `type` blocks nested in a suite).
 
-type
-  Action {.kdlNode: "action".} = object
-    kind* {.kdlArg.}: string
-    tmpl* {.kdlProp, kdlRename: "template".}: string
+kdl:
+  type
+    Action {.kdlNode: "action".} = object
+      kind* {.kdlArg.}: string
+      tmpl* {.kdlProp, kdlRename: "template".}: string
 
-  Rule {.kdlNode: "rule".} = object
-    id* {.kdlArg.}: string
-    enabled* {.kdlProp.}: bool = true
-    action*: Action
+    Rule {.kdlNode: "rule".} = object
+      id* {.kdlArg.}: string
+      enabled* {.kdlProp.}: bool = true
+      action*: Action
 
-  QRule = object
-    id*: string
-    enabled*: bool
-    score*: int
+    QRule = object
+      id*: string
+      enabled*: bool
+      score*: int
 
-  DemoRule = object
-    id*: string
-    enabled*: bool
-
-deriveDecode(Action)
-deriveDecode(Rule)
+    DemoRule = object
+      id*: string
+      enabled*: bool
 
 let queryRules = @[
   QRule(id: "a", enabled: true,  score: 10),

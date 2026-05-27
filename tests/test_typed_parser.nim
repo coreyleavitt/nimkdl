@@ -8,7 +8,7 @@
 ## Acceptance for this cycle: parseInto[Service]("...") returns a
 ## populated Service with default values firing for missing fields.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, options]
 import ../src/[lexer, intern, numlit, spans, typed_parser]
 import ../src/codegen   # for kdlNode, kdlArg, kdlProp pragmas
 
@@ -124,13 +124,12 @@ suite "typed parser — tracer bullet (hand-written visitor)":
 # parseInto[T](src) which constructs the visitor + runs the parser
 # internally.
 
-type ServiceTyped {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  replicas {.kdlProp.}: int = 1
-  enabled {.kdlProp.}: bool = true
-
-deriveVisitor(ServiceTyped)
+kdl:
+  type ServiceTyped {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    replicas {.kdlProp.}: int = 1
+    enabled {.kdlProp.}: bool = true
 
 suite "typed parser — macro-generated visitor (cycle 2)":
   test "parseInto[ServiceTyped] decodes one service":
@@ -223,15 +222,13 @@ suite "typed parser — unknown property strict (cycle 6)":
     check "service" in r.getErr.hint
 
 # Cycle 7b: nested children. Server has a `kdlChild` field of seq[Action].
-type Action {.kdlNode: "action".} = object
-  kind {.kdlArg.}: string
+kdl:
+  type Action {.kdlNode: "action".} = object
+    kind {.kdlArg.}: string
 
-type Server {.kdlNode: "server".} = object
-  name {.kdlArg.}: string
-  actions {.kdlChild.}: seq[Action]
-
-deriveVisitor(Action)
-deriveVisitor(Server)
+  type Server {.kdlNode: "server".} = object
+    name {.kdlArg.}: string
+    actions {.kdlChild.}: seq[Action]
 
 suite "typed parser — nested children (cycle 7b)":
   test "Server with seq[Action] children decodes":
@@ -256,12 +253,11 @@ server "deploy-svc" {
     check r.get.actions.len == 0
 
 # Cycle 8 slice 1: float field type.
-type Metric {.kdlNode: "metric".} = object
-  name {.kdlArg.}: string
-  weight {.kdlProp.}: float
-  ratio {.kdlProp.}: float = 1.0
-
-deriveVisitor(Metric)
+kdl:
+  type Metric {.kdlNode: "metric".} = object
+    name {.kdlArg.}: string
+    weight {.kdlProp.}: float
+    ratio {.kdlProp.}: float = 1.0
 
 suite "typed parser — float fields (cycle 8 slice 1)":
   test "decodes float prop":
@@ -299,3 +295,67 @@ suite "typed parser — type annotations (cycle 8 slice 2)":
     let r = parseInto[ServiceTyped]("(deployment)service \"x\" port=80")
     check r.isOk
     check r.get.name == "x"
+
+# Visitor parity with decode[T]: Option[T] primitives, enum args/props,
+# and the kdl: block as the single derive surface.
+type Mode = enum
+  mFoo = "foo"
+  mBar = "bar"
+
+kdl:
+  type OptInVisitor {.kdlNode: "task".} = object
+    name {.kdlArg.}: string
+    retries {.kdlProp.}: Option[int]
+    desc {.kdlProp.}: Option[string]
+    flag {.kdlProp.}: Option[bool]
+
+  type EnumProp {.kdlNode: "ep".} = object
+    name {.kdlArg.}: string
+    mode {.kdlProp.}: Mode
+
+  type EnumArg {.kdlNode: "ea".} = object
+    mode {.kdlArg.}: Mode
+    name {.kdlArg.}: string
+
+suite "typed parser — Option[T] parity (visitor extension)":
+  test "Option fields default to none when absent":
+    let r = parseInto[OptInVisitor]("task \"build\"")
+    check r.isOk
+    if r.isOk:
+      check r.get.name == "build"
+      check r.get.retries.isNone
+      check r.get.desc.isNone
+      check r.get.flag.isNone
+
+  test "Option fields wrap value in some when present":
+    let r = parseInto[OptInVisitor](
+      "task \"lint\" retries=3 desc=\"ok\" flag=#true")
+    check r.isOk
+    if r.isOk:
+      check r.get.retries == some(3)
+      check r.get.desc == some("ok")
+      check r.get.flag == some(true)
+
+  test "Option fields surface type mismatch (not silent none)":
+    let r = parseInto[OptInVisitor]("task \"x\" retries=\"not a number\"")
+    check r.isErr
+
+suite "typed parser — enum parity (visitor extension)":
+  test "enum prop decodes from quoted string":
+    let r = parseInto[EnumProp]("ep \"x\" mode=\"foo\"")
+    check r.isOk
+    if r.isOk:
+      check r.get.mode == mFoo
+
+  test "enum arg decodes from quoted string":
+    let r = parseInto[EnumArg]("ea \"bar\" \"name\"")
+    check r.isOk
+    if r.isOk:
+      check r.get.mode == mBar
+      check r.get.name == "name"
+
+  test "invalid enum value surfaces peTypeEnumInvalid":
+    let r = parseInto[EnumProp]("ep \"x\" mode=\"baz\"")
+    check r.isErr
+    if r.isErr:
+      check r.getErr.code == peTypeEnumInvalid

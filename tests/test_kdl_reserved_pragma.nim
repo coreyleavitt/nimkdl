@@ -11,20 +11,17 @@ import std/[strutils, unittest]
 import ../src/codegen
 import ../src/spans
 
-type
-  Cfg {.kdlNode: "cfg".} = object
-    endpoint {.kdlProp, kdlReserved: "url".}: string
+kdl:
+  type
+    Cfg {.kdlNode: "cfg".} = object
+      endpoint {.kdlProp, kdlReserved: "url".}: string
 
-  Server {.kdlNode: "server".} = object
-    host {.kdlArg, kdlReserved: "ipv4".}: string
+    Server {.kdlNode: "server".} = object
+      host {.kdlArg, kdlReserved: "ipv4".}: string
 
-  Mixed {.kdlNode: "mixed".} = object
-    id {.kdlProp, kdlReserved: "uuid".}: string
-    plain {.kdlProp.}: string   ## no kdlReserved → any tag (or none) OK
-
-deriveDecode(Cfg)
-deriveDecode(Server)
-deriveDecode(Mixed)
+    Mixed {.kdlNode: "mixed".} = object
+      id {.kdlProp, kdlReserved: "uuid".}: string
+      plain {.kdlProp.}: string   ## no kdlReserved → any tag (or none) OK
 
 suite "kdlReserved pragma (Layer 3)":
   test "field with declared (url) decodes when source carries it":

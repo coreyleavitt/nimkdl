@@ -63,12 +63,22 @@ import ./parser
 import ./reserved
 import ./spans
 
+# Re-export the ast/parser/reserved helpers that the `kdl:` block
+# macro's emitted decode/encode code calls by bare-identifier (e.g.
+# `node.children(doc, "x")`, `peTypeMismatch`, `validateReserved`,
+# `decode[T]`). Without these re-exports, every consumer of `kdl:`
+# would have to chase the transitive imports themselves. The block
+# macro is the sole public surface; the imports it implies are part
+# of that surface.
+export ast, parser, reserved, spans, intern
+
 # ---------------------------------------------------------------------------
 # Pragmas (just marker templates — no behavior)
 # ---------------------------------------------------------------------------
 
 template kdlNode*(name: string) {.pragma.}
   ## Type-level: explicit KDL node name. Defaults to type-name lowercased.
+  ## See ``kdl`` for the all-in-one pragma that also emits the derives.
 template kdlArg*() {.pragma.}
   ## Field-level: serialize/parse as a positional argument.
 template kdlProp*() {.pragma.}
@@ -926,7 +936,7 @@ proc emitFieldDecode(f: FieldSpec, targetAccess, nodeIdent, docIdent: NimNode):
   of fkAttr: emitAttrDecode(f, targetAccess, nodeIdent, docIdent)
   of fkChild: emitChildDecode(f, targetAccess, nodeIdent, docIdent)
 
-macro deriveDecode*(typ: typedesc): untyped =
+macro deriveDecode(typ: typedesc): untyped =
   ## Emit a `kdlDecodeImpl` overload for `typ`. The procedure walks a
   ## KdlNode and populates `var typ` from its entries and children.
   ##
@@ -1239,7 +1249,7 @@ proc emitFieldEncode(f: FieldSpec, sourceAccess, docIdent, nodeIdent: NimNode,
   of fkAttr:  emitAttrEncode(f, sourceAccess, docIdent, nodeIdent, pathLit)
   of fkChild: emitChildEncode(f, sourceAccess, docIdent, nodeIdent)
 
-macro deriveEncode*(typ: typedesc): untyped =
+macro deriveEncode(typ: typedesc): untyped =
   ## Emit a `kdlEncodeImpl` overload for `typ` (the symmetric
   ## counterpart to `deriveDecode`). Generated procedure walks a typed
   ## value and produces the equivalent `KdlNode`, with the configured
@@ -1770,7 +1780,7 @@ import ./typed_parser
 import ./lexer
 import ./numlit
 
-macro deriveVisitor*(typ: typedesc): untyped =
+macro deriveVisitor(typ: typedesc): untyped =
   ## Emit the per-type visitor machinery for the typed-direct parse path.
   ## Generated code is dumpable via `-d:dumpKdlGen`.
   let typSym =
@@ -1786,8 +1796,32 @@ macro deriveVisitor*(typ: typedesc): untyped =
   let recList = body[2]
   let shape = collectShape(recList)
   if shape.hasVariant:
-    error("deriveVisitor: variant types not yet supported (cycle 2 scope)",
-          typ)
+    # Variant types need per-branch field dispatch + a discriminator-
+    # aware visitor — not yet implemented for the typed-direct path.
+    # Emit a stub `kdlBuildVisitor` overload that returns a clear
+    # runtime error so the surrounding `kdl:` block can still emit
+    # decode + encode for the variant (both of which DO handle
+    # variants). Callers using parseInto[T] on a variant fall back to
+    # decode[T] explicitly.
+    let typNameLit = newLit($typSym)
+    result = quote do:
+      proc kdlBuildVisitor(_: typedesc[`typSym`], source: string,
+                           sourcePath: string):
+          Result[`typSym`, ParseError] =
+        err[`typSym`, ParseError](initError(peTypeMismatch,
+          pointSpan(StartPosition),
+          "parseInto[" & `typNameLit` & "]: variant types are not " &
+          "supported by the typed-direct path yet; use decode[" &
+          `typNameLit` & "] instead."))
+      proc kdlBuildVisitorSeq(_: typedesc[`typSym`], source: string,
+                              sourcePath: string):
+          Result[seq[`typSym`], ParseError] =
+        err[seq[`typSym`], ParseError](initError(peTypeMismatch,
+          pointSpan(StartPosition),
+          "parseInto[seq[" & `typNameLit` & "]]: variant types are " &
+          "not supported by the typed-direct path yet; use decode[seq[" &
+          `typNameLit` & "]] instead."))
+    return result
 
   let typName = $typSym
   let nodeName = extractNodeName(typSym)
@@ -1810,10 +1844,24 @@ macro deriveVisitor*(typ: typedesc): untyped =
     elemTypeName: string    ## element type for instantiation (Action / Server / etc.)
     isSeq: bool
   var children: seq[ChildField]
+  var unsupportedChildren: seq[string]  # for runtime-error reporting
   for f in shape.shared:
     if f.kind == fkChild:
       let isSeq = typeNodeIsSeq(f.typeNode)
+      # Option[Inner] kdlChild is not yet plumbed through the visitor —
+      # would need a per-slot `present: bool` flag in the builder plus
+      # commit-on-end logic. Record + skip; the slot is omitted from
+      # the visitor's child dispatch so the field stays default-init
+      # (`none(Inner)`). decode[T] still handles it via emitChildDecode.
+      if f.isOption:
+        unsupportedChildren.add(f.nimName)
+        continue
       let elemTypeNode = if isSeq: f.typeNode[1] else: f.typeNode
+      if elemTypeNode.kind notin {nnkIdent, nnkSym}:
+        # Defensive: skip exotic shapes (e.g. seq[Option[T]]) rather
+        # than blowing up codegen.
+        unsupportedChildren.add(f.nimName)
+        continue
       children.add ChildField(
         nimName: f.nimName,
         kdlName: f.kdlName,
@@ -1828,7 +1876,12 @@ macro deriveVisitor*(typ: typedesc): untyped =
   var requiredIds: Table[string, int]   # fieldNimName -> id
   var requiredNames: seq[string]        # ordered list for error msgs
   for f in shape.shared:
-    if f.defaultExpr.kind == nnkEmpty and f.kind in {fkArg, fkAttr}:
+    # Option[T] fields are never "required" — their absent state has
+    # a meaningful default (none(T)), and visitor-side emitFieldAssign
+    # only fires assignDecoded on the present-arg path. Skip them to
+    # keep visitEndNode's required-check honest.
+    if f.defaultExpr.kind == nnkEmpty and f.kind in {fkArg, fkAttr} and
+       not f.isOption:
       requiredIds[f.nimName] = requiredNames.len
       requiredNames.add(f.nimName)
 
@@ -1928,77 +1981,156 @@ macro deriveVisitor*(typ: typedesc): untyped =
           `defaultsBody`
           ok(void, ParseError)
 
+  # Helper: emit the per-field decode body for visitArg/visitProp.
+  # Handles Option[T] for primitive T (wraps in some), enum fields
+  # (tkString/tkRawString → decodeEnumFromString), and the primitive
+  # int/string/bool/float core. Unsupported shapes fall through to a
+  # runtime peTypeMismatch — codegen never errors here so the
+  # surrounding `kdl:` block can still emit decode+encode for the type.
+  proc emitVisitorFieldAssign(f: FieldSpec, fieldLabel: NimNode,
+                              seenStmt: NimNode): NimNode =
+    let nimName = ident(f.nimName)
+    # For Option[T] fields, the underlying primitive type for token
+    # dispatch is f.innerType; we wrap the decoded value in `some(...)`.
+    # Option fields skip the seen.incl bit (they're never "required").
+    let isOpt = f.isOption
+    let primTypeNode = if isOpt: f.innerType else: f.typeNode
+    let primTypeName = $primTypeNode
+    let typeStr = primTypeName  # for error msgs
+    # Build core: a stmtlist that, given a `decoded` ident of the right
+    # primitive type, assigns it to the target field (wrapping in some
+    # if Option) and runs the seen bit if not Option.
+    proc assignDecoded(decodedExpr: NimNode): NimNode =
+      if isOpt:
+        quote do:
+          `bIdent`.result.`nimName` = some(`decodedExpr`)
+      else:
+        let asn = quote do:
+          `bIdent`.result.`nimName` = `decodedExpr`
+        # Append seenStmt
+        let s = newStmtList()
+        s.add(asn)
+        s.add(seenStmt)
+        s
+
+    # Enum dispatch: read string payload then decodeEnumFromString.
+    if f.typeIsEnum:
+      let innerT = primTypeNode
+      let strSym = genSym(nskLet, "enumStr")
+      let outSym = genSym(nskVar, "enumOut")
+      let body = quote do:
+        var `outSym`: `innerT`
+        if not decodeEnumFromString(`outSym`, `strSym`):
+          return err[void, ParseError](initError(peTypeEnumInvalid,
+            `tokIdent`.span, "invalid enum value for `" &
+            `fieldLabel` & "`: '" & `strSym` & "'"))
+      let assignBody = newStmtList()
+      assignBody.add(body)
+      assignBody.add(assignDecoded(outSym))
+      return quote do:
+        case `tokIdent`.kind
+        of tkString:
+          let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+          `assignBody`
+        of tkRawString:
+          let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+          `assignBody`
+        else:
+          # Bareword (tkIdent) enum values are not yet supported through
+          # the typed-direct path — visitArg/visitProp don't receive the
+          # source slice needed to read the bareword bytes. Use decode[T]
+          # for that case, or quote the value in source.
+          return err[void, ParseError](initError(peTypeEnumInvalid,
+            `tokIdent`.span, "expected string for enum `" &
+            `fieldLabel` & "` (bareword enum values via parseInto " &
+            "not supported; quote the value or use decode[T])"))
+
+    case primTypeName
+    of "string":
+      let strSym = genSym(nskLet, "strVal")
+      let strAssign = assignDecoded(strSym)
+      quote do:
+        case `tokIdent`.kind
+        of tkString:
+          let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+          `strAssign`
+        of tkRawString:
+          let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+          `strAssign`
+        else:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected string for `" &
+            `fieldLabel` & "`"))
+    of "int":
+      let intSym = genSym(nskLet, "intVal")
+      let intAssign = assignDecoded(intSym)
+      quote do:
+        if `tokIdent`.kind != tkNumber:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected int for `" &
+            `fieldLabel` & "`"))
+        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+        let d = decodeIntFromToken(n, `tokIdent`.span)
+        if d.isErr: return err[void, ParseError](d.getErr)
+        let `intSym` = int(d.get)
+        `intAssign`
+    of "bool":
+      let boolSym = genSym(nskLet, "boolVal")
+      let boolAssign = assignDecoded(boolSym)
+      quote do:
+        if `tokIdent`.kind != tkKeyword:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected bool for `" &
+            `fieldLabel` & "`"))
+        let `boolSym` = (`tokIdent`.keyword == kwTrue)
+        `boolAssign`
+    of "float", "float64":
+      let fltSym = genSym(nskLet, "fltVal")
+      let fltAssign = assignDecoded(fltSym)
+      quote do:
+        if `tokIdent`.kind != tkNumber:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected number for `" &
+            `fieldLabel` & "`"))
+        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+        let `fltSym` =
+          if looksLikeFloat(n):
+            let d = decodeFloatFromToken(n, `tokIdent`.span)
+            if d.isErr: return err[void, ParseError](d.getErr)
+            d.get
+          else:
+            let d = decodeIntFromToken(n, `tokIdent`.span)
+            if d.isErr: return err[void, ParseError](d.getErr)
+            float(d.get)
+        `fltAssign`
+    else:
+      # Unsupported shape (e.g. Option[CustomObject], custom non-enum
+      # types, kdlReserved-validated fields where we'd need to track
+      # the inbound value annotation). Emit a runtime error — never
+      # block codegen, so the surrounding kdl: block can still emit
+      # decode + encode for the type. Use decode[T] for these fields.
+      let typeStrLit = newLit(typeStr)
+      quote do:
+        return err[void, ParseError](initError(peTypeMismatch,
+          `tokIdent`.span, "unsupported field type `" & `typeStrLit` &
+          "` for `" & `fieldLabel` &
+          "` in typed-direct path (use decode[T])"))
+
   # 3. visitArg: dispatch by positional index.
   var argCase = newNimNode(nnkCaseStmt).add(idxIdent)
   var argSeen = 0
   for f in shape.shared:
     if f.kind == fkArg:
-      let nimName = ident(f.nimName)
       let lit = newLit(argSeen)
-      let typeName = $f.typeNode
       let fieldLabel = newLit(typName & "." & f.nimName)
       # Mark this field "seen" for the required-field check in endNode.
+      # Option fields skip this — they're definitionally not required.
       let seenStmt =
-        if requiredIds.hasKey(f.nimName):
+        if requiredIds.hasKey(f.nimName) and not f.isOption:
           let idLit = newLit(uint8(requiredIds[f.nimName]))
           quote do: `bIdent`.seen.incl(`idLit`)
         else: newStmtList()
-      let assignment =
-        case typeName
-        of "string":
-          quote do:
-            case `tokIdent`.kind
-            of tkString:
-              `bIdent`.result.`nimName` =
-                `streamIdent`.stringPayloads[`tokIdent`.strIdx]
-              `seenStmt`
-            of tkRawString:
-              `bIdent`.result.`nimName` =
-                `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
-              `seenStmt`
-            else:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected string for `" &
-                `fieldLabel` & "`"))
-        of "int":
-          quote do:
-            if `tokIdent`.kind != tkNumber:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected int for `" &
-                `fieldLabel` & "`"))
-            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-            let d = decodeIntFromToken(n, `tokIdent`.span)
-            if d.isErr: return err[void, ParseError](d.getErr)
-            `bIdent`.result.`nimName` = int(d.get)
-            `seenStmt`
-        of "bool":
-          quote do:
-            if `tokIdent`.kind != tkKeyword:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected bool for `" &
-                `fieldLabel` & "`"))
-            `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
-            `seenStmt`
-        of "float", "float64":
-          quote do:
-            if `tokIdent`.kind != tkNumber:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected number for `" &
-                `fieldLabel` & "`"))
-            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-            if looksLikeFloat(n):
-              let d = decodeFloatFromToken(n, `tokIdent`.span)
-              if d.isErr: return err[void, ParseError](d.getErr)
-              `bIdent`.result.`nimName` = d.get
-            else:
-              let d = decodeIntFromToken(n, `tokIdent`.span)
-              if d.isErr: return err[void, ParseError](d.getErr)
-              `bIdent`.result.`nimName` = float(d.get)
-            `seenStmt`
-        else:
-          quote do:
-            return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported arg type for typed-direct path"))
+      let assignment = emitVisitorFieldAssign(f, fieldLabel, seenStmt)
       argCase.add(newNimNode(nnkOfBranch).add(lit).add(assignment))
       inc argSeen
   argCase.add(newNimNode(nnkElse).add quote do:
@@ -2044,71 +2176,13 @@ macro deriveVisitor*(typ: typedesc): untyped =
   var propBranches: seq[(string, NimNode)]  # (kdlName, assignment)
   for f in shape.shared:
     if f.kind == fkAttr:
-      let nimName = ident(f.nimName)
-      let kdlName = newLit(f.kdlName)
-      let typeName = $f.typeNode
       let fieldLabel = newLit(typName & "." & f.nimName)
       let seenStmt =
-        if requiredIds.hasKey(f.nimName):
+        if requiredIds.hasKey(f.nimName) and not f.isOption:
           let idLit = newLit(uint8(requiredIds[f.nimName]))
           quote do: `bIdent`.seen.incl(`idLit`)
         else: newStmtList()
-      let assignment =
-        case typeName
-        of "string":
-          quote do:
-            case `tokIdent`.kind
-            of tkString:
-              `bIdent`.result.`nimName` =
-                `streamIdent`.stringPayloads[`tokIdent`.strIdx]
-              `seenStmt`
-            of tkRawString:
-              `bIdent`.result.`nimName` =
-                `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
-              `seenStmt`
-            else:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected string for `" &
-                `fieldLabel` & "`"))
-        of "int":
-          quote do:
-            if `tokIdent`.kind != tkNumber:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected int for `" &
-                `fieldLabel` & "`"))
-            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-            let d = decodeIntFromToken(n, `tokIdent`.span)
-            if d.isErr: return err[void, ParseError](d.getErr)
-            `bIdent`.result.`nimName` = int(d.get)
-            `seenStmt`
-        of "bool":
-          quote do:
-            if `tokIdent`.kind != tkKeyword:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected bool for `" &
-                `fieldLabel` & "`"))
-            `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
-            `seenStmt`
-        of "float", "float64":
-          quote do:
-            if `tokIdent`.kind != tkNumber:
-              return err[void, ParseError](initError(peTypeMismatch,
-                `tokIdent`.span, "expected number for `" &
-                `fieldLabel` & "`"))
-            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
-            if looksLikeFloat(n):
-              let d = decodeFloatFromToken(n, `tokIdent`.span)
-              if d.isErr: return err[void, ParseError](d.getErr)
-              `bIdent`.result.`nimName` = d.get
-            else:
-              let d = decodeIntFromToken(n, `tokIdent`.span)
-              if d.isErr: return err[void, ParseError](d.getErr)
-              `bIdent`.result.`nimName` = float(d.get)
-            `seenStmt`
-        else:
-          quote do:
-            return err[void, ParseError](initError(peTypeMismatch,
-              `tokIdent`.span, "unsupported prop type for typed-direct path"))
+      let assignment = emitVisitorFieldAssign(f, fieldLabel, seenStmt)
       propBranches.add((f.kdlName, assignment))
   # Build the if/elif/else cascade from the collected branches.
   var propDispatch: NimNode
@@ -2313,4 +2387,99 @@ macro deriveVisitor*(typ: typedesc): untyped =
     seqBuilderType, seqWrapProcs, capsTemplate, kvpSeqProc)
   when defined(dumpKdlGen):
     echo "=== deriveVisitor for ", repr(typ), " ==="
+    echo result.repr
+
+# ---------------------------------------------------------------------------
+# kdl: — block macro. The ONLY public surface for setting up KDL-mapped
+# types. Wraps a block containing one or more `type T {.kdlNode: "n".}`
+# definitions and auto-emits `deriveDecode` + `deriveEncode` +
+# `deriveVisitor` for each, so `decode[T]` / `encodeFrom[T]` /
+# `parseInto[T]` all work without per-type derive calls.
+#
+# Replaces the four-line per-type dance:
+#
+#   type Service {.kdlNode: "service".} = object
+#     name {.kdlArg.}: string
+#   deriveDecode(Service)
+#   deriveEncode(Service)
+#   deriveVisitor(Service)
+#
+# with the scoped block form:
+#
+#   kdl:
+#     type Service {.kdlNode: "service".} = object
+#       name {.kdlArg.}: string
+#
+# A pragma-form `type T {.kdl: "n".}` was prototyped but blocked by a
+# Nim language constraint: type-pragma macros can transform the type
+# but cannot emit sibling declarations. Module-level block macros can.
+# ---------------------------------------------------------------------------
+
+proc extractKdlTypeSym(typeDef: NimNode): NimNode {.compileTime.} =
+  ## Pull the type identifier out of a typedef. Handles bare,
+  ## exported (`T*`), and pragma-wrapped (`T {.pragma.}`) name slots.
+  let nameNode = typeDef[0]
+  case nameNode.kind
+  of nnkIdent, nnkSym: nameNode
+  of nnkPostfix:       nameNode[1]
+  of nnkPragmaExpr:
+    let inner = nameNode[0]
+    if inner.kind == nnkPostfix: inner[1] else: inner
+  else:
+    error("kdl block: cannot extract type ident from " & $nameNode.kind, nameNode)
+    nameNode
+
+proc hasKdlNodePragma(typeDef: NimNode): bool {.compileTime.} =
+  ## True iff the typedef's name slot carries a `{.kdlNode: "name".}`
+  ## pragma — the marker that identifies a type as KDL-mapped.
+  if typeDef[0].kind != nnkPragmaExpr: return false
+  for p in typeDef[0][1]:
+    if p.kind in {nnkExprColonExpr, nnkCall} and p.len >= 2:
+      if $p[0] == "kdlNode": return true
+  false
+
+macro kdl*(body: untyped): untyped =
+  ## Scope a region of KDL type definitions. Inside the block, every
+  ## `type T {.kdlNode: "name".} = object ...` gets the full
+  ## decode + encode + typed-direct surface emitted automatically.
+  ##
+  ## ```nim
+  ## kdl:
+  ##   type Service {.kdlNode: "service".} = object
+  ##     name {.kdlArg.}: string
+  ##     port {.kdlProp.}: int
+  ##     enabled {.kdlProp.}: bool = true
+  ##
+  ##   type Action {.kdlNode: "action".} = object
+  ##     tmpl {.kdlArg, kdlRename: "template".}: string
+  ##
+  ## # decode[Service], parseInto[Service], encodeFrom[Service] all work.
+  ## # Same for Action.
+  ## ```
+  ##
+  ## Types in the block without `{.kdlNode.}` are passed through
+  ## unchanged — useful for helper types that share the file but aren't
+  ## themselves KDL-mapped.
+  result = newStmtList()
+  let inner =
+    if body.kind == nnkStmtList: body
+    else: newStmtList(body)
+  for stmt in inner:
+    case stmt.kind
+    of nnkTypeSection:
+      # Pass the type section through, then queue derives for any
+      # member typedef carrying {.kdlNode.}.
+      result.add(stmt)
+      for typeDef in stmt:
+        if typeDef.kind == nnkTypeDef and hasKdlNodePragma(typeDef):
+          let typeSym = extractKdlTypeSym(typeDef)
+          result.add(newCall(bindSym"deriveDecode", typeSym))
+          result.add(newCall(bindSym"deriveEncode", typeSym))
+          result.add(newCall(bindSym"deriveVisitor", typeSym))
+    else:
+      # Allow non-type statements (imports, helpers, comments).
+      result.add(stmt)
+
+  when defined(dumpKdlGen):
+    echo "=== kdl block: output ==="
     echo result.repr

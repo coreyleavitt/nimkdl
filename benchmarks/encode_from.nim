@@ -1,24 +1,20 @@
 import std/[os, times, monotimes]
 import nkdl
 
-type Service {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  replicas {.kdlProp.}: int = 1
-  enabled {.kdlProp.}: bool = true
+kdl:
+  type Service {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    replicas {.kdlProp.}: int = 1
+    enabled {.kdlProp.}: bool = true
 
-type Action {.kdlNode: "action".} = object
-  tmpl {.kdlArg, kdlRename: "template".}: string
+  type Action {.kdlNode: "action".} = object
+    tmpl {.kdlArg, kdlRename: "template".}: string
 
-type Server {.kdlNode: "server".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  actions {.kdlChild.}: seq[Action]
-
-deriveDecode(Service)
-deriveEncode(Service)
-deriveEncode(Action)
-deriveEncode(Server)
+  type Server {.kdlNode: "server".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    actions {.kdlChild.}: seq[Action]
 
 proc benchSeq[T](label: string, vs: seq[T]) =
   const iters = 5_000

@@ -8,16 +8,14 @@ import ../src/ast
 import ../src/codegen
 import ../src/spans
 
-type
-  Rule {.kdlNode: "rule".} = object
-    id {.kdlArg.}: string
-    count {.kdlProp.}: int = 0
+kdl:
+  type
+    Rule {.kdlNode: "rule".} = object
+      id {.kdlArg.}: string
+      count {.kdlProp.}: int = 0
 
-  Single {.kdlNode: "single".} = object
-    name {.kdlArg.}: string
-
-deriveDecode(Rule)
-deriveDecode(Single)
+    Single {.kdlNode: "single".} = object
+      name {.kdlArg.}: string
 
 suite "decodeAll[T] — clean input":
   test "matches decode[T] when source is fully valid (seq[T])":

@@ -4,14 +4,12 @@
 import std/[os, times, strformat, monotimes]
 import nkdl
 
-type Service {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  replicas {.kdlProp.}: int = 1
-  enabled {.kdlProp.}: bool = true
-
-deriveDecode(Service)
-deriveEncode(Service)
+kdl:
+  type Service {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    replicas {.kdlProp.}: int = 1
+    enabled {.kdlProp.}: bool = true
 
 proc main() =
   let path = currentSourcePath().parentDir() / "fixtures" / "homogeneous-services-100.kdl"

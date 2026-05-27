@@ -18,47 +18,32 @@ import ../src/spans
 
 # Test types ---------------------------------------------------------------
 
-type
-  OptPrim {.kdlNode: "opt".} = object
-    name {.kdlProp.}: string
-    alias {.kdlProp.}: Option[string]
-    port {.kdlProp.}: Option[int]
-    flag {.kdlProp.}: Option[bool]
+kdl:
+  type
+    OptPrim {.kdlNode: "opt".} = object
+      name {.kdlProp.}: string
+      alias {.kdlProp.}: Option[string]
+      port {.kdlProp.}: Option[int]
+      flag {.kdlProp.}: Option[bool]
 
-  Inner {.kdlNode: "inner".} = object
-    label {.kdlProp.}: string
+    Inner {.kdlNode: "inner".} = object
+      label {.kdlProp.}: string
 
-  OptChild {.kdlNode: "wrapper".} = object
-    name {.kdlProp.}: string
-    extra {.kdlChild.}: Option[Inner]
+    OptChild {.kdlNode: "wrapper".} = object
+      name {.kdlProp.}: string
+      extra {.kdlChild.}: Option[Inner]
 
-  TaggedInner {.kdlNode: "ti".} = object
-    note {.kdlProp.}: string
+    TaggedInner {.kdlNode: "ti".} = object
+      note {.kdlProp.}: string
 
-  WithTaggedChild {.kdlNode: "outer".} = object
-    spec {.kdlChild, kdlReserved: "version".}: TaggedInner
+    WithTaggedChild {.kdlNode: "outer".} = object
+      spec {.kdlChild, kdlReserved: "version".}: TaggedInner
 
-  Versioned {.kdlNode: "module", kdlReserved: "v2".} = object
-    field {.kdlProp.}: string
+    Versioned {.kdlNode: "module", kdlReserved: "v2".} = object
+      field {.kdlProp.}: string
 
-  TaggedOpt {.kdlNode: "tagged".} = object
-    address {.kdlProp, kdlReserved: "ipv4".}: Option[string]
-
-deriveDecode(OptPrim)
-deriveDecode(Inner)
-deriveDecode(OptChild)
-deriveDecode(TaggedInner)
-deriveDecode(WithTaggedChild)
-deriveDecode(Versioned)
-deriveDecode(TaggedOpt)
-
-deriveEncode(OptPrim)
-deriveEncode(Inner)
-deriveEncode(OptChild)
-deriveEncode(TaggedInner)
-deriveEncode(WithTaggedChild)
-deriveEncode(Versioned)
-deriveEncode(TaggedOpt)
+    TaggedOpt {.kdlNode: "tagged".} = object
+      address {.kdlProp, kdlReserved: "ipv4".}: Option[string]
 
 # Option[T] -----------------------------------------------------------------
 

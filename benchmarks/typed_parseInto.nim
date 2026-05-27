@@ -7,14 +7,12 @@
 import std/[os, times, strformat, monotimes]
 import nkdl
 
-type Service {.kdlNode: "service".} = object
-  name {.kdlArg.}: string
-  port {.kdlProp.}: int
-  replicas {.kdlProp.}: int = 1
-  enabled {.kdlProp.}: bool = true
-
-deriveDecode(Service)
-deriveVisitor(Service)
+kdl:
+  type Service {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+    replicas {.kdlProp.}: int = 1
+    enabled {.kdlProp.}: bool = true
 
 proc bench(name: string, iters: int, body: proc()): float =
   for _ in 1..min(100, iters div 10): body()

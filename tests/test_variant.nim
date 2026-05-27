@@ -18,23 +18,22 @@ import ../src/spans
 # Fixtures at module scope: deriveDecode emits `proc kdlDecodeImpl*`
 # which can't be declared inside a `suite` template body.
 
-type
-  ActionKind* = enum
-    akInject  = "inject"
-    akDeny    = "deny"
-    akTransform = "transform"
+kdl:
+  type
+    ActionKind* = enum
+      akInject  = "inject"
+      akDeny    = "deny"
+      akTransform = "transform"
 
-  Action* {.kdlNode: "action".} = object
-    label* {.kdlProp.}: string = "(unlabeled)"   # shared, optional
-    case kind* {.kdlArg.}: ActionKind            # discriminator, positional
-    of akInject:
-      tmpl* {.kdlProp, kdlRename: "template".}: string
-    of akDeny:
-      reason* {.kdlProp.}: string
-    of akTransform:
-      cel* {.kdlProp.}: string
-
-deriveDecode(Action)
+    Action* {.kdlNode: "action".} = object
+      label* {.kdlProp.}: string = "(unlabeled)"   # shared, optional
+      case kind* {.kdlArg.}: ActionKind            # discriminator, positional
+      of akInject:
+        tmpl* {.kdlProp, kdlRename: "template".}: string
+      of akDeny:
+        reason* {.kdlProp.}: string
+      of akTransform:
+        cel* {.kdlProp.}: string
 
 suite "variant: happy paths":
   test "akInject decodes with required tmpl":
