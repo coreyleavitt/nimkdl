@@ -1774,6 +1774,559 @@ import ./typed_parser
 import ./lexer
 import ./numlit
 
+# ---------------------------------------------------------------------------
+# Variant visitor — atomic-construction streaming decoder for case objects.
+# ---------------------------------------------------------------------------
+#
+# The flat-shape visitor can assign fields directly to `result.<field>`
+# as they arrive. Variants can't: Nim's case-object discipline forbids
+# mutating a branch field unless the discriminator already names that
+# branch, and re-setting the discriminator wipes all branch fields. So
+# the variant visitor decodes everything into LOCALS on the builder, then
+# at visitEndNode time constructs the result with one `T(kind: ..., ...)`
+# object constructor — atomic per Q3(ii) atomicity in the H9 grilling.
+#
+# Property dispatch is statically per-key: each KDL prop key maps to AT
+# MOST one Nim field across the whole type (Nim enforces field-name
+# uniqueness across branches), so visitProp writes to a specific local
+# without needing the discriminator to be known yet. Wrong-branch props
+# are still written to their local — they're ignored at construction
+# time when the active branch's constructor doesn't reference them.
+#
+# Arg dispatch is by index: shared kdlArgs come first, then the
+# discriminator (if disc is kdlArg), then branch kdlArgs. By KDL source
+# ordering, args arrive in idx order, so when a branch arg arrives the
+# disc is already set. We still defensively error if it isn't.
+#
+# Restrictions (raise clear runtime errors if hit):
+#   - kdlChild on any shared or branch field: not implemented
+#   - kdlProp discriminator: not implemented (the disc could arrive after
+#     branch props, requiring buffering; punt until needed in practice)
+proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
+  let typName = $typSym
+  let nodeName = extractNodeName(typSym)
+  let builderName = ident(typName & "VBuilder")
+  let seqBuilderName = ident(typName & "VBuilderSeq")
+  let bIdent = ident("b")
+  let tokIdent = ident("tok")
+  let streamIdent = ident("stream")
+  let keyStrIdent = ident("keyStr")
+  let nameStrIdent = ident("nameStr")
+  let idxIdent = ident("idx")
+  let entrySpanIdent = ident("entrySpan")
+  let nodeFullSpanIdent = ident("nodeFullSpan")
+  let spanIdent = ident("nodeSpan")
+  let annoStrIdent = ident("annoStr")
+  let annoSpanIdent = ident("annoSpan")
+
+  let typNameLit = newLit(typName)
+  let disc = shape.variant.disc
+  let discNimIdent = ident(disc.nimName)
+  let discKdlNameLit = newLit(disc.kdlName)
+  let discTypeNode = disc.typeNode
+  let discLocalIdent = ident(disc.nimName & "_local")
+  let discSetIdent = ident(disc.nimName & "_set")
+
+  # Scope guards. Children + kdlProp disc unsupported in this cycle.
+  for f in shape.shared:
+    if f.kind == fkChild:
+      return quote do:
+        proc kdlBuildVisitor(_: typedesc[`typSym`], source: string,
+                             sourcePath: string):
+            Result[`typSym`, ParseError] =
+          err[`typSym`, ParseError](initError(peTypeMismatch,
+            pointSpan(StartPosition),
+            "parseInto[" & `typNameLit` & "]: variant types with " &
+            "kdlChild fields are not supported by the typed-direct " &
+            "path yet; use decode[" & `typNameLit` & "]."))
+        proc kdlBuildVisitorSeq(_: typedesc[`typSym`], source: string,
+                                sourcePath: string):
+            Result[seq[`typSym`], ParseError] =
+          err[seq[`typSym`], ParseError](initError(peTypeMismatch,
+            pointSpan(StartPosition),
+            "parseInto[seq[" & `typNameLit` & "]]: variant types " &
+            "with kdlChild fields are not supported by the typed-" &
+            "direct path yet; use decode[seq[" & `typNameLit` & "]]."))
+  for branch in shape.variant.branches:
+    for f in branch.fields:
+      if f.kind == fkChild:
+        return quote do:
+          proc kdlBuildVisitor(_: typedesc[`typSym`], source: string,
+                               sourcePath: string):
+              Result[`typSym`, ParseError] =
+            err[`typSym`, ParseError](initError(peTypeMismatch,
+              pointSpan(StartPosition),
+              "parseInto[" & `typNameLit` & "]: variant branches " &
+              "with kdlChild fields are not supported by the typed-" &
+              "direct path yet; use decode[" & `typNameLit` & "]."))
+          proc kdlBuildVisitorSeq(_: typedesc[`typSym`], source: string,
+                                  sourcePath: string):
+              Result[seq[`typSym`], ParseError] =
+            err[seq[`typSym`], ParseError](initError(peTypeMismatch,
+              pointSpan(StartPosition),
+              "parseInto[seq[" & `typNameLit` & "]]: variant branches " &
+              "with kdlChild fields are not supported by the typed-" &
+              "direct path yet; use decode[seq[" & `typNameLit` & "]]."))
+  if disc.kind == fkAttr:
+    return quote do:
+      proc kdlBuildVisitor(_: typedesc[`typSym`], source: string,
+                           sourcePath: string):
+          Result[`typSym`, ParseError] =
+        err[`typSym`, ParseError](initError(peTypeMismatch,
+          pointSpan(StartPosition),
+          "parseInto[" & `typNameLit` & "]: kdlProp discriminator on " &
+          "variants is not supported by the typed-direct path yet " &
+          "(branch props could arrive before the discriminator). Use " &
+          "decode[" & `typNameLit` & "] or switch the discriminator " &
+          "to a kdlArg position."))
+      proc kdlBuildVisitorSeq(_: typedesc[`typSym`], source: string,
+                              sourcePath: string):
+          Result[seq[`typSym`], ParseError] =
+        err[seq[`typSym`], ParseError](initError(peTypeMismatch,
+          pointSpan(StartPosition),
+          "parseInto[seq[" & `typNameLit` & "]]: kdlProp discriminator " &
+          "on variants not yet supported; use decode[seq[" &
+          `typNameLit` & "]]."))
+
+  # ---------- Builder type ----------
+  # Shared field locals + seen flags. Discriminator local + set flag.
+  # Per-branch field locals + seen flags, prefixed by branch discValue's
+  # identifier so two branches with same-named fields stay separate.
+  let builderFields = newNimNode(nnkRecList)
+  builderFields.add newIdentDefs(ident("result"), typSym)
+  builderFields.add newIdentDefs(ident("nodeSpan"), ident("Span"))
+  builderFields.add newIdentDefs(ident("pendingValueAnno"), ident("string"))
+
+  for f in shape.shared:
+    builderFields.add newIdentDefs(ident(f.nimName & "_local"), f.typeNode)
+    builderFields.add newIdentDefs(ident(f.nimName & "_seen"), ident("bool"))
+  builderFields.add newIdentDefs(discLocalIdent, discTypeNode)
+  builderFields.add newIdentDefs(discSetIdent, ident("bool"))
+  for branch in shape.variant.branches:
+    let branchPrefix = $branch.discValue
+    for f in branch.fields:
+      builderFields.add newIdentDefs(
+        ident(branchPrefix & "_" & f.nimName & "_local"), f.typeNode)
+      builderFields.add newIdentDefs(
+        ident(branchPrefix & "_" & f.nimName & "_seen"), ident("bool"))
+
+  let builderType = newNimNode(nnkTypeSection).add(
+    newNimNode(nnkTypeDef).add(builderName, newEmptyNode(),
+      newNimNode(nnkObjectTy).add(newEmptyNode(), newEmptyNode(),
+        builderFields)))
+
+  # ---------- visitBeginNode ----------
+  # Verify node name matches, then apply field defaults to all shared
+  # and branch field locals so absent-optional fields land at the right
+  # value without per-field default code paths at end-time.
+  var defaultsBody = newStmtList()
+  for f in shape.shared:
+    if f.defaultExpr.kind != nnkEmpty:
+      let loc = ident(f.nimName & "_local")
+      let dExpr = f.defaultExpr
+      defaultsBody.add quote do:
+        `bIdent`.`loc` = `dExpr`
+  for branch in shape.variant.branches:
+    let branchPrefix = $branch.discValue
+    for f in branch.fields:
+      if f.defaultExpr.kind != nnkEmpty:
+        let loc = ident(branchPrefix & "_" & f.nimName & "_local")
+        let dExpr = f.defaultExpr
+        defaultsBody.add quote do:
+          `bIdent`.`loc` = `dExpr`
+
+  let nodeLit = newLit(nodeName)
+  let beginNodeProc = quote do:
+    proc visitBeginNode(`bIdent`: var `builderName`,
+                   `nameStrIdent`: openArray[char],
+                   `spanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.nodeSpan = `spanIdent`
+      var match = `nameStrIdent`.len == `nodeLit`.len
+      if match:
+        for i in 0 ..< `nameStrIdent`.len:
+          if `nameStrIdent`[i] != `nodeLit`[i]:
+            match = false; break
+      if not match:
+        return err[void, ParseError](initError(peTypeMismatch,
+          `spanIdent`, "expected node `" & `nodeLit` & "`"))
+      `defaultsBody`
+      ok(void, ParseError)
+
+  # ---------- Per-field primitive decode helper ----------
+  # Returns code that decodes `tok` (current token) into a local of the
+  # given primitive type, then assigns into `targetIdent`. Includes
+  # reserved-tag validation that mirrors the flat-shape visitor.
+  proc emitPrimitiveDecode(f: FieldSpec, targetIdent: NimNode,
+                           seenFlagIdent: NimNode): NimNode =
+    let primType = $f.typeNode
+    let fieldLabel = newLit(typName & "." & f.nimName)
+    let kdlNameLit = newLit(f.kdlName)
+    let expectedReservedLit = newLit(f.expectedReserved)
+    proc validateBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
+      let ctorIdent = ident(kvCtor)
+      let valSym = genSym(nskLet, "vKv_" & f.nimName)
+      let rcheckSym = genSym(nskLet, "vRc_" & f.nimName)
+      quote do:
+        if `bIdent`.pendingValueAnno.len == 0:
+          if `expectedReservedLit`.len > 0:
+            return err[void, ParseError](initError(peTypeReservedMismatch,
+              `tokIdent`.span,
+              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
+              ") tag but source value has no annotation"))
+        else:
+          if `expectedReservedLit`.len > 0 and
+             `bIdent`.pendingValueAnno != `expectedReservedLit`:
+            return err[void, ParseError](initError(peTypeReservedMismatch,
+              `tokIdent`.span,
+              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
+              ") tag but source has (" & `bIdent`.pendingValueAnno & ")"))
+          let `valSym` = `ctorIdent`(`decodedExpr`, `tokIdent`.span)
+          let `rcheckSym` = validateReserved(`bIdent`.pendingValueAnno, `valSym`)
+          if `rcheckSym`.isErr:
+            return err[void, ParseError](`rcheckSym`.getErr)
+          `bIdent`.pendingValueAnno = ""
+
+    if f.typeIsEnum:
+      let innerT = f.typeNode
+      let strSym = genSym(nskLet, "enumStr")
+      let outSym = genSym(nskVar, "enumOut")
+      let decodeBlock = quote do:
+        var `outSym`: `innerT`
+        if not decodeEnumFromString(`outSym`, `strSym`):
+          return err[void, ParseError](initError(peTypeDiscriminatorBad,
+            `tokIdent`.span, "invalid enum value for `" &
+            `fieldLabel` & "`: '" & `strSym` & "'"))
+      let v = validateBlock(strSym, "newStringValue")
+      let body = newStmtList()
+      body.add(decodeBlock)
+      body.add(v)
+      body.add quote do:
+        `bIdent`.`targetIdent` = `outSym`
+        `bIdent`.`seenFlagIdent` = true
+      return quote do:
+        case `tokIdent`.kind
+        of tkString:
+          let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+          `body`
+        of tkRawString:
+          let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+          `body`
+        of tkIdent:
+          let s0 = `tokIdent`.span.start.offset
+          let s1 = `tokIdent`.span.finish.offset - 1
+          let `strSym` = `streamIdent`.source[s0 .. s1]
+          `body`
+        else:
+          return err[void, ParseError](initError(peTypeDiscriminatorBad,
+            `tokIdent`.span, "expected string or bareword for `" &
+            `fieldLabel` & "`"))
+
+    case primType
+    of "string":
+      let strSym = genSym(nskLet, "sv")
+      let v = validateBlock(strSym, "newStringValue")
+      quote do:
+        case `tokIdent`.kind
+        of tkString:
+          let `strSym` = `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+          `v`
+          `bIdent`.`targetIdent` = `strSym`
+          `bIdent`.`seenFlagIdent` = true
+        of tkRawString:
+          let `strSym` = `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+          `v`
+          `bIdent`.`targetIdent` = `strSym`
+          `bIdent`.`seenFlagIdent` = true
+        else:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected string for `" & `fieldLabel` & "`"))
+    of "int":
+      let intSym = genSym(nskLet, "iv")
+      let v = validateBlock(intSym, "newIntValue")
+      quote do:
+        if `tokIdent`.kind != tkNumber:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected int for `" & `fieldLabel` & "`"))
+        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+        let d = decodeIntFromToken(n, `tokIdent`.span)
+        if d.isErr: return err[void, ParseError](d.getErr)
+        let `intSym` = int(d.get)
+        `v`
+        `bIdent`.`targetIdent` = `intSym`
+        `bIdent`.`seenFlagIdent` = true
+    of "bool":
+      let boolSym = genSym(nskLet, "bv")
+      let v = validateBlock(boolSym, "newBoolValue")
+      quote do:
+        if `tokIdent`.kind != tkKeyword:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected bool for `" & `fieldLabel` & "`"))
+        let `boolSym` = (`tokIdent`.keyword == kwTrue)
+        `v`
+        `bIdent`.`targetIdent` = `boolSym`
+        `bIdent`.`seenFlagIdent` = true
+    of "float", "float64":
+      let fltSym = genSym(nskLet, "fv")
+      let v = validateBlock(fltSym, "newFloatValue")
+      quote do:
+        if `tokIdent`.kind != tkNumber:
+          return err[void, ParseError](initError(peTypeMismatch,
+            `tokIdent`.span, "expected number for `" & `fieldLabel` & "`"))
+        let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+        let `fltSym` =
+          if looksLikeFloat(n):
+            let d = decodeFloatFromToken(n, `tokIdent`.span)
+            if d.isErr: return err[void, ParseError](d.getErr)
+            d.get
+          else:
+            let d = decodeIntFromToken(n, `tokIdent`.span)
+            if d.isErr: return err[void, ParseError](d.getErr)
+            float(d.get)
+        `v`
+        `bIdent`.`targetIdent` = `fltSym`
+        `bIdent`.`seenFlagIdent` = true
+    else:
+      let primLit = newLit(primType)
+      quote do:
+        return err[void, ParseError](initError(peTypeMismatch,
+          `tokIdent`.span, "unsupported field type `" & `primLit` &
+          "` for `" & `fieldLabel` & "`"))
+
+  # ---------- visitArg ----------
+  # Case on positional index. Shared args dispatch directly. Disc arg
+  # decodes into disc local + sets disc_set. Branch args check disc_set,
+  # case on disc value, then per-branch decode.
+  var argCase = newNimNode(nnkCaseStmt).add(idxIdent)
+  var sharedArgIdx = 0
+  for f in shape.shared:
+    if f.kind == fkArg:
+      let lit = newLit(sharedArgIdx)
+      let body = emitPrimitiveDecode(
+        f, ident(f.nimName & "_local"), ident(f.nimName & "_seen"))
+      argCase.add(newNimNode(nnkOfBranch).add(lit).add(body))
+      inc sharedArgIdx
+  if disc.kind == fkArg:
+    let lit = newLit(disc.argIndex)
+    let body = emitPrimitiveDecode(disc, discLocalIdent, discSetIdent)
+    argCase.add(newNimNode(nnkOfBranch).add(lit).add(body))
+  # Branch args: group by argIndex across branches (different branches
+  # may share the same idx with different types — case-on-disc inside).
+  var branchArgByIdx: Table[int, seq[(NimNode, FieldSpec)]]
+  for branch in shape.variant.branches:
+    for f in branch.fields:
+      if f.kind == fkArg:
+        if not branchArgByIdx.hasKey(f.argIndex):
+          branchArgByIdx[f.argIndex] = @[]
+        branchArgByIdx[f.argIndex].add((branch.discValue, f))
+  for idx, perBranch in branchArgByIdx.pairs:
+    let lit = newLit(idx)
+    var discCase = newNimNode(nnkCaseStmt).add(quote do: `bIdent`.`discLocalIdent`)
+    for (discValue, f) in perBranch:
+      let branchPrefix = $discValue
+      let body = emitPrimitiveDecode(
+        f,
+        ident(branchPrefix & "_" & f.nimName & "_local"),
+        ident(branchPrefix & "_" & f.nimName & "_seen"))
+      discCase.add(newNimNode(nnkOfBranch).add(discValue).add(body))
+    # Branches without an arg at this idx: silently drop (unknown arg).
+    discCase.add(newNimNode(nnkElse).add quote do:
+      discard)
+    argCase.add(newNimNode(nnkOfBranch).add(lit).add quote do:
+      if not `bIdent`.`discSetIdent`:
+        return err[void, ParseError](initError(peTypeMissingRequired,
+          `tokIdent`.span,
+          "branch positional arg arrived before discriminator `" &
+          `discKdlNameLit` & "` was set"))
+      `discCase`)
+  # Unknown arg indices fall through to a no-op so we mirror the
+  # AST-walk's lenient handling of extra args.
+  argCase.add(newNimNode(nnkElse).add quote do:
+    discard)
+  let argProc = quote do:
+    proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
+             `tokIdent`: Token, `streamIdent`: TokenStream,
+             `entrySpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `argCase`
+      ok(void, ParseError)
+
+  # ---------- visitProp ----------
+  # Case on key string. Each key resolves to AT MOST one Nim field across
+  # the whole type (compiler-enforced). Branch props always write to
+  # their local; wrong-branch writes are harmless because the active
+  # branch's constructor ignores them.
+  var propCase = newNimNode(nnkCaseStmt).add(quote do:
+    openArrayToString(`keyStrIdent`))
+  for f in shape.shared:
+    if f.kind == fkAttr:
+      let kdlLit = newLit(f.kdlName)
+      let body = emitPrimitiveDecode(
+        f, ident(f.nimName & "_local"), ident(f.nimName & "_seen"))
+      propCase.add(newNimNode(nnkOfBranch).add(kdlLit).add(body))
+  for branch in shape.variant.branches:
+    let branchPrefix = $branch.discValue
+    for f in branch.fields:
+      if f.kind == fkAttr:
+        let kdlLit = newLit(f.kdlName)
+        let body = emitPrimitiveDecode(
+          f,
+          ident(branchPrefix & "_" & f.nimName & "_local"),
+          ident(branchPrefix & "_" & f.nimName & "_seen"))
+        propCase.add(newNimNode(nnkOfBranch).add(kdlLit).add(body))
+  # Unknown prop keys: silently drop (matches AST-walk behavior and the
+  # test_variant expectation that off-branch keys are ignored).
+  propCase.add(newNimNode(nnkElse).add quote do:
+    discard)
+  let propProc = quote do:
+    proc visitProp(`bIdent`: var `builderName`,
+              `keyStrIdent`: openArray[char],
+              `tokIdent`: Token, `streamIdent`: TokenStream,
+              `entrySpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `propCase`
+      ok(void, ParseError)
+
+  # ---------- visitValueTypeAnno ----------
+  let valueAnnoProc = quote do:
+    proc visitValueTypeAnno(`bIdent`: var `builderName`,
+                            `annoStrIdent`: openArray[char],
+                            `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.pendingValueAnno = openArrayToString(`annoStrIdent`)
+      ok(void, ParseError)
+
+  # ---------- visitEndNode ----------
+  # Discriminator required-check → case-on-disc → per-branch required-
+  # field check + atomic object construction.
+  var endCase = newNimNode(nnkCaseStmt).add(quote do:
+    `bIdent`.`discLocalIdent`)
+  for branch in shape.variant.branches:
+    let branchPrefix = $branch.discValue
+    var branchBody = newStmtList()
+    # Required-field checks: shared first, then branch.
+    for f in shape.shared:
+      if f.defaultExpr.kind == nnkEmpty:
+        let seenFlag = ident(f.nimName & "_seen")
+        let nameLit = newLit(typName & "." & f.nimName)
+        branchBody.add quote do:
+          if not `bIdent`.`seenFlag`:
+            return err[void, ParseError](initError(peTypeMissingRequired,
+              `bIdent`.nodeSpan,
+              "required field `" & `nameLit` & "` was not set"))
+    for f in branch.fields:
+      if f.defaultExpr.kind == nnkEmpty:
+        let seenFlag = ident(branchPrefix & "_" & f.nimName & "_seen")
+        let nameLit = newLit(typName & "." & f.nimName)
+        branchBody.add quote do:
+          if not `bIdent`.`seenFlag`:
+            return err[void, ParseError](initError(peTypeMissingRequired,
+              `bIdent`.nodeSpan,
+              "required field `" & `nameLit` & "` was not set"))
+    # Atomic construction.
+    let construction = nnkObjConstr.newTree(typSym)
+    construction.add(nnkExprColonExpr.newTree(discNimIdent, branch.discValue))
+    for f in shape.shared:
+      let loc = ident(f.nimName & "_local")
+      construction.add(nnkExprColonExpr.newTree(
+        ident(f.nimName), quote do: `bIdent`.`loc`))
+    for f in branch.fields:
+      let loc = ident(branchPrefix & "_" & f.nimName & "_local")
+      construction.add(nnkExprColonExpr.newTree(
+        ident(f.nimName), quote do: `bIdent`.`loc`))
+    branchBody.add quote do:
+      `bIdent`.result = `construction`
+    endCase.add(newNimNode(nnkOfBranch).add(branch.discValue).add(branchBody))
+
+  let endNodeProc = quote do:
+    proc visitBeginChildren(`bIdent`: var `builderName`):
+        Result[void, ParseError] {.noSideEffect.} =
+      ok(void, ParseError)
+    proc visitEndChildren(`bIdent`: var `builderName`):
+        Result[void, ParseError] {.noSideEffect.} =
+      ok(void, ParseError)
+    proc visitEndNode(`bIdent`: var `builderName`, `nodeFullSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      if not `bIdent`.`discSetIdent`:
+        return err[void, ParseError](initError(peTypeMissingRequired,
+          `bIdent`.nodeSpan,
+          "required discriminator `" & `typNameLit` & "." &
+          `discKdlNameLit` & "` was not set"))
+      `endCase`
+      ok(void, ParseError)
+
+  let kvpProc = quote do:
+    proc kdlBuildVisitor(_: typedesc[`typSym`], source: string,
+                         sourcePath: string): Result[`typSym`, ParseError] =
+      var `bIdent` = `builderName`()
+      let r = parseWith(source, `bIdent`, sourcePath)
+      if r.isErr: return err[`typSym`, ParseError](r.getErr)
+      ok[`typSym`, ParseError](`bIdent`.result)
+
+  # ---------- Seq wrapper ----------
+  let seqBuilderType = quote do:
+    type `seqBuilderName` = object
+      results: seq[`typSym`]
+      cur: `builderName`
+  let seqWrapProcs = quote do:
+    proc visitBeginNode(`bIdent`: var `seqBuilderName`,
+                   `nameStrIdent`: openArray[char],
+                   `spanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.cur = `builderName`()
+      visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
+    proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
+             `tokIdent`: Token, `streamIdent`: TokenStream,
+             `entrySpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`,
+               `entrySpanIdent`)
+    proc visitProp(`bIdent`: var `seqBuilderName`,
+              `keyStrIdent`: openArray[char],
+              `tokIdent`: Token, `streamIdent`: TokenStream,
+              `entrySpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`, `streamIdent`,
+                `entrySpanIdent`)
+    proc visitValueTypeAnno(`bIdent`: var `seqBuilderName`,
+                            `annoStrIdent`: openArray[char],
+                            `annoSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      visitValueTypeAnno(`bIdent`.cur, `annoStrIdent`, `annoSpanIdent`)
+    proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
+        Result[void, ParseError] {.noSideEffect.} =
+      visitBeginChildren(`bIdent`.cur)
+    proc visitEndChildren(`bIdent`: var `seqBuilderName`):
+        Result[void, ParseError] {.noSideEffect.} =
+      visitEndChildren(`bIdent`.cur)
+    proc visitEndNode(`bIdent`: var `seqBuilderName`, `nodeFullSpanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      let r = visitEndNode(`bIdent`.cur, `nodeFullSpanIdent`)
+      if r.isErr: return r
+      `bIdent`.results.add(`bIdent`.cur.result)
+      ok(void, ParseError)
+  let kvpSeqProc = quote do:
+    proc kdlBuildVisitorSeq(_: typedesc[`typSym`], source: string,
+                            sourcePath: string):
+        Result[seq[`typSym`], ParseError] =
+      var sb = `seqBuilderName`()
+      let r = parseDocumentWith(source, sb, sourcePath)
+      if r.isErr: return err[seq[`typSym`], ParseError](r.getErr)
+      ok[seq[`typSym`], ParseError](sb.results)
+
+  let capsTemplate = quote do:
+    template visitorCaps*(_: typedesc[`builderName`]): set[VisitorCap] =
+      {vcArgs, vcProps, vcChildren, vcValueAnno}
+    template visitorCaps*(_: typedesc[`seqBuilderName`]): set[VisitorCap] =
+      {vcArgs, vcProps, vcChildren, vcValueAnno}
+
+  result = newStmtList(
+    builderType, beginNodeProc, argProc, propProc, valueAnnoProc, endNodeProc,
+    kvpProc, seqBuilderType, seqWrapProcs, capsTemplate, kvpSeqProc)
+  when defined(dumpKdlGen):
+    echo "=== emitVariantVisitor for ", repr(typ), " ==="
+    echo result.repr
+
 macro deriveVisitor(typ: typedesc): untyped =
   ## Emit the per-type visitor machinery for the typed-direct parse path.
   ## Generated code is dumpable via `-d:dumpKdlGen`.
@@ -1790,31 +2343,7 @@ macro deriveVisitor(typ: typedesc): untyped =
   let recList = body[2]
   let shape = collectShape(recList)
   if shape.hasVariant:
-    # Variant types need per-branch field dispatch + a discriminator-
-    # aware visitor — not yet implemented for the typed-direct path.
-    # Emit a stub `kdlBuildVisitor` overload that returns a clear
-    # runtime error so the surrounding `kdl:` block can still emit
-    # decode + encode for the variant (both of which DO handle
-    # variants). Callers using parseInto[T] on a variant fall back to
-    # decode[T] explicitly.
-    let typNameLit = newLit($typSym)
-    result = quote do:
-      proc kdlBuildVisitor(_: typedesc[`typSym`], source: string,
-                           sourcePath: string):
-          Result[`typSym`, ParseError] =
-        err[`typSym`, ParseError](initError(peTypeMismatch,
-          pointSpan(StartPosition),
-          "parseInto[" & `typNameLit` & "]: variant types are not " &
-          "supported by the typed-direct path yet; use decode[" &
-          `typNameLit` & "] instead."))
-      proc kdlBuildVisitorSeq(_: typedesc[`typSym`], source: string,
-                              sourcePath: string):
-          Result[seq[`typSym`], ParseError] =
-        err[seq[`typSym`], ParseError](initError(peTypeMismatch,
-          pointSpan(StartPosition),
-          "parseInto[seq[" & `typNameLit` & "]]: variant types are " &
-          "not supported by the typed-direct path yet; use decode[seq[" &
-          `typNameLit` & "]] instead."))
+    result = emitVariantVisitor(typ, typSym, shape)
     return result
 
   let typName = $typSym
