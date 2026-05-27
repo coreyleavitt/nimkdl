@@ -1831,26 +1831,34 @@ macro deriveVisitor(typ: typedesc): untyped =
 
   # Collect kdlChild fields. For seq[T], record the element type so we
   # can wire up a child SeqBuilder slot per field. For non-seq, the
-  # singular builder is used directly.
+  # singular builder is used directly. Option[Inner] gets a `present`
+  # flag so visitEndChildren can commit `some(slot.result)` vs leaving
+  # the field at its default `none(Inner)`.
   type ChildField = object
     nimName: string
     kdlName: string         ## name to match in child position (Action's kdlNode)
     elemTypeName: string    ## element type for instantiation (Action / Server / etc.)
     isSeq: bool
+    isOption: bool          ## true ⇒ field type is `Option[Inner]`
   var children: seq[ChildField]
   var unsupportedChildren: seq[string]  # for runtime-error reporting
   for f in shape.shared:
     if f.kind == fkChild:
       let isSeq = typeNodeIsSeq(f.typeNode)
-      # Option[Inner] kdlChild is not yet plumbed through the visitor —
-      # would need a per-slot `present: bool` flag in the builder plus
-      # commit-on-end logic. Record + skip; the slot is omitted from
-      # the visitor's child dispatch so the field stays default-init
-      # (`none(Inner)`). decode[T] still handles it via emitChildDecode.
-      if f.isOption:
+      let baseTypeNode =
+        if f.isOption: f.innerType
+        else: f.typeNode
+      # Option[seq[T]] children are defensive-skipped — `seq` already
+      # carries its own "absent" state (empty), so wrapping in Option is
+      # redundant and the per-slot `present` flag would conflict with
+      # the slot's own seq accumulator.
+      if f.isOption and typeNodeIsSeq(baseTypeNode):
         unsupportedChildren.add(f.nimName)
         continue
-      let elemTypeNode = if isSeq: f.typeNode[1] else: f.typeNode
+      let elemTypeNode =
+        if isSeq: f.typeNode[1]
+        elif f.isOption: baseTypeNode
+        else: f.typeNode
       if elemTypeNode.kind notin {nnkIdent, nnkSym}:
         # Defensive: skip exotic shapes (e.g. seq[Option[T]]) rather
         # than blowing up codegen.
@@ -1861,6 +1869,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         kdlName: f.kdlName,
         elemTypeName: $elemTypeNode,
         isSeq: isSeq,
+        isOption: f.isOption,
       )
 
   # Track required fields (no defaultExpr → required).
@@ -1903,6 +1912,9 @@ macro deriveVisitor(typ: typedesc): untyped =
       let slotType = ident(c.elemTypeName &
         (if c.isSeq: "VBuilderSeq" else: "VBuilder"))
       builderFields.add newIdentDefs(slotName, slotType)
+      if c.isOption:
+        builderFields.add newIdentDefs(
+          ident(c.nimName & "_present"), ident("bool"))
   let builderType = newNimNode(nnkTypeSection).add(
     newNimNode(nnkTypeDef).add(builderName, newEmptyNode(),
       newNimNode(nnkObjectTy).add(newEmptyNode(), newEmptyNode(),
@@ -1926,9 +1938,16 @@ macro deriveVisitor(typ: typedesc): untyped =
   for c in children:
     let kdlLit = newLit(c.kdlName)
     let slot = ident(c.nimName & "_b")
-    childBeginDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
-      `bIdent`.curChildName = `kdlLit`
-      return visitBeginNode(`bIdent`.`slot`, `nameStrIdent`, `spanIdent`))
+    if c.isOption:
+      let presentFlag = ident(c.nimName & "_present")
+      childBeginDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
+        `bIdent`.curChildName = `kdlLit`
+        `bIdent`.`presentFlag` = true
+        return visitBeginNode(`bIdent`.`slot`, `nameStrIdent`, `spanIdent`))
+    else:
+      childBeginDispatch.add(newNimNode(nnkOfBranch).add(kdlLit).add quote do:
+        `bIdent`.curChildName = `kdlLit`
+        return visitBeginNode(`bIdent`.`slot`, `nameStrIdent`, `spanIdent`))
   if children.len > 0:
     childBeginDispatch.add(newNimNode(nnkElse).add quote do:
       return err[void, ParseError](initError(peTypeUnknownField, `spanIdent`,
@@ -2260,6 +2279,11 @@ macro deriveVisitor(typ: typedesc): untyped =
     if c.isSeq:
       endChildrenBody.add quote do:
         `bIdent`.result.`nimField` = `bIdent`.`slot`.results
+    elif c.isOption:
+      let presentFlag = ident(c.nimName & "_present")
+      endChildrenBody.add quote do:
+        if `bIdent`.`presentFlag`:
+          `bIdent`.result.`nimField` = some(`bIdent`.`slot`.result)
     else:
       endChildrenBody.add quote do:
         `bIdent`.result.`nimField` = `bIdent`.`slot`.result
