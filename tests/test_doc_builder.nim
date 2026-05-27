@@ -113,3 +113,37 @@ suite "DocBuilder quoted/raw node + prop names (cycle 9'.3)":
   test "quoted prop name \"0prop\"=val":
     let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "quoted_prop_name.kdl")
     assertEquivalent(viaP, viaV)
+
+suite "DocBuilder slashdash (cycle 9'.4)":
+
+  test "/-node skips a top-level node":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "initial_slashdash.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "/- arg skips one prop in a node":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_prop.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "/- {...} skips a children block":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_child.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "/- {} skips an empty children block":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_empty_child.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "/- node inside a children block":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_node_in_child.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "/- node /- arg chains slashdashes (slashdash_in_slashdash)":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_in_slashdash.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "slashdash interleaved with real children blocks":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_multiple_child_blocks.kdl")
+    assertEquivalent(viaP, viaV)
+
+  test "/- arg=correct then /- arg=wrong (repeated-prop interaction)":
+    let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "slashdash_repeated_prop.kdl")
+    assertEquivalent(viaP, viaV)

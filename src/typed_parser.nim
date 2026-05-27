@@ -87,13 +87,17 @@ proc parseInto*[T](source: string, sourcePath = "<input>"):
 # ---------------------------------------------------------------------------
 
 proc parseNodeWith[V](source: string, visitor: var V,
-                      stream: TokenStream, cursor: var int):
+                      stream: TokenStream, cursor: var int,
+                      skip: bool = false):
     Result[void, ParseError]
 
 proc parseDocumentWith*[V](source: string, visitor: var V,
                            sourcePath = "<input>"):
     Result[void, ParseError] =
   ## Walks every top-level node in `source` through `visitor`.
+  ## A leading `/-` slashdash-marks the next node as discarded — its
+  ## tokens are still parsed (so syntax errors inside it surface), but
+  ## no visitor events fire for it.
   mixin visitorCaps
   var interner = initInterner()
   interner.disabled = true   # visitors read bytes from source directly
@@ -109,18 +113,24 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
 
   while true:
     while peek().kind == tkNewline: inc cursor
+    var skipNode = false
+    if peek().kind == tkSlashDash:
+      inc cursor
+      while peek().kind == tkNewline: inc cursor  # /- crosses newlines
+      skipNode = true
     if peek().kind == tkEof: break
-    let r = parseNodeWith(source, visitor, stream, cursor)
+    let r = parseNodeWith(source, visitor, stream, cursor, skip = skipNode)
     if r.isErr: return r
 
   ok(void, ParseError)
 
 proc parseNodeWith[V](source: string, visitor: var V,
-                      stream: TokenStream, cursor: var int):
+                      stream: TokenStream, cursor: var int,
+                      skip: bool = false):
     Result[void, ParseError] =
   ## Parse one node + its entries + (recursively) its children.
-  ## Caller has positioned `cursor` at the node's first token (after any
-  ## skipped leading newlines).
+  ## When `skip` is true, tokens are still parsed (preserving syntax-
+  ## error surfaces) but no visitor events fire — used by slashdash.
   mixin visitorCaps
   const caps = visitorCaps(V)
 
@@ -128,14 +138,12 @@ proc parseNodeWith[V](source: string, visitor: var V,
     if cursor + off < stream.tokens.len: stream.tokens[cursor + off]
     else: Token(kind: tkEof, span: pointSpan(StartPosition))
 
-  # Optional `(IDENT|STRING|RAW_STRING)` type annotation. KDL v2 allows
-  # them before node names AND before any value (arg or prop). The
-  # `emit` parameter (compile-time bool) decides whether to fire the
-  # corresponding visitor method; either way the tokens are consumed.
-  #
-  # Bytes are read directly from source for tkIdent (interner is
-  # disabled on the lex side); payload tables for quoted forms.
-  template handleTypeAnno(emit: static bool, emitProc: untyped) =
+  # Optional `(IDENT|STRING|RAW_STRING)` type annotation. Caps decide
+  # whether the event can fire at all (compile-time); `noEmit` lets the
+  # caller suppress emission per-call (runtime, used for slashdash'd
+  # entries within an otherwise emitting parse).
+  template handleTypeAnno(canEmit: static bool, emitProc: untyped,
+                          noEmit: bool) =
     if peek().kind == tkLParen:
       let lParenSpan = peek().span
       inc cursor
@@ -149,37 +157,38 @@ proc parseNodeWith[V](source: string, visitor: var V,
           "expected ')' to close type annotation"))
       let rParenSpan = peek().span
       inc cursor
-      when emit:
-        let annoSpan = initSpan(lParenSpan.start, rParenSpan.finish)
-        case annoTok.kind
-        of tkIdent:
-          let s = annoTok.span.start.offset
-          let l = annoTok.span.finish.offset - 1
-          let r = visitor.emitProc(source.toOpenArray(s, l), annoSpan)
-          if r.isErr: return r
-        of tkString:
-          let p = stream.stringPayloads[annoTok.strIdx]
-          let r = visitor.emitProc(p.toOpenArray(0, p.high), annoSpan)
-          if r.isErr: return r
-        of tkRawString:
-          let p = stream.rawStringPayloads[annoTok.rawIdx]
-          let r = visitor.emitProc(p.toOpenArray(0, p.high), annoSpan)
-          if r.isErr: return r
-        else: discard  # unreachable (guarded above)
+      when canEmit:
+        if not noEmit:
+          let annoSpan = initSpan(lParenSpan.start, rParenSpan.finish)
+          case annoTok.kind
+          of tkIdent:
+            let s = annoTok.span.start.offset
+            let l = annoTok.span.finish.offset - 1
+            let r = visitor.emitProc(source.toOpenArray(s, l), annoSpan)
+            if r.isErr: return r
+          of tkString:
+            let p = stream.stringPayloads[annoTok.strIdx]
+            let r = visitor.emitProc(p.toOpenArray(0, p.high), annoSpan)
+            if r.isErr: return r
+          of tkRawString:
+            let p = stream.rawStringPayloads[annoTok.rawIdx]
+            let r = visitor.emitProc(p.toOpenArray(0, p.high), annoSpan)
+            if r.isErr: return r
+          else: discard  # unreachable
 
-  template handleNodeAnno() =
+  template handleNodeAnno(noEmit: bool) =
     when vcNodeAnno in caps:
-      handleTypeAnno(true, visitNodeTypeAnno)
+      handleTypeAnno(true, visitNodeTypeAnno, noEmit)
     else:
-      handleTypeAnno(false, visitNodeTypeAnno)
+      handleTypeAnno(false, visitNodeTypeAnno, noEmit)
 
-  template handleValueAnno() =
+  template handleValueAnno(noEmit: bool) =
     when vcValueAnno in caps:
-      handleTypeAnno(true, visitValueTypeAnno)
+      handleTypeAnno(true, visitValueTypeAnno, noEmit)
     else:
-      handleTypeAnno(false, visitValueTypeAnno)
+      handleTypeAnno(false, visitValueTypeAnno, noEmit)
 
-  handleNodeAnno()       # optional (type) before node name
+  handleNodeAnno(skip)   # optional (type) before node name
 
   let nameTok = peek()
   if nameTok.kind notin {tkIdent, tkString, tkRawString}:
@@ -190,49 +199,66 @@ proc parseNodeWith[V](source: string, visitor: var V,
   # Bare ident → read from source (skips interner roundtrip).
   # Quoted/raw → use the lexer's payload table (escapes already
   # resolved). The visitor sees the SAME unescaped bytes either way.
-  let bRes =
-    case nameTok.kind
-    of tkIdent:
-      let nameStart = nameTok.span.start.offset
-      let nameLast = nameTok.span.finish.offset - 1
-      visitor.visitBeginNode(source.toOpenArray(nameStart, nameLast),
-                              nameTok.span)
-    of tkString:
-      let p = stream.stringPayloads[nameTok.strIdx]
-      visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
-    of tkRawString:
-      let p = stream.rawStringPayloads[nameTok.rawIdx]
-      visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
-    else: ok(void, ParseError)   # unreachable (guarded above)
-  if bRes.isErr: return bRes
+  if not skip:
+    let bRes =
+      case nameTok.kind
+      of tkIdent:
+        let nameStart = nameTok.span.start.offset
+        let nameLast = nameTok.span.finish.offset - 1
+        visitor.visitBeginNode(source.toOpenArray(nameStart, nameLast),
+                                nameTok.span)
+      of tkString:
+        let p = stream.stringPayloads[nameTok.strIdx]
+        visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
+      of tkRawString:
+        let p = stream.rawStringPayloads[nameTok.rawIdx]
+        visitor.visitBeginNode(p.toOpenArray(0, p.high), nameTok.span)
+      else: ok(void, ParseError)   # unreachable
+    if bRes.isErr: return bRes
 
   var argIdx = 0
   while true:
-    if peek().kind == tkLParen: handleValueAnno()  # (type) prefix on arg value
+    # Entry-level slashdash: skips the next single entry OR children block.
+    # Chained `/- /-` isn't valid grammar (the second /- has no entry to
+    # skip), so single-`if` lookahead suffices and stays branch-predictable.
+    var entrySkip = skip
+    if peek().kind == tkSlashDash:
+      inc cursor
+      while peek().kind == tkNewline: inc cursor
+      entrySkip = true
+
+    if peek().kind == tkLParen: handleValueAnno(entrySkip)
     let t = peek()
     case t.kind
     of tkNewline, tkSemicolon, tkEof, tkRBrace:
       break
     of tkLBrace:
-      # children block. Bracket inner-node walk with begin/end.
-      # vcChildren-gated: visitors without children can skip the block
-      # entirely (e.g. an enum-arg-only visitor).
+      # Children block. Inner nodes recurse through parseNodeWith with
+      # skip = entrySkip; visitor children-boundary events fire iff
+      # vcChildren is declared AND the enclosing node isn't skipped.
       inc cursor   # consume `{`
       when vcChildren in caps:
-        let bcRes = visitor.visitBeginChildren()
-        if bcRes.isErr: return bcRes
+        if not entrySkip:
+          let bcRes = visitor.visitBeginChildren()
+          if bcRes.isErr: return bcRes
       while true:
         while peek().kind == tkNewline: inc cursor
         if peek().kind == tkRBrace: break
         if peek().kind == tkEof:
           return err[void, ParseError](initError(peParseExpected, peek().span,
             "expected `}` to close children block"))
+        # Inner-node slashdash within children
+        var innerSkip = entrySkip
+        if peek().kind == tkSlashDash:
+          inc cursor
+          while peek().kind == tkNewline: inc cursor
+          innerSkip = true
         when vcChildren in caps:
-          let cRes = parseNodeWith(source, visitor, stream, cursor)
+          let cRes = parseNodeWith(source, visitor, stream, cursor,
+                                   skip = innerSkip)
           if cRes.isErr: return cRes
         else:
-          # Skip child node without emitting visitor events. Walk tokens
-          # until matching `}` at this depth.
+          # Cap absent — walk and discard without recursion.
           var depth = 1
           while depth > 0 and peek().kind != tkEof:
             case peek().kind
@@ -243,51 +269,59 @@ proc parseNodeWith[V](source: string, visitor: var V,
           if peek().kind == tkRBrace: break
       inc cursor  # consume `}`
       when vcChildren in caps:
-        let ecRes = visitor.visitEndChildren()
-        if ecRes.isErr: return ecRes
-      break    # children always terminate the node body in this slice
+        if not entrySkip:
+          let ecRes = visitor.visitEndChildren()
+          if ecRes.isErr: return ecRes
+      # KDL v2 grammar allows multiple slashdash'd children blocks +
+      # at most one real one (validated by parser.nim, not here yet —
+      # slice 9'.7). Loop to continue eating remaining /-{} blocks.
+      continue
     of tkIdent, tkString, tkRawString:
       if peek(1).kind == tkEquals:
         let keyTok = peek()
         cursor += 2
-        handleValueAnno()    # optional (type) before prop value
+        handleValueAnno(entrySkip)
         let valueTok = peek()
         inc cursor
         when vcProps in caps:
-          if keyTok.kind == tkIdent:
-            let ks = keyTok.span.start.offset
-            let kl = keyTok.span.finish.offset - 1
-            let pRes = visitor.visitProp(
-                          source.toOpenArray(ks, kl), valueTok, stream)
-            if pRes.isErr: return pRes
-          else:
-            let payload =
-              if keyTok.kind == tkString:
-                stream.stringPayloads[keyTok.strIdx]
-              else:
-                stream.rawStringPayloads[keyTok.rawIdx]
-            let pRes = visitor.visitProp(
-                          payload.toOpenArray(0, payload.high),
-                          valueTok, stream)
-            if pRes.isErr: return pRes
+          if not entrySkip:
+            if keyTok.kind == tkIdent:
+              let ks = keyTok.span.start.offset
+              let kl = keyTok.span.finish.offset - 1
+              let pRes = visitor.visitProp(
+                            source.toOpenArray(ks, kl), valueTok, stream)
+              if pRes.isErr: return pRes
+            else:
+              let payload =
+                if keyTok.kind == tkString:
+                  stream.stringPayloads[keyTok.strIdx]
+                else:
+                  stream.rawStringPayloads[keyTok.rawIdx]
+              let pRes = visitor.visitProp(
+                            payload.toOpenArray(0, payload.high),
+                            valueTok, stream)
+              if pRes.isErr: return pRes
       else:
         inc cursor
         when vcArgs in caps:
-          let aRes = visitor.visitArg(argIdx, t, stream)
-          if aRes.isErr: return aRes
-          inc argIdx
+          if not entrySkip:
+            let aRes = visitor.visitArg(argIdx, t, stream)
+            if aRes.isErr: return aRes
+            inc argIdx
     of tkNumber, tkKeyword:
       inc cursor
       when vcArgs in caps:
-        let aRes = visitor.visitArg(argIdx, t, stream)
-        if aRes.isErr: return aRes
-        inc argIdx
+        if not entrySkip:
+          let aRes = visitor.visitArg(argIdx, t, stream)
+          if aRes.isErr: return aRes
+          inc argIdx
     else:
       return err[void, ParseError](initError(peParseUnexpected, t.span,
         "unexpected token in node entries"))
 
-  let eRes = visitor.visitEndNode()
-  if eRes.isErr: return eRes
+  if not skip:
+    let eRes = visitor.visitEndNode()
+    if eRes.isErr: return eRes
   ok(void, ParseError)
 
 proc parseWith*[V](source: string, visitor: var V,
