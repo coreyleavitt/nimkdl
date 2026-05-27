@@ -1599,7 +1599,7 @@ proc decodeAll*[T](source: string,
 # ---------------------------------------------------------------------------
 #
 # Generates a hidden builder type + the six visitor methods needed by
-# typed_parser.parseWith. Emits a `kdlVisitorParse` overload so the
+# typed_parser.parseWith. Emits a `kdlBuildVisitor` overload so the
 # generic `parseInto[T]` proc resolves to this type's machinery via
 # `mixin`.
 #
@@ -1651,17 +1651,27 @@ macro deriveVisitor*(typ: typedesc): untyped =
       requiredIds[f.nimName] = requiredNames.len
       requiredNames.add(f.nimName)
 
-  # 1. Hidden builder type — adds `seen` set if any required fields exist.
+  # Hard cap on required fields: set[uint8] tops out at 256 elements.
+  # Document + enforce at macro time so it's a clear error if hit.
+  if requiredNames.len > 256:
+    error("deriveVisitor: type `" & typName & "` has " &
+          $requiredNames.len & " required fields; max is 256.")
+
+  # 1. Hidden builder type — adds `seen` set if any required fields exist
+  # and `nodeSpan` for error reporting (PhD review caught pointSpan(StartPosition)
+  # was making every err point at byte 0).
   let builderType =
     if requiredNames.len > 0:
       quote do:
         type `builderName` = object
           result: `typSym`
           seen: set[uint8]
+          nodeSpan: Span
     else:
       quote do:
         type `builderName` = object
           result: `typSym`
+          nodeSpan: Span
 
   # 2. visitBeginNode: name match + apply field defaults.
   var defaultsBody = newStmtList()
@@ -1672,11 +1682,14 @@ macro deriveVisitor*(typ: typedesc): untyped =
       defaultsBody.add quote do:
         `bIdent`.result.`nimName` = `defExpr`
   let nodeLit = newLit(nodeName)
+  let spanIdent = ident("nodeSpan")
   let beginNodeProc = quote do:
     proc visitBeginNode(`bIdent`: var `builderName`,
                    name: InternedStr,
-                   `nameStrIdent`: openArray[char]):
-        Result[void, ParseError] =
+                   `nameStrIdent`: openArray[char],
+                   `spanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
+      `bIdent`.nodeSpan = `spanIdent`
       var match = `nameStrIdent`.len == `nodeLit`.len
       if match:
         for i in 0 ..< `nameStrIdent`.len:
@@ -1684,7 +1697,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
             match = false; break
       if not match:
         return err[void, ParseError](initError(peTypeMismatch,
-          pointSpan(StartPosition),
+          `spanIdent`,
           "expected node `" & `nodeLit` & "`"))
       `defaultsBody`
       ok(void, ParseError)
@@ -1752,7 +1765,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
   let argProc = quote do:
     proc visitArg(`bIdent`: var `builderName`, `idxIdent`: int,
              `tokIdent`: Token, `streamIdent`: TokenStream):
-        Result[void, ParseError] =
+        Result[void, ParseError] {.noSideEffect.} =
       `argCase`
       ok(void, ParseError)
 
@@ -1821,7 +1834,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
     proc visitProp(`bIdent`: var `builderName`, key: InternedStr,
               `keyStrIdent`: openArray[char],
               `tokIdent`: Token, `streamIdent`: TokenStream):
-        Result[void, ParseError] =
+        Result[void, ParseError] {.noSideEffect.} =
       `propCase`
       ok(void, ParseError)
 
@@ -1835,21 +1848,24 @@ macro deriveVisitor*(typ: typedesc): untyped =
       requiredCheckBody.add quote do:
         if `idLit` notin `bIdent`.seen:
           return err[void, ParseError](initError(peTypeMissingRequired,
-            pointSpan(StartPosition),
+            `bIdent`.nodeSpan,
             "required field `" & `nameLit` & "` was not set"))
   let restProcs = quote do:
-    proc visitBeginChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
+    proc visitBeginChildren(`bIdent`: var `builderName`):
+        Result[void, ParseError] {.noSideEffect.} =
       ok(void, ParseError)
-    proc visitEndChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
+    proc visitEndChildren(`bIdent`: var `builderName`):
+        Result[void, ParseError] {.noSideEffect.} =
       ok(void, ParseError)
-    proc visitEndNode(`bIdent`: var `builderName`): Result[void, ParseError] =
+    proc visitEndNode(`bIdent`: var `builderName`):
+        Result[void, ParseError] {.noSideEffect.} =
       `requiredCheckBody`
       ok(void, ParseError)
 
-  # 8. kdlVisitorParse — the macro-emitted entry the generic parseInto[T]
+  # 8. kdlBuildVisitor — the macro-emitted entry the generic parseInto[T]
   # mixins into for the singular case.
   let kvpProc = quote do:
-    proc kdlVisitorParse(_: typedesc[`typSym`], source: string,
+    proc kdlBuildVisitor(_: typedesc[`typSym`], source: string,
                          sourcePath: string): Result[`typSym`, ParseError] =
       var `bIdent` = `builderName`()
       let r = parseWith(source, `bIdent`, sourcePath)
@@ -1866,32 +1882,34 @@ macro deriveVisitor*(typ: typedesc): untyped =
       cur: `builderName`
   let seqWrapProcs = quote do:
     proc visitBeginNode(`bIdent`: var `seqBuilderName`, name: InternedStr,
-                   `nameStrIdent`: openArray[char]):
-        Result[void, ParseError] =
+                   `nameStrIdent`: openArray[char],
+                   `spanIdent`: Span):
+        Result[void, ParseError] {.noSideEffect.} =
       `bIdent`.cur = `builderName`()
-      visitBeginNode(`bIdent`.cur, name, `nameStrIdent`)
+      visitBeginNode(`bIdent`.cur, name, `nameStrIdent`, `spanIdent`)
     proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
              `tokIdent`: Token, `streamIdent`: TokenStream):
-        Result[void, ParseError] =
+        Result[void, ParseError] {.noSideEffect.} =
       visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`)
     proc visitProp(`bIdent`: var `seqBuilderName`, key: InternedStr,
               `keyStrIdent`: openArray[char],
               `tokIdent`: Token, `streamIdent`: TokenStream):
-        Result[void, ParseError] =
+        Result[void, ParseError] {.noSideEffect.} =
       visitProp(`bIdent`.cur, key, `keyStrIdent`, `tokIdent`, `streamIdent`)
     proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
-        Result[void, ParseError] =
+        Result[void, ParseError] {.noSideEffect.} =
       visitBeginChildren(`bIdent`.cur)
     proc visitEndChildren(`bIdent`: var `seqBuilderName`):
-        Result[void, ParseError] =
+        Result[void, ParseError] {.noSideEffect.} =
       visitEndChildren(`bIdent`.cur)
-    proc visitEndNode(`bIdent`: var `seqBuilderName`): Result[void, ParseError] =
+    proc visitEndNode(`bIdent`: var `seqBuilderName`):
+        Result[void, ParseError] {.noSideEffect.} =
       let r = visitEndNode(`bIdent`.cur)
       if r.isErr: return r
       `bIdent`.results.add(`bIdent`.cur.result)
       ok(void, ParseError)
   let kvpSeqProc = quote do:
-    proc kdlVisitorParseSeq(_: typedesc[`typSym`], source: string,
+    proc kdlBuildVisitorSeq(_: typedesc[`typSym`], source: string,
                             sourcePath: string):
         Result[seq[`typSym`], ParseError] =
       var sb = `seqBuilderName`()

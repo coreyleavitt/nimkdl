@@ -28,11 +28,14 @@ type Service = object
 type ServiceBuilder = object
   result: Service
   inNode: bool
+  nodeSpan: Span
 
 proc visitBeginNode(b: var ServiceBuilder, name: InternedStr,
-               nameStr: openArray[char]): Result[void, ParseError] =
+               nameStr: openArray[char], nodeSpan: Span):
+    Result[void, ParseError] =
+  b.nodeSpan = nodeSpan
   if not (nameStr.len == 7 and nameStr.toString == "service"):
-    return err[void, ParseError](initError(peParseUnexpected, pointSpan(StartPosition),
+    return err[void, ParseError](initError(peParseUnexpected, nodeSpan,
       "expected `service` node"))
   b.inNode = true
   # Defaults

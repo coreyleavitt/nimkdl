@@ -18,17 +18,19 @@
 ## A type `V` is a parse visitor if it implements:
 ##
 ##   proc visitBeginNode(v: var V, name: InternedStr,
-##                  nameStr: openArray[char]): Result[void, ParseError]
+##                       nameStr: openArray[char],
+##                       nodeSpan: Span): Result[void, ParseError]
 ##   proc visitArg(v: var V, idx: int, tok: Token,
-##            stream: TokenStream): Result[void, ParseError]
+##                 stream: TokenStream): Result[void, ParseError]
 ##   proc visitProp(v: var V, key: InternedStr, keyStr: openArray[char],
-##             tok: Token, stream: TokenStream): Result[void, ParseError]
+##                  tok: Token, stream: TokenStream): Result[void, ParseError]
 ##   proc visitBeginChildren(v: var V): Result[void, ParseError]
 ##   proc visitEndChildren(v: var V): Result[void, ParseError]
 ##   proc visitEndNode(v: var V): Result[void, ParseError]
 ##
-## All methods return Result so errors propagate without raising
-## (preserves `embed[T]` compile-time-eval semantics).
+## `nodeSpan` is the span of the node-name token (used for error
+## reporting). All methods return Result so errors propagate without
+## raising (preserves `embed[T]` compile-time-eval semantics).
 
 import ./[lexer, intern, spans]
 
@@ -36,14 +38,14 @@ proc parseInto*[T](source: string, sourcePath = "<input>"):
     Result[T, ParseError] =
   ## Typed entry point. Used as `parseInto[Rule]("...")` or
   ## `parseInto[seq[Rule]]("...")`. Resolves the per-type visitor via
-  ## `deriveVisitor[T]`-emitted `kdlVisitorParse` / `kdlVisitorParseSeq`
+  ## `deriveVisitor[T]`-emitted `kdlBuildVisitor` / `kdlBuildVisitorSeq`
   ## overload at instantiation time.
-  mixin kdlVisitorParse, kdlVisitorParseSeq
+  mixin kdlBuildVisitor, kdlBuildVisitorSeq
   when T is seq:
     type Elem = typeof(default(T)[0])
-    kdlVisitorParseSeq(Elem, source, sourcePath)
+    kdlBuildVisitorSeq(Elem, source, sourcePath)
   else:
-    kdlVisitorParse(T, source, sourcePath)
+    kdlBuildVisitor(T, source, sourcePath)
 
 proc parseDocumentWith*[V](source: string, visitor: var V,
                            sourcePath = "<input>"):
@@ -75,7 +77,8 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
 
     let nameStr = interner.lookup(nameTok.ident)
     let bRes = visitor.visitBeginNode(nameTok.ident,
-                                  nameStr.toOpenArray(0, nameStr.high))
+                                  nameStr.toOpenArray(0, nameStr.high),
+                                  nameTok.span)
     if bRes.isErr: return bRes
 
     var argIdx = 0
@@ -149,7 +152,9 @@ proc parseWith*[V](source: string, visitor: var V,
   inc cursor
 
   let nameStr = interner.lookup(nameTok.ident)
-  let bRes = visitor.visitBeginNode(nameTok.ident, nameStr.toOpenArray(0, nameStr.high))
+  let bRes = visitor.visitBeginNode(nameTok.ident,
+                                     nameStr.toOpenArray(0, nameStr.high),
+                                     nameTok.span)
   if bRes.isErr: return bRes
 
   # Entries (args + props) until newline / EOF / RBrace
