@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-50 0 870 390" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
   <style>
     .axis { fill: #94a3b8; font-size: 13px; }
     .label { fill: #cbd5e1; font-size: 14px; font-weight: 500; }
@@ -13,7 +13,7 @@
     .bar-rs    { fill: #64748b; }   /* kdl-rs slate */
     .grid { stroke: #1e293b; stroke-width: 1; }
   </style>
-  <rect width="760" height="380" fill="#0b1220"/>
+  <rect x="-50" y="0" width="870" height="390" fill="#0b1220"/>
 
   <text x="40" y="32" class="title">realistic-config.kdl (5.6KB)</text>
   <text x="40" y="50" class="subtitle">parses per second, same container, release+LTO equivalent. Source: benchmarks/comparisons/last-run.txt</text>

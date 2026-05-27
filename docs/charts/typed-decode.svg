@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-70 0 850 430" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
   <style>
     .axis { fill: #94a3b8; font-size: 13px; }
     .label { fill: #cbd5e1; font-size: 14px; font-weight: 500; }
@@ -12,7 +12,7 @@
     .bar-rs    { fill: #64748b; }
     .grid { stroke: #1e293b; stroke-width: 1; }
   </style>
-  <rect width="760" height="420" fill="#0b1220"/>
+  <rect x="-70" y="0" width="850" height="430" fill="#0b1220"/>
 
   <text x="40" y="32" class="title">typed decode (parse + populate typed structures)</text>
   <text x="40" y="50" class="subtitle">homogeneous-services-100.kdl (5.2KB, 100 Service nodes) — same schema across all derive-based harnesses</text>

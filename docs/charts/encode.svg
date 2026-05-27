@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 720" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-20 0 900 730" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
   <style>
     .axis { fill: #94a3b8; font-size: 12px; }
     .label { fill: #cbd5e1; font-size: 13px; font-weight: 500; }
@@ -14,7 +14,7 @@
     .grid { stroke: #1e293b; stroke-width: 1; }
     .divider { stroke: #1e293b; stroke-width: 1; }
   </style>
-  <rect width="820" height="720" fill="#0b1220"/>
+  <rect x="-20" y="0" width="900" height="730" fill="#0b1220"/>
 
   <text x="40" y="32" class="title">encode throughput (cross-implementation)</text>
   <text x="40" y="50" class="subtitle">bars normalized within each section since modes differ in scale by orders of magnitude</text>
