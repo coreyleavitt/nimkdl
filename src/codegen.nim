@@ -1296,6 +1296,51 @@ import ./numlit
 #   - kdlChild on any shared or branch field: not implemented
 #   - kdlProp discriminator: not implemented (the disc could arrive after
 #     branch props, requiring buffering; punt until needed in practice)
+proc emitReservedValidate(
+    bIdent, tokIdent: NimNode,
+    kdlNameLit, expectedReservedLit: NimNode,
+    fieldKey: string,
+    decodedExpr: NimNode,
+    kvCtor: string): NimNode {.compileTime.} =
+  ## Shared helper: emit the reserved-tag validation block for one field
+  ## decode. Caller passes the decoded primitive (already in scope at the
+  ## splice point) and the KdlValue constructor name (`newStringValue`,
+  ## `newIntValue`, `newBoolValue`, `newFloatValue`) appropriate for it.
+  ##
+  ## Three checks fire in this order:
+  ##   1. pendingValueAnno empty + field has expectedReserved → err
+  ##   2. pendingValueAnno present + doesn't match expectedReserved → err
+  ##   3. pendingValueAnno present + matches → run validateReserved on a
+  ##      transient KdlValue built from the decoded primitive
+  ##
+  ## On any success path, pendingValueAnno is cleared.
+  ##
+  ## Used by both the flat (emitVisitorFieldAssign) and variant
+  ## (emitPrimitiveDecode) per-field emitters — single source of truth
+  ## for the kdlReserved semantics the visitor enforces.
+  let ctorIdent = ident(kvCtor)
+  let valSym = genSym(nskLet, "rvKv_" & fieldKey)
+  let rcheckSym = genSym(nskLet, "rvRc_" & fieldKey)
+  quote do:
+    if `bIdent`.pendingValueAnno.len == 0:
+      if `expectedReservedLit`.len > 0:
+        return err[void, ParseError](initError(peTypeReservedMismatch,
+          `tokIdent`.span,
+          "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
+          ") tag but source value has no annotation"))
+    else:
+      if `expectedReservedLit`.len > 0 and
+         `bIdent`.pendingValueAnno != `expectedReservedLit`:
+        return err[void, ParseError](initError(peTypeReservedMismatch,
+          `tokIdent`.span,
+          "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
+          ") tag but source has (" & `bIdent`.pendingValueAnno & ")"))
+      let `valSym` = `ctorIdent`(`decodedExpr`, `tokIdent`.span)
+      let `rcheckSym` = validateReserved(`bIdent`.pendingValueAnno, `valSym`)
+      if `rcheckSym`.isErr:
+        return err[void, ParseError](`rcheckSym`.getErr)
+      `bIdent`.pendingValueAnno = ""
+
 proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
   let typName = $typSym
   let nodeName = extractNodeName(typSym)
@@ -1478,37 +1523,30 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
     let kdlNameLit = newLit(f.kdlName)
     let expectedReservedLit = newLit(f.expectedReserved)
     proc validateBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
-      let ctorIdent = ident(kvCtor)
-      let valSym = genSym(nskLet, "vKv_" & f.nimName)
-      let rcheckSym = genSym(nskLet, "vRc_" & f.nimName)
-      quote do:
-        if `bIdent`.pendingValueAnno.len == 0:
-          if `expectedReservedLit`.len > 0:
-            return err[void, ParseError](initError(peTypeReservedMismatch,
-              `tokIdent`.span,
-              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
-              ") tag but source value has no annotation"))
-        else:
-          if `expectedReservedLit`.len > 0 and
-             `bIdent`.pendingValueAnno != `expectedReservedLit`:
-            return err[void, ParseError](initError(peTypeReservedMismatch,
-              `tokIdent`.span,
-              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
-              ") tag but source has (" & `bIdent`.pendingValueAnno & ")"))
-          let `valSym` = `ctorIdent`(`decodedExpr`, `tokIdent`.span)
-          let `rcheckSym` = validateReserved(`bIdent`.pendingValueAnno, `valSym`)
-          if `rcheckSym`.isErr:
-            return err[void, ParseError](`rcheckSym`.getErr)
-          `bIdent`.pendingValueAnno = ""
+      emitReservedValidate(bIdent, tokIdent, kdlNameLit,
+                           expectedReservedLit, f.nimName,
+                           decodedExpr, kvCtor)
 
     if f.typeIsEnum:
       let innerT = f.typeNode
       let strSym = genSym(nskLet, "enumStr")
       let outSym = genSym(nskVar, "enumOut")
+      # Route enum failures by field role: the variant discriminator gets
+      # peTypeDiscriminatorBad (the entire branch shape is wrong); every
+      # other enum-typed branch field gets peTypeEnumInvalid (just a bad
+      # value for a known field).
+      let enumErrCode =
+        if f.isDiscriminator: ident("peTypeDiscriminatorBad")
+        else: ident("peTypeEnumInvalid")
       let decodeBlock = quote do:
         var `outSym`: `innerT`
         if not decodeEnumFromString(`outSym`, `strSym`):
-          return err[void, ParseError](initError(peTypeDiscriminatorBad,
+          # Clear stale pendingValueAnno: this early return aborts before
+          # validateBlock would have cleared it; under accumulating-mode
+          # recovery the next field's reserved-tag check would otherwise
+          # see a leaked annotation. Same fix at every early-Err exit.
+          `bIdent`.pendingValueAnno = ""
+          return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "invalid enum value for `" &
             `fieldLabel` & "`: '" & `strSym` & "'"))
       let v = validateBlock(strSym, "newStringValue")
@@ -1532,7 +1570,8 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
           let `strSym` = `streamIdent`.source[s0 .. s1]
           `body`
         else:
-          return err[void, ParseError](initError(peTypeDiscriminatorBad,
+          `bIdent`.pendingValueAnno = ""
+          return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "expected string or bareword for `" &
             `fieldLabel` & "`"))
 
@@ -1798,37 +1837,80 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       ok[`typSym`, ParseError](`bIdent`.result)
 
   # ---------- Seq wrapper ----------
+  # Top-level name filter (skipping) + per-node failure swallow (curFailed,
+  # in accumulating mode) mirror the flat seq wrapper so decodeAll over
+  # mixed-shape documents behaves the same for variant element types as
+  # it does for flat element types: non-matching siblings are silently
+  # skipped, and a failing variant node produces exactly one error
+  # instead of one-per-remaining-entry.
+  let nodeNameLit = newLit(nodeName)
   let seqBuilderType = quote do:
     type `seqBuilderName` = object
       results: seq[`typSym`]
       cur: `builderName`
       pendingNodeAnno: string
+      skipping: bool
+      allMode: bool
+      curFailed: bool
+      errors: seq[ParseError]
   let seqWrapProcs = quote do:
     proc visitBeginNode(`bIdent`: var `seqBuilderName`,
                    `nameStrIdent`: openArray[char],
                    `spanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      var nameMatch = `nameStrIdent`.len == `nodeNameLit`.len
+      if nameMatch:
+        for i in 0 ..< `nameStrIdent`.len:
+          if `nameStrIdent`[i] != `nodeNameLit`[i]:
+            nameMatch = false; break
+      if not nameMatch:
+        `bIdent`.skipping = true
+        `bIdent`.pendingNodeAnno = ""
+        return ok(void, ParseError)
+      `bIdent`.skipping = false
+      `bIdent`.curFailed = false
       `bIdent`.cur = `builderName`()
       `bIdent`.cur.pendingNodeAnno = `bIdent`.pendingNodeAnno
       `bIdent`.pendingNodeAnno = ""
-      visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
+      let r0 = visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
+      if r0.isErr and `bIdent`.allMode:
+        if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r0.getErr)
+        `bIdent`.curFailed = true
+        return ok(void, ParseError)
+      r0
     proc visitArg(`bIdent`: var `seqBuilderName`, `idxIdent`: int,
              `tokIdent`: Token, `streamIdent`: TokenStream,
              `entrySpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
-      visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`, `streamIdent`,
-               `entrySpanIdent`)
+      if `bIdent`.skipping or `bIdent`.curFailed:
+        return ok(void, ParseError)
+      let r = visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`,
+                       `streamIdent`, `entrySpanIdent`)
+      if r.isErr and `bIdent`.allMode:
+        if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
+        `bIdent`.curFailed = true
+        return ok(void, ParseError)
+      r
     proc visitProp(`bIdent`: var `seqBuilderName`,
               `keyStrIdent`: openArray[char],
               `tokIdent`: Token, `streamIdent`: TokenStream,
               `entrySpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
-      visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`, `streamIdent`,
-                `entrySpanIdent`)
+      if `bIdent`.skipping or `bIdent`.curFailed:
+        return ok(void, ParseError)
+      let r = visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`,
+                        `streamIdent`, `entrySpanIdent`)
+      if r.isErr and `bIdent`.allMode:
+        if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
+        `bIdent`.curFailed = true
+        return ok(void, ParseError)
+      r
     proc visitValueTypeAnno(`bIdent`: var `seqBuilderName`,
                             `annoStrIdent`: openArray[char],
                             `annoSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping or `bIdent`.curFailed:
+        return ok(void, ParseError)
       visitValueTypeAnno(`bIdent`.cur, `annoStrIdent`, `annoSpanIdent`)
     proc visitNodeTypeAnno(`bIdent`: var `seqBuilderName`,
                            `annoStrIdent`: openArray[char],
@@ -1838,14 +1920,27 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       ok(void, ParseError)
     proc visitBeginChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping or `bIdent`.curFailed:
+        return ok(void, ParseError)
       visitBeginChildren(`bIdent`.cur)
     proc visitEndChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping or `bIdent`.curFailed:
+        return ok(void, ParseError)
       visitEndChildren(`bIdent`.cur)
     proc visitEndNode(`bIdent`: var `seqBuilderName`, `nodeFullSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
+      if `bIdent`.skipping:
+        `bIdent`.skipping = false
+        return ok(void, ParseError)
+      if `bIdent`.curFailed:
+        return ok(void, ParseError)
       let r = visitEndNode(`bIdent`.cur, `nodeFullSpanIdent`)
-      if r.isErr: return r
+      if r.isErr:
+        if `bIdent`.allMode:
+          if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
+          return ok(void, ParseError)
+        return r
       `bIdent`.results.add(`bIdent`.cur.result)
       ok(void, ParseError)
   let kvpSeqProc = quote do:
@@ -1856,26 +1951,26 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
       let r = parseDocumentWith(source, sb, sourcePath)
       if r.isErr: return err[seq[`typSym`], ParseError](r.getErr)
       ok[seq[`typSym`], ParseError](sb.results)
-  let nodeNameLit = newLit(nodeName)
   let kvpAllSeqProc = quote do:
     proc kdlBuildVisitorAllSeq(_: typedesc[`typSym`], source: string,
                                sourcePath: string):
         tuple[value: seq[`typSym`], errors: seq[ParseError]] =
-      var sb: `seqBuilderName`
+      var sb = `seqBuilderName`(allMode: true)
       var parserErrs: seq[ParseError]
       discard parseDocumentWith(source, sb, sourcePath, addr parserErrs)
-      (value: sb.results, errors: parserErrs)
+      (value: sb.results, errors: parserErrs & sb.errors)
   let kvpAllProc = quote do:
     proc kdlBuildVisitorAll(_: typedesc[`typSym`], source: string,
                             sourcePath: string):
         tuple[value: `typSym`, errors: seq[ParseError]] =
-      var sb: `seqBuilderName`
+      var sb = `seqBuilderName`(allMode: true)
       var parserErrs: seq[ParseError]
       discard parseDocumentWith(source, sb, sourcePath, addr parserErrs)
+      let allErrs = parserErrs & sb.errors
       if sb.results.len > 0:
-        (value: sb.results[0], errors: parserErrs)
+        (value: sb.results[0], errors: allErrs)
       else:
-        var errs = parserErrs
+        var errs = allErrs
         if errs.len == 0:
           errs.add(initError(peTypeMissingRequired,
             pointSpan(StartPosition),
@@ -2090,10 +2185,14 @@ macro deriveVisitor(typ: typedesc): untyped =
               "child `" & `nimNameLit` & "` expects (" & `expectedLit` &
               ") tag but source child has no annotation"))
           if `bIdent`.pendingNodeAnno != `expectedLit`:
+            # Clear before the early return so accumulating-mode recovery
+            # doesn't leak the stale tag into the next child dispatch.
+            let badAnno = `bIdent`.pendingNodeAnno
+            `bIdent`.pendingNodeAnno = ""
             return err[void, ParseError](initError(peTypeReservedMismatch,
               `spanIdent`,
               "child `" & `nimNameLit` & "` expects (" & `expectedLit` &
-              ") tag but source has (" & `bIdent`.pendingNodeAnno & ")"))
+              ") tag but source has (" & badAnno & ")"))
       else:
         newStmtList()
     if c.isOption:
@@ -2194,28 +2293,9 @@ macro deriveVisitor(typ: typedesc): untyped =
     let expectedReservedLit = newLit(f.expectedReserved)
     let kdlNameLit = newLit(f.kdlName)
     proc validateReservedBlock(decodedExpr: NimNode, kvCtor: string): NimNode =
-      let ctorIdent = ident(kvCtor)
-      let valSym = genSym(nskLet, "kdlVal_" & f.nimName)
-      let rcheckSym = genSym(nskLet, "rcheck_" & f.nimName)
-      quote do:
-        if `bIdent`.pendingValueAnno.len == 0:
-          if `expectedReservedLit`.len > 0:
-            return err[void, ParseError](initError(peTypeReservedMismatch,
-              `tokIdent`.span,
-              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
-              ") tag but source value has no annotation"))
-        else:
-          if `expectedReservedLit`.len > 0 and
-             `bIdent`.pendingValueAnno != `expectedReservedLit`:
-            return err[void, ParseError](initError(peTypeReservedMismatch,
-              `tokIdent`.span,
-              "field `" & `kdlNameLit` & "` expects (" & `expectedReservedLit` &
-              ") tag but source has (" & `bIdent`.pendingValueAnno & ")"))
-          let `valSym` = `ctorIdent`(`decodedExpr`, `tokIdent`.span)
-          let `rcheckSym` = validateReserved(`bIdent`.pendingValueAnno, `valSym`)
-          if `rcheckSym`.isErr:
-            return err[void, ParseError](`rcheckSym`.getErr)
-          `bIdent`.pendingValueAnno = ""
+      emitReservedValidate(bIdent, tokIdent, kdlNameLit,
+                           expectedReservedLit, f.nimName,
+                           decodedExpr, kvCtor)
 
     # Build core: a stmtlist that, given a `decoded` ident of the right
     # primitive type, validates any reserved-tag constraint, then assigns
@@ -2241,14 +2321,24 @@ macro deriveVisitor(typ: typedesc): untyped =
       s
 
     # Enum dispatch: read string payload then decodeEnumFromString.
+    # Route enum failures by field role: discriminator → peTypeDiscriminatorBad
+    # (whole branch shape wrong); plain enum field → peTypeEnumInvalid.
     if f.typeIsEnum:
       let innerT = primTypeNode
       let strSym = genSym(nskLet, "enumStr")
       let outSym = genSym(nskVar, "enumOut")
+      let enumErrCode =
+        if f.isDiscriminator: ident("peTypeDiscriminatorBad")
+        else: ident("peTypeEnumInvalid")
       let body = quote do:
         var `outSym`: `innerT`
         if not decodeEnumFromString(`outSym`, `strSym`):
-          return err[void, ParseError](initError(peTypeEnumInvalid,
+          # Clear stale pendingValueAnno: this early return aborts before
+          # validateReservedBlock would have cleared it; under
+          # accumulating-mode recovery the next field's reserved-tag
+          # check would otherwise see a leaked annotation.
+          `bIdent`.pendingValueAnno = ""
+          return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "invalid enum value for `" &
             `fieldLabel` & "`: '" & `strSym` & "'"))
       let assignBody = newStmtList()
@@ -2275,7 +2365,8 @@ macro deriveVisitor(typ: typedesc): untyped =
           let `strSym` = `streamIdent`.source[s0 .. s1]
           `assignBody`
         else:
-          return err[void, ParseError](initError(peTypeEnumInvalid,
+          `bIdent`.pendingValueAnno = ""
+          return err[void, ParseError](initError(`enumErrCode`,
             `tokIdent`.span, "expected string or bareword for enum `" &
             `fieldLabel` & "`"))
 
@@ -2657,7 +2748,7 @@ macro deriveVisitor(typ: typedesc): untyped =
       `bIdent`.pendingNodeAnno = ""
       let r0 = visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
       if r0.isErr and `bIdent`.allMode:
-        `bIdent`.errors.add(r0.getErr)
+        if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r0.getErr)
         `bIdent`.curFailed = true
         return ok(void, ParseError)
       r0
@@ -2670,7 +2761,7 @@ macro deriveVisitor(typ: typedesc): untyped =
       let r = visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`,
                        `streamIdent`, `entrySpanIdent`)
       if r.isErr and `bIdent`.allMode:
-        `bIdent`.errors.add(r.getErr)
+        if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
         `bIdent`.curFailed = true
         return ok(void, ParseError)
       r
@@ -2684,7 +2775,7 @@ macro deriveVisitor(typ: typedesc): untyped =
       let r = visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`,
                         `streamIdent`, `entrySpanIdent`)
       if r.isErr and `bIdent`.allMode:
-        `bIdent`.errors.add(r.getErr)
+        if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
         `bIdent`.curFailed = true
         return ok(void, ParseError)
       r
@@ -2725,7 +2816,7 @@ macro deriveVisitor(typ: typedesc): untyped =
       let r = visitEndNode(`bIdent`.cur, `nodeFullSpanIdent`)
       if r.isErr:
         if `bIdent`.allMode:
-          `bIdent`.errors.add(r.getErr)
+          if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
           return ok(void, ParseError)
         return r
       `bIdent`.results.add(`bIdent`.cur.result)

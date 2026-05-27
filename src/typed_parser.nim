@@ -49,6 +49,16 @@ const MaxParserDepthValue* = 256
   ## avoid the symbol clash when both modules are imported via `kdl`).
 const MaxParserDepth = MaxParserDepthValue
 
+const MaxAccumulatedErrors* = 1024
+  ## Hard cap on accumulating-mode (`errorBuf`) parser-error growth.
+  ## A pathological input (e.g. a giant malformed document fed to
+  ## `decodeAll`) could otherwise grow the error buffer in proportion
+  ## to source size, with non-trivial per-ParseError overhead. Beyond
+  ## the cap, accumulation stops and the parser returns early. 1024 is
+  ## chosen as well past the "I want to see every error in my config"
+  ## use case (which is typically dozens, never thousands) while still
+  ## giving a generous batch-lint ceiling.
+
 type
   VisitorCap* = enum
     ## Capabilities a visitor opts into. parseDocumentWith gates routing
@@ -191,6 +201,12 @@ proc parseDocumentWith*[V](source: string, visitor: var V,
           "'/-' must be followed by a node"))
         break
     if peek().kind == tkEof: break
+    # Cap accumulating-mode errors per MaxAccumulatedErrors. The cap is
+    # measured on the visitor's `errorBuf` slice we own here; the visitor
+    # may also keep a separate buffer (e.g. the seq wrapper's `errors`)
+    # which it bounds on its own side. Stopping at the cap is the
+    # parser-side defense against pathological inputs.
+    if not errorBuf.isNil and errorBuf[].len >= MaxAccumulatedErrors: break
     let savedCursor = cursor
     let r = parseNodeWith(source, visitor, stream, cursor,
                           skip = skipNode, depth = 0, errorBuf = errorBuf)
