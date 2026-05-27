@@ -1771,7 +1771,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
 
   # 4. visitProp: dispatch by property key string.
   var propCase = newNimNode(nnkCaseStmt).add(quote do:
-    cast[string](@(`keyStrIdent`.toOpenArray(0, `keyStrIdent`.len - 1))))
+    openArrayToString(`keyStrIdent`))
   for f in shape.shared:
     if f.kind == fkAttr:
       let nimName = ident(f.nimName)
@@ -1828,7 +1828,7 @@ macro deriveVisitor*(typ: typedesc): untyped =
   propCase.add(newNimNode(nnkElse).add quote do:
     return err[void, ParseError](initError(peTypeUnknownField, `tokIdent`.span,
       "`" & `nodeLit` & "` has no field `" &
-      cast[string](@(`keyStrIdent`.toOpenArray(0, `keyStrIdent`.len - 1))) &
+      openArrayToString(`keyStrIdent`) &
       "`")))
   let propProc = quote do:
     proc visitProp(`bIdent`: var `builderName`, key: InternedStr,

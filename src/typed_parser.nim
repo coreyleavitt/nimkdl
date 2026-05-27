@@ -34,6 +34,14 @@
 
 import ./[lexer, intern, spans]
 
+func openArrayToString*(s: openArray[char]): string {.noSideEffect.} =
+  ## VM-friendly conversion. `cast[string](@seq[char])` blows up in
+  ## NimVM ("does not support 'cast' from tySequence to tyString"); a
+  ## newString + byte-copy works both at runtime and at compile time.
+  ## Used by the macro-emitted visitProp case dispatch.
+  result = newString(s.len)
+  for i in 0 ..< s.len: result[i] = s[i]
+
 proc parseInto*[T](source: string, sourcePath = "<input>"):
     Result[T, ParseError] =
   ## Typed entry point. Used as `parseInto[Rule]("...")` or
