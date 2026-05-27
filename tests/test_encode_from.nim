@@ -200,6 +200,31 @@ kdl:
   type BigU {.kdlNode: "big".} = object
     n {.kdlProp.}: uint64
 
+# Round-2 H1: type-level kdlReserved on the node was silently dropped
+# by the direct-buffer path. The legacy encode[T] sets
+# nodeSym.typeAnnotation; encodeFrom only emitted the node name with
+# no `(tag)` prefix, breaking encodeFrom == encode(emPretty) parity.
+
+kdl:
+  type Versioned {.kdlNode: "module", kdlReserved: "v2".} = object
+    field {.kdlProp.}: string
+
+suite "encodeFrom: type-level kdlReserved emits (tag) prefix (round-2 H1)":
+  test "node carries (v2) tag in output":
+    let v = Versioned(field: "ok")
+    let r = encodeFrom(v)
+    check r.isOk
+    check "(v2)module" in r.get
+  test "encodeFrom output matches legacy encode for type-level tag":
+    let v = Versioned(field: "ok")
+    check encodeFrom(v).get == encode(v, emPretty).get
+  test "round-trips through decode":
+    let v = Versioned(field: "ok")
+    let txt = encodeFrom(v).get
+    let back = decode[Versioned](txt)
+    check back.isOk
+    check back.get.field == "ok"
+
 suite "encodeFrom: uint64 bigint promotion (H1 regression)":
   test "uint64 within int64.high encodes as plain int":
     let r = encodeFrom(BigU(n: 12345'u64))

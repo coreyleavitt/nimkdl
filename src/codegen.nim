@@ -963,9 +963,23 @@ macro deriveEncode(typ: typedesc): untyped =
       `bufIdent`.add(s)
       ok(void, ParseError)
   else:
-    directBody.add quote do:
-      appendIndent(`bufIdent`, `indentIdent`)
-      `bufIdent`.add(`nodeNameLit`)
+    # Type-level kdlReserved: emit `(tag)nodename` to match the legacy
+    # path. Without this, encodeFrom silently drops the type-level
+    # annotation for any type carrying `{.kdlReserved: "X".}` —
+    # divergence from encode(v, emPretty) and a real round-trip break
+    # (round-2 review H1).
+    let typeReservedLit = newLit(typeReserved)
+    if typeReserved.len > 0:
+      directBody.add quote do:
+        appendIndent(`bufIdent`, `indentIdent`)
+        `bufIdent`.add('(')
+        `bufIdent`.add(`typeReservedLit`)
+        `bufIdent`.add(')')
+        `bufIdent`.add(`nodeNameLit`)
+    else:
+      directBody.add quote do:
+        appendIndent(`bufIdent`, `indentIdent`)
+        `bufIdent`.add(`nodeNameLit`)
     # Helper: emit one value with optional kdlReserved validation and
     # `(tag)` prefix. Used by BOTH the arg and prop loops so kdlReserved
     # semantics are uniform across positional and keyed fields. Validation

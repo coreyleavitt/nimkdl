@@ -233,21 +233,8 @@ func appendFieldValue*[T: uint8|uint16|uint32](buf: var string, i: T)
   ## overload set must cover what decode[T] does (which already
   ## accepts SomeUnsignedInt via kdlDecodeValue).
   appendInt(buf, int64(i))
-func emitBigInt(hi, lo: uint64, negative: bool): string  # forward decl
-
-func appendFieldValue*(buf: var string, i: uint64) {.noSideEffect, inline.} =
-  ## uint64 above int64.high needs bigint promotion — same path the
-  ## KdlDoc encode uses (`kdlEncodeValue[SomeUnsignedInt]` promotes to
-  ## kvBigInt). Without this, large uint64 values silently emit as
-  ## negative int64 decimals after the cast, corrupting output.
-  if i <= uint64(int64.high):
-    appendInt(buf, int64(i))
-  else:
-    buf.add(emitBigInt(0'u64, i, negative = false))
-func appendFieldValue*(buf: var string, i: uint) {.noSideEffect, inline.} =
-  ## `uint` is 64-bit on common targets — route through the uint64
-  ## overload so the same bigint promotion fires.
-  appendFieldValue(buf, uint64(i))
+# uint64 / uint overloads are defined after emitBigInt below — they need
+# its definition for the bigint-promotion branch.
 func appendFieldValue*(buf: var string, f: float) {.noSideEffect, inline.} =
   appendFloat(buf, f)
 func appendFieldValue*(buf: var string, f: float32) {.noSideEffect, inline.} =
@@ -314,6 +301,24 @@ func emitBigInt(hi, lo: uint64, negative: bool): string =
   for i in countdown(digits.high, 0):
     output.add(digits[i])
   output
+
+# uint64 / uint appendFieldValue overloads live here (rather than next
+# to the other sub-int unsigned overloads above) so they can call
+# emitBigInt directly without a forward decl. They route to bigint
+# promotion when value > int64.high — matches the AST path's
+# `kdlEncodeValue[SomeUnsignedInt]` which produces kvBigInt.
+func appendFieldValue*(buf: var string, i: uint64) {.noSideEffect, inline.} =
+  ## uint64 above int64.high needs bigint promotion. Without this,
+  ## large uint64 values silently emit as negative int64 decimals
+  ## after the cast, corrupting output.
+  if i <= uint64(int64.high):
+    appendInt(buf, int64(i))
+  else:
+    buf.add(emitBigInt(0'u64, i, negative = false))
+func appendFieldValue*(buf: var string, i: uint) {.noSideEffect, inline.} =
+  ## `uint` is 64-bit on common targets — route through the uint64
+  ## overload so the same bigint promotion fires.
+  appendFieldValue(buf, uint64(i))
 
 # ---------------------------------------------------------------------------
 # Value emission
@@ -588,6 +593,18 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
   let base = n.span.start.offset
   var anySpliced = false
 
+  # Splice-bounds guard: `output` is the parent node's source slice.
+  # `s` and `e` are child-relative offsets (`c.span.start - parent.start`).
+  # A well-formed parser-produced AST guarantees `0 <= s < e <= output.len`.
+  # A programmatically-constructed AST (test helpers, future mutation APIs)
+  # can violate this — and Nim's string slicing on out-of-range bounds
+  # SILENTLY returns the wrong substring (negative high → empty slice,
+  # over-range → full string), producing doubled/corrupted output rather
+  # than a crash. Treat any out-of-range span as malformed: skip the
+  # splice and fall through to canonicalEmit (see post-loop).
+  template safeSpliceBounds(spanS, spanE: int): bool =
+    spanS >= 0 and spanE >= spanS and spanE <= output.len
+
   for i in countdown(n.children.high, 0):
     let c = n.children[i]
     if not validSpanInto(c.span, doc.sourceText): continue
@@ -595,6 +612,7 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
     if childResults[i].hash == c.parseHash: continue
     let s = c.span.start.offset - base
     let e = c.span.finish.offset - base
+    if not safeSpliceBounds(s, e): continue
     output = output[0 ..< s] & childResults[i].text & output[e ..< output.len]
     anySpliced = true
 
@@ -604,6 +622,7 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
     if hashEntry(entry, doc.interner) == entry.parseHash: continue
     let s = entry.span.start.offset - base
     let e = entry.span.finish.offset - base
+    if not safeSpliceBounds(s, e): continue
     output = output[0 ..< s] & emitEntry(entry, doc.interner) &
              output[e ..< output.len]
     anySpliced = true
