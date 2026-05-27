@@ -27,3 +27,4 @@ benchmarks/comparisons/kdl-rs/src/
 benchmarks/comparisons/facet-kdl/target/
 benchmarks/comparisons/facet-kdl/Cargo.lock
 benchmarks/comparisons/facet-kdl/src/
+benchmarks/encode_from
