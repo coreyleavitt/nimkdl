@@ -202,3 +202,30 @@ suite "DocBuilder repeated prop keys + same-name arg/prop (cycle 9'.6)":
   test "repeated_arg: all args preserved (no dedup on args)":
     let (viaP, viaV) = roundTrip(CorpusRoot / "input" / "repeated_arg.kdl")
     assertEquivalent(viaP, viaV)
+
+suite "DocBuilder adjacency + ordering (cycle 9'.7)":
+
+  proc bothReject(src: string) =
+    let pRes = parse(src)
+    check pRes.isErr
+    var b = newDocBuilder(src, "test")
+    let vRes = parseDocumentWith(src, b)
+    check vRes.isErr
+
+  test "zero whitespace before first arg rejected (node\"string\")":
+    bothReject(readFile(CorpusRoot / "input" / "zero_space_before_first_arg_fail.kdl"))
+
+  test "zero whitespace before second arg rejected":
+    bothReject(readFile(CorpusRoot / "input" / "zero_space_before_second_arg_fail.kdl"))
+
+  test "zero whitespace before prop rejected":
+    bothReject(readFile(CorpusRoot / "input" / "zero_space_before_prop_fail.kdl"))
+
+  test "entries after slashdash'd children block rejected":
+    bothReject(readFile(CorpusRoot / "input" / "slashdash_child_block_before_entry_err_fail.kdl"))
+
+  test "two real children blocks rejected":
+    bothReject("node { a } { b }\n")
+
+  test "entry after a real children block rejected":
+    bothReject("node { a }; foo=1\n")

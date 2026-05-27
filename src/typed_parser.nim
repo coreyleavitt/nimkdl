@@ -233,26 +233,66 @@ proc parseNodeWith[V](source: string, visitor: var V,
   else: discard   # unreachable
 
   var argIdx = 0
+  # KDL v2 spec: once any children block (real or slashdash'd) has been
+  # consumed, no more entries may appear. At most one REAL block may
+  # contribute children; slashdash'd ones may freely interleave.
+  var seenChildrenBlock = false
+  var realChildrenSeen = false
   while true:
     # Entry-level slashdash: skips the next single entry OR children block.
     # Chained `/- /-` isn't valid grammar (the second /- has no entry to
     # skip), so single-`if` lookahead suffices and stays branch-predictable.
     var entrySkip = skip
+    var sawSlashdash = false
     if peek().kind == tkSlashDash:
       inc cursor
       while peek().kind == tkNewline: inc cursor
       entrySkip = true
+      sawSlashdash = true
+
+    # Snapshot entry-start precededByWs BEFORE annotation consumption —
+    # `(type)value` is one entry; the precededByWs property belongs to
+    # the leading `(`. Doing the check after handleValueAnno would test
+    # the value token, which never has ws after the closing `)`.
+    let entryStartTok = peek()
+    if not sawSlashdash and not entryStartTok.precededByWs and
+       entryStartTok.kind notin {tkNewline, tkSemicolon, tkEof, tkRBrace}:
+      return err[void, ParseError](initError(peParseExpected, entryStartTok.span,
+        "whitespace required before this entry"))
 
     if peek().kind == tkLParen: handleValueAnno(entrySkip)
     let t = peek()
     case t.kind
     of tkNewline, tkSemicolon, tkEof, tkRBrace:
       break
+    else: discard
+
+    # Entries-after-children check. Any entry token (not LBrace) reaching
+    # here AFTER seenChildrenBlock is a violation.
+    if seenChildrenBlock and t.kind != tkLBrace:
+      return err[void, ParseError](initError(peParseUnexpected, t.span,
+        "entries are not permitted after a children block"))
+
+    # Entries-after-children check. Any entry token (not LBrace) reaching
+    # here AFTER seenChildrenBlock is a violation.
+    if seenChildrenBlock and t.kind != tkLBrace:
+      return err[void, ParseError](initError(peParseUnexpected, t.span,
+        "entries are not permitted after a children block"))
+
+    case t.kind
+    of tkNewline, tkSemicolon, tkEof, tkRBrace:
+      break    # unreachable (handled above), satisfies exhaustiveness
     of tkLBrace:
       # Children block. Inner nodes recurse through parseNodeWith with
       # skip = entrySkip; visitor children-boundary events fire iff
       # vcChildren is declared AND the enclosing node isn't skipped.
+      if not entrySkip and realChildrenSeen:
+        return err[void, ParseError](initError(peParseUnexpected, t.span,
+          "a node may have at most one real children block"))
       inc cursor   # consume `{`
+      seenChildrenBlock = true
+      if not entrySkip:
+        realChildrenSeen = true
       when vcChildren in caps:
         if not entrySkip:
           let bcRes = visitor.visitBeginChildren()
