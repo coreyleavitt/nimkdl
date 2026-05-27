@@ -1592,3 +1592,221 @@ proc decodeAll*[T](source: string,
       # Matching node existed but decode failed — already added the
       # error above. Nothing to do.
       discard
+
+
+# ---------------------------------------------------------------------------
+# deriveVisitor — typed-direct path (issue #1)
+# ---------------------------------------------------------------------------
+#
+# Generates a hidden builder type + the six visitor methods needed by
+# typed_parser.parseWith. Emits a `kdlVisitorParse` overload so the
+# generic `parseInto[T]` proc resolves to this type's machinery via
+# `mixin`.
+#
+# Cycle 2 scope: flat objects only, kdlArg + kdlProp fields with
+# string/int/bool types and default values. Children blocks (kdlChild)
+# come in cycle 7; variants come later if needed.
+
+import ./typed_parser
+import ./lexer
+import ./numlit
+
+macro deriveVisitor*(typ: typedesc): untyped =
+  ## Emit the per-type visitor machinery for the typed-direct parse path.
+  ## Generated code is dumpable via `-d:dumpKdlGen`.
+  let typSym =
+    if typ.kind == nnkBracketExpr: typ[1]
+    else: typ
+  let typeImpl = typSym.getImpl
+  if typeImpl.kind != nnkTypeDef:
+    error("deriveVisitor: argument is not a type definition", typ)
+  let body = typeImpl[2]
+  if body.kind != nnkObjectTy:
+    error("deriveVisitor: only object types are supported (cycle 2 scope)",
+          typ)
+  let recList = body[2]
+  let shape = collectShape(recList)
+  if shape.hasVariant:
+    error("deriveVisitor: variant types not yet supported (cycle 2 scope)",
+          typ)
+
+  let typName = $typSym
+  let nodeName = extractNodeName(typSym)
+  let builderName = ident(typName & "VBuilder")
+  let bIdent = ident("b")
+  let tokIdent = ident("tok")
+  let streamIdent = ident("stream")
+  let keyStrIdent = ident("keyStr")
+  let nameStrIdent = ident("nameStr")
+  let idxIdent = ident("idx")
+
+  # 1. Hidden builder type.
+  let builderType = quote do:
+    type `builderName` = object
+      result: `typSym`
+
+  # 2. beginNode: name match + apply field defaults.
+  var defaultsBody = newStmtList()
+  for f in shape.shared:
+    if f.defaultExpr.kind != nnkEmpty:
+      let nimName = ident(f.nimName)
+      let defExpr = f.defaultExpr
+      defaultsBody.add quote do:
+        `bIdent`.result.`nimName` = `defExpr`
+  let nodeLit = newLit(nodeName)
+  let beginNodeProc = quote do:
+    proc beginNode(`bIdent`: var `builderName`,
+                   name: InternedStr,
+                   `nameStrIdent`: openArray[char]):
+        Result[void, ParseError] =
+      var match = `nameStrIdent`.len == `nodeLit`.len
+      if match:
+        for i in 0 ..< `nameStrIdent`.len:
+          if `nameStrIdent`[i] != `nodeLit`[i]:
+            match = false; break
+      if not match:
+        return err[void, ParseError](initError(peTypeMismatch,
+          pointSpan(StartPosition),
+          "expected node `" & `nodeLit` & "`"))
+      `defaultsBody`
+      ok(void, ParseError)
+
+  # 3. arg: dispatch by positional index.
+  var argCase = newNimNode(nnkCaseStmt).add(idxIdent)
+  var argSeen = 0
+  for f in shape.shared:
+    if f.kind == fkArg:
+      let nimName = ident(f.nimName)
+      let lit = newLit(argSeen)
+      let typeName = $f.typeNode
+      let fieldLabel = newLit(typName & "." & f.nimName)
+      let assignment =
+        case typeName
+        of "string":
+          quote do:
+            case `tokIdent`.kind
+            of tkString:
+              `bIdent`.result.`nimName` =
+                `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+            of tkRawString:
+              `bIdent`.result.`nimName` =
+                `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+            else:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected string for `" &
+                `fieldLabel` & "`"))
+        of "int":
+          quote do:
+            if `tokIdent`.kind != tkNumber:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected int"))
+            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+            let d = decodeIntFromToken(n, `tokIdent`.span)
+            if d.isErr: return err[void, ParseError](d.getErr)
+            `bIdent`.result.`nimName` = int(d.get)
+        of "bool":
+          quote do:
+            if `tokIdent`.kind != tkKeyword:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected bool"))
+            `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
+        else:
+          quote do:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "unsupported arg type (cycle 2 scope)"))
+      argCase.add(newNimNode(nnkOfBranch).add(lit).add(assignment))
+      inc argSeen
+  argCase.add(newNimNode(nnkElse).add quote do:
+    return err[void, ParseError](initError(peParseUnexpected, `tokIdent`.span,
+      "too many positional args for `" & `nodeLit` & "`")))
+  let argProc = quote do:
+    proc arg(`bIdent`: var `builderName`, `idxIdent`: int,
+             `tokIdent`: Token, `streamIdent`: TokenStream):
+        Result[void, ParseError] =
+      `argCase`
+      ok(void, ParseError)
+
+  # 4. prop: dispatch by property key string.
+  var propCase = newNimNode(nnkCaseStmt).add(quote do:
+    cast[string](@(`keyStrIdent`.toOpenArray(0, `keyStrIdent`.len - 1))))
+  for f in shape.shared:
+    if f.kind == fkAttr:
+      let nimName = ident(f.nimName)
+      let kdlName = newLit(f.kdlName)
+      let typeName = $f.typeNode
+      let fieldLabel = newLit(typName & "." & f.nimName)
+      let assignment =
+        case typeName
+        of "string":
+          quote do:
+            case `tokIdent`.kind
+            of tkString:
+              `bIdent`.result.`nimName` =
+                `streamIdent`.stringPayloads[`tokIdent`.strIdx]
+            of tkRawString:
+              `bIdent`.result.`nimName` =
+                `streamIdent`.rawStringPayloads[`tokIdent`.rawIdx]
+            else:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected string for `" &
+                `fieldLabel` & "`"))
+        of "int":
+          quote do:
+            if `tokIdent`.kind != tkNumber:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected int for `" &
+                `fieldLabel` & "`"))
+            let n = `streamIdent`.numberPayloads[`tokIdent`.numIdx]
+            let d = decodeIntFromToken(n, `tokIdent`.span)
+            if d.isErr: return err[void, ParseError](d.getErr)
+            `bIdent`.result.`nimName` = int(d.get)
+        of "bool":
+          quote do:
+            if `tokIdent`.kind != tkKeyword:
+              return err[void, ParseError](initError(peTypeMismatch,
+                `tokIdent`.span, "expected bool for `" &
+                `fieldLabel` & "`"))
+            `bIdent`.result.`nimName` = (`tokIdent`.keyword == kwTrue)
+        else:
+          quote do:
+            return err[void, ParseError](initError(peTypeMismatch,
+              `tokIdent`.span, "unsupported prop type (cycle 2 scope)"))
+      propCase.add(newNimNode(nnkOfBranch).add(kdlName).add(assignment))
+  # Strict default per Decision 1: unknown property is an error.
+  propCase.add(newNimNode(nnkElse).add quote do:
+    return err[void, ParseError](initError(peTypeUnknownField, `tokIdent`.span,
+      "`" & `nodeLit` & "` has no field `" &
+      cast[string](@(`keyStrIdent`.toOpenArray(0, `keyStrIdent`.len - 1))) &
+      "`")))
+  let propProc = quote do:
+    proc prop(`bIdent`: var `builderName`, key: InternedStr,
+              `keyStrIdent`: openArray[char],
+              `tokIdent`: Token, `streamIdent`: TokenStream):
+        Result[void, ParseError] =
+      `propCase`
+      ok(void, ParseError)
+
+  # 5/6/7. Children + endNode: no-op for flat case (cycle 7 adds children).
+  let restProcs = quote do:
+    proc beginChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
+      ok(void, ParseError)
+    proc endChildren(`bIdent`: var `builderName`): Result[void, ParseError] =
+      ok(void, ParseError)
+    proc endNode(`bIdent`: var `builderName`): Result[void, ParseError] =
+      ok(void, ParseError)
+
+  # 8. kdlVisitorParse — the macro-emitted entry the generic parseInto[T]
+  # mixin's into.
+  let kvpProc = quote do:
+    proc kdlVisitorParse(_: typedesc[`typSym`], source: string,
+                         sourcePath: string): Result[`typSym`, ParseError] =
+      var `bIdent` = `builderName`()
+      let r = parseWith(source, `bIdent`, sourcePath)
+      if r.isErr: return err[`typSym`, ParseError](r.getErr)
+      ok[`typSym`, ParseError](`bIdent`.result)
+
+  result = newStmtList(
+    builderType, beginNodeProc, argProc, propProc, restProcs, kvpProc)
+  when defined(dumpKdlGen):
+    echo "=== deriveVisitor for ", repr(typ), " ==="
+    echo result.repr

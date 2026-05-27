@@ -10,6 +10,7 @@
 
 import std/unittest
 import ../src/[lexer, intern, numlit, spans, typed_parser]
+import ../src/codegen   # for kdlNode, kdlArg, kdlProp pragmas
 
 # Forward-declared helper for openArray[char] -> string comparisons.
 proc toString(s: openArray[char]): string =
@@ -89,11 +90,11 @@ proc endNode(b: var ServiceBuilder): Result[void, ParseError] =
   ok(void, ParseError)
 
 
-suite "typed parser — tracer bullet":
+suite "typed parser — tracer bullet (hand-written visitor)":
   test "parseInto[ServiceBuilder] decodes one service with all fields":
     let src = "service \"auth\" port=8443 replicas=3 enabled=#true"
     var builder = ServiceBuilder()
-    let r = parseInto(src, builder)
+    let r = parseWith(src, builder)
     check r.isOk
     check builder.result.name == "auth"
     check builder.result.port == 8443
@@ -103,9 +104,41 @@ suite "typed parser — tracer bullet":
   test "defaults fire when properties missing":
     let src = "service \"x\" port=80"
     var builder = ServiceBuilder()
-    let r = parseInto(src, builder)
+    let r = parseWith(src, builder)
     check r.isOk
     check builder.result.name == "x"
     check builder.result.port == 80
     check builder.result.replicas == 1   # default
     check builder.result.enabled == true # default
+
+# Cycle 2: same behavior, but the visitor is macro-generated from the
+# type definition instead of hand-written. The user-facing API is
+# parseInto[T](src) which constructs the visitor + runs the parser
+# internally.
+
+type ServiceTyped {.kdlNode: "service".} = object
+  name {.kdlArg.}: string
+  port {.kdlProp.}: int
+  replicas {.kdlProp.}: int = 1
+  enabled {.kdlProp.}: bool = true
+
+deriveVisitor(ServiceTyped)
+
+suite "typed parser — macro-generated visitor (cycle 2)":
+  test "parseInto[ServiceTyped] decodes one service":
+    let src = "service \"auth\" port=8443 replicas=3 enabled=#true"
+    let r = parseInto[ServiceTyped](src)
+    check r.isOk
+    check r.get.name == "auth"
+    check r.get.port == 8443
+    check r.get.replicas == 3
+    check r.get.enabled == true
+
+  test "macro-generated visitor fires defaults":
+    let src = "service \"x\" port=80"
+    let r = parseInto[ServiceTyped](src)
+    check r.isOk
+    check r.get.name == "x"
+    check r.get.port == 80
+    check r.get.replicas == 1
+    check r.get.enabled == true

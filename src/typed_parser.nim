@@ -32,7 +32,15 @@
 
 import ./[lexer, intern, spans]
 
-proc parseInto*[V](source: string, visitor: var V,
+proc parseInto*[T](source: string, sourcePath = "<input>"):
+    Result[T, ParseError] =
+  ## Typed entry point. Used as `parseInto[Rule]("...")`. Resolves the
+  ## per-type visitor via `deriveVisitor[T]`-emitted `kdlVisitorParse`
+  ## overload at instantiation time.
+  mixin kdlVisitorParse
+  kdlVisitorParse(T, source, sourcePath)
+
+proc parseWith*[V](source: string, visitor: var V,
                    sourcePath = "<input>"): Result[void, ParseError] =
   ## Walk `source` through `visitor`. Returns Ok on success, or the first
   ## structural / visitor error encountered.
