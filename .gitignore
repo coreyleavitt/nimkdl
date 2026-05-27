@@ -14,6 +14,8 @@ benchmarks/perf_typed_parseInto
 benchmarks/typed_encode
 src/reserved
 src/spans
+src/kdl
+src/nkdl
 
 # Comparison benchmark build artifacts
 benchmarks/comparisons/ckdl/ckdl/

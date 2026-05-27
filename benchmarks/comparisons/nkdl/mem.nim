@@ -1,13 +1,13 @@
-## Memory-footprint measurement harness for nimkdl. ONE fixture per
+## Memory-footprint measurement harness for nkdl. ONE fixture per
 ## invocation so each measurement gets a fresh VmPeak baseline (peak
 ## RSS is monotonic per-process — sharing a process across fixtures
 ## contaminates earlier measurements with later allocations).
 ##
 ## Usage:
-##   nimkdl-mem <fixture-path>
+##   nkdl-mem <fixture-path>
 ##
 ## Output (one line):
-##   nimkdl  <fixture>  baseline=<KB>  peak=<KB>  delta=<KB>  iters=<N>
+##   nkdl  <fixture>  baseline=<KB>  peak=<KB>  delta=<KB>  iters=<N>
 ##
 ## Methodology:
 ##   1. Read fixture into a string (this happens before any parse work,
@@ -23,7 +23,7 @@
 ## isolation" metric; that requires a heap profiler.
 
 import std/[os, strformat, strutils]
-import kdl
+import nkdl
 
 proc vmPeakKb(): int =
   ## Read VmPeak (high-water-mark RSS) from /proc/self/status. Linux
@@ -37,7 +37,7 @@ proc vmPeakKb(): int =
 
 proc main() =
   if paramCount() < 1:
-    echo "usage: nimkdl-mem <fixture-path>"
+    echo "usage: nkdl-mem <fixture-path>"
     quit(2)
   let path = paramStr(1)
   if not fileExists(path):
@@ -63,6 +63,6 @@ proc main() =
 
   let fixture = path.extractFilename
   let inputKb = (content.len + 1023) div 1024
-  echo &"  nimkdl  {fixture:<35} input {inputKb:>5} KB   baseline {baseline:>6} KB   peak {peak:>6} KB   delta {peak - baseline:>6} KB"
+  echo &"  nkdl    {fixture:<35} input {inputKb:>5} KB   baseline {baseline:>6} KB   peak {peak:>6} KB   delta {peak - baseline:>6} KB"
 
 main()

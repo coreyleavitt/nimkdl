@@ -5,7 +5,7 @@ the bars are distinguishable on the #0b1220 chart background AND
 distinguishable from each other in grayscale fallback (each hue is
 at a different luminance level).
 
-  nimkdl     #14b8a6   teal   (cool, light)
+  nkdl       #14b8a6   teal   (cool, light)
   ckdl       #f59e0b   amber  (warm, light)
   knus       #a78bfa   violet (cool, medium)
   facet-kdl  #f472b6   pink   (warm, medium)

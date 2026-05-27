@@ -1,4 +1,4 @@
-## nimkdl benchmark harness.
+## nkdl benchmark harness.
 ##
 ## Three sections, each reported separately so the headline averages
 ## reflect what they're actually measuring:
@@ -33,7 +33,7 @@
 ##     nim c -r -d:release -p:src benchmarks/bench.nim
 
 import std/[times, strformat, monotimes, os, strutils, sequtils]
-import kdl
+import nkdl
 
 type
   BenchResult = object
@@ -134,7 +134,7 @@ proc printEncodeSection(results: seq[BenchResult], section: string) =
 proc printResults(results: seq[BenchResult]) =
   echo ""
   echo "=".repeat(80)
-  echo "  nimkdl benchmarks — coreyleavitt/nimkdl"
+  echo "  nkdl benchmarks — coreyleavitt/nimkdl"
   echo "=".repeat(80)
   printSection(results, "real-world")
   printSection(results, "large")

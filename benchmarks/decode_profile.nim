@@ -2,7 +2,7 @@
 ## so we can see whether the 2x gap vs knus is in parse or in the
 ## per-node decode-walk after parse.
 import std/[os, times, strformat, monotimes]
-import kdl
+import nkdl
 
 type Service {.kdlNode: "service".} = object
   name {.kdlArg.}: string

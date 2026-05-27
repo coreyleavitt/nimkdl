@@ -7,7 +7,7 @@
 
 import std/[sequtils, strutils, unittest]
 
-import ../src/kdl
+import ../src/nkdl
 
 # Top-level types (Nim doesn't allow `type` blocks nested in a suite).
 

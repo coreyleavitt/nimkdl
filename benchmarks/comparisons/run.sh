@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all four parsers (nimkdl, ckdl, knus, kdl-rs) back-to-back in
+# Run all four parsers (nkdl, ckdl, knus, kdl-rs) back-to-back in
 # the same set of containers on the same fixtures. Numbers from this
 # script are what BENCHMARK.md claims.
 #
@@ -9,7 +9,7 @@
 #
 # Usage:
 #   benchmarks/comparisons/run.sh           # all four
-#   benchmarks/comparisons/run.sh nimkdl    # one specific
+#   benchmarks/comparisons/run.sh nkdl    # one specific
 set -euo pipefail
 
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
@@ -42,9 +42,9 @@ if [ -d "$REPO_ROOT/tests/conformance/test_cases/input" ]; then
   cp "$REPO_ROOT/tests/conformance/test_cases/input"/*.kdl "$CORPUS_STAGE/"
 fi
 
-run_nimkdl() {
+run_nkdl() {
   echo "================================================================"
-  echo "  nimkdl (this repo) -- comprehensive harness"
+  echo "  nkdl (this repo) -- comprehensive harness"
   echo "  parse / typed-decode (legacy + direct) / typed-encode (legacy + direct, flat + nested)"
   echo "================================================================"
   # Comprehensive harness: parse + typed decode (both legacy AST and
@@ -59,18 +59,18 @@ run_nimkdl() {
     sh -c '
       set -e
       nim c --hints:off -d:release -d:lto \
-        -p:/work/src -o:/tmp/nimkdl-bench \
-        benchmarks/comparisons/nimkdl/bench.nim 2>&1 | tail -3
-      /tmp/nimkdl-bench
+        -p:/work/src -o:/tmp/nkdl-bench \
+        benchmarks/comparisons/nkdl/bench.nim 2>&1 | tail -3
+      /tmp/nkdl-bench
     '
   echo ""
 }
 
-run_nimkdl_legacy() {
+run_nkdl_legacy() {
   # The original parse-only bench, kept around for historical
   # continuity with old comparison tables in BENCHMARK.md.
   echo "================================================================"
-  echo "  nimkdl (legacy parse-only bench — for historical continuity)"
+  echo "  nkdl (legacy parse-only bench — for historical continuity)"
   echo "================================================================"
   $CONTAINER_RUNTIME run --rm \
     -v "$REPO_ROOT:/work:Z" -w /work \
@@ -172,7 +172,7 @@ run_memory() {
   echo "  One fresh process per (parser, fixture) — VmPeak is monotonic."
   echo "================================================================"
 
-  # nimkdl mem — build once, run per fixture.
+  # nkdl mem — build once, run per fixture.
   $CONTAINER_RUNTIME run --rm \
     -v "$REPO_ROOT:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
@@ -181,10 +181,10 @@ run_memory() {
     sh -c '
       set -e
       nim c --hints:off -d:release -d:lto \
-        -p:/work/src -o:/tmp/nimkdl-mem \
-        benchmarks/comparisons/nimkdl/mem.nim 2>&1 | tail -1 >&2
+        -p:/work/src -o:/tmp/nkdl-mem \
+        benchmarks/comparisons/nkdl/mem.nim 2>&1 | tail -1 >&2
       for f in '"${MEM_FIXTURES[*]}"'; do
-        /tmp/nimkdl-mem /fixtures/$f
+        /tmp/nkdl-mem /fixtures/$f
       done
     '
 
@@ -266,7 +266,7 @@ run_corpus() {
   echo "  Real-trace defense: same input every spec parser is held against"
   echo "================================================================"
 
-  # nimkdl corpus
+  # nkdl corpus
   $CONTAINER_RUNTIME run --rm \
     -v "$REPO_ROOT:/work:Z" \
     -v "$CORPUS_STAGE:/corpus:Z" \
@@ -275,9 +275,9 @@ run_corpus() {
     sh -c '
       set -e
       nim c --hints:off -d:release -d:lto \
-        -p:/work/src -o:/tmp/nimkdl-corpus \
-        benchmarks/comparisons/nimkdl/corpus.nim 2>&1 | tail -1 >&2
-      /tmp/nimkdl-corpus /corpus
+        -p:/work/src -o:/tmp/nkdl-corpus \
+        benchmarks/comparisons/nkdl/corpus.nim 2>&1 | tail -1 >&2
+      /tmp/nkdl-corpus /corpus
     '
 
   # ckdl corpus — builds ckdl from source if not already present.
@@ -335,10 +335,10 @@ run_corpus() {
 run_edit() {
   echo "================================================================"
   echo "  Edit-then-encode (full parse → mutate one node → encode cycle)"
-  echo "  Only nimkdl + kdl-rs — others have no mutable AST + encode path."
+  echo "  Only nkdl + kdl-rs — others have no mutable AST + encode path."
   echo "================================================================"
 
-  # nimkdl
+  # nkdl
   $CONTAINER_RUNTIME run --rm \
     -v "$REPO_ROOT:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
@@ -347,9 +347,9 @@ run_edit() {
     sh -c '
       set -e
       nim c --hints:off -d:release -d:lto \
-        -p:/work/src -o:/tmp/nimkdl-edit \
-        benchmarks/comparisons/nimkdl/edit.nim 2>&1 | tail -1 >&2
-      /tmp/nimkdl-edit /fixtures/realistic-config.kdl
+        -p:/work/src -o:/tmp/nkdl-edit \
+        benchmarks/comparisons/nkdl/edit.nim 2>&1 | tail -1 >&2
+      /tmp/nkdl-edit /fixtures/realistic-config.kdl
     '
 
   # kdl-rs
@@ -368,7 +368,7 @@ run_edit() {
 }
 
 if [ $# -eq 0 ]; then
-  run_nimkdl
+  run_nkdl
   run_ckdl
   run_knus
   run_facet_kdl
@@ -381,8 +381,8 @@ fi
 
 for target in "$@"; do
   case "$target" in
-    nimkdl)        run_nimkdl ;;
-    nimkdl-legacy) run_nimkdl_legacy ;;
+    nkdl)        run_nkdl ;;
+    nkdl-legacy) run_nkdl_legacy ;;
     ckdl)          run_ckdl ;;
     knus)          run_knus ;;
     facet-kdl)     run_facet_kdl ;;
@@ -390,6 +390,6 @@ for target in "$@"; do
     memory)        run_memory ;;
     corpus)        run_corpus ;;
     edit)          run_edit ;;
-    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs|memory|corpus|edit)" >&2; exit 1 ;;
+    *) echo "unknown target: $target (nkdl|nkdl-legacy|ckdl|knus|facet-kdl|kdl-rs|memory|corpus|edit)" >&2; exit 1 ;;
   esac
 done

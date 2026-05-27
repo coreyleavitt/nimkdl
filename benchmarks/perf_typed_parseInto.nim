@@ -3,7 +3,7 @@
 ## with frame pointers (`--passC:-fno-omit-frame-pointer`) so the
 ## call graph is readable.
 import std/os
-import kdl
+import nkdl
 
 type Service {.kdlNode: "service".} = object
   name {.kdlArg.}: string

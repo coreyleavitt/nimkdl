@@ -9,18 +9,18 @@ libraries better than we do can audit our usage.
 
 | Directory     | Harness paths timed                                                | Language   |
 |---------------|--------------------------------------------------------------------|------------|
-| `nimkdl/`     | parse, typed decode (legacy + direct), typed encode (legacy + direct, flat + nested) | Nim |
+| `nkdl/`     | parse, typed decode (legacy + direct), typed encode (legacy + direct, flat + nested) | Nim |
 | `ckdl/`       | event-drain parse only (no typed path exists)                      | C          |
 | `knus/`       | parse_ast, typed `Vec<Service>`, typed enum                        | Rust       |
 | `facet-kdl/`  | typed `from_str::<ServiceDoc>`, `to_string` encode                 | Rust       |
 | `kdl-rs/`     | `KdlDocument::parse_v2`, `to_string` (preserve + canonical)        | Rust       |
 
-The `nimkdl/bench.nim` harness is the load-bearing one for the
+The `nkdl/bench.nim` harness is the load-bearing one for the
 cross-impl comparison — it produces every measurable column in one
 container run with the same line format as the Rust/C harnesses.
 The older `benchmarks/bench.nim` is kept for historical continuity
 (it has the section breakdown the early comparison tables used) and
-runs via `run.sh nimkdl-legacy`.
+runs via `run.sh nkdl-legacy`.
 
 ## Apples-to-apples mapping
 
@@ -28,7 +28,7 @@ Each row in BENCHMARK.md's typed-decode or typed-encode table maps
 to a single function call in one of these harnesses. The mapping is
 explicit so a reader can verify the comparison is fair:
 
-| Comparison        | nimkdl                                | competitor                              | Schema identity |
+| Comparison        | nkdl                                | competitor                              | Schema identity |
 |-------------------|---------------------------------------|-----------------------------------------|-----------------|
 | AST parse         | `parse(content)` (kdl.nim)            | kdl-rs `KdlDocument::parse_v2`          | bytes-in only   |
 |                   |                                       | ckdl event-drain                        | bytes-in only   |
@@ -39,7 +39,7 @@ explicit so a reader can verify the comparison is fair:
 |                   | `encodeFrom(seq[Service])` (direct, #1)   | facet-kdl `to_string(&doc)`         | same Service schema |
 | Typed encode (nested) | `encodeFrom(seq[Server])` (direct)| **n/a — no competitor has a nested-shape encode bench** | Server with Action children |
 
-To verify the schema identity claim: open `nimkdl/bench.nim`,
+To verify the schema identity claim: open `nkdl/bench.nim`,
 `facet-kdl/main.rs`, and `knus/main.rs` side by side and look at
 the `Service` definition. The Nim version uses `kdlNode`/`kdlArg`/
 `kdlProp` pragmas to declare the same shape that facet-kdl declares
@@ -82,8 +82,8 @@ picking" critiques:
 
 ```bash
 benchmarks/comparisons/run.sh                # every parser
-benchmarks/comparisons/run.sh nimkdl         # just the new comprehensive harness
-benchmarks/comparisons/run.sh nimkdl-legacy  # parse-only historical bench
+benchmarks/comparisons/run.sh nkdl         # just the new comprehensive harness
+benchmarks/comparisons/run.sh nkdl-legacy  # parse-only historical bench
 benchmarks/comparisons/run.sh ckdl knus      # multiple
 ```
 
@@ -134,7 +134,7 @@ and we'd rather correct it than ship inflated numbers.
 
 ## Notes on each harness
 
-### nimkdl
+### nkdl
 
 Six measurements in one binary, listed under `=== ... ===` section
 headers in the transcript:
@@ -165,9 +165,9 @@ no downstream allocation work. We still beat it on most fixtures, see
 Tests three idiomatic paths.
 
 1. `parse_ast` — parser-only, returns a knus `Document`. Closest
-   apples-to-apples with ckdl's event drain and nimkdl's `parse()`.
+   apples-to-apples with ckdl's event drain and nkdl's `parse()`.
 2. `parse::<Vec<Service>>` — typed homogeneous decode. **The
-   apples-to-apples comparison for nimkdl `parseInto[seq[Service]]`.**
+   apples-to-apples comparison for nkdl `parseInto[seq[Service]]`.**
 3. `parse::<Vec<ConfigNode>>` — typed discriminated union (enum).
 
 knus has no encode path. Don't try to add one — they intentionally
@@ -182,9 +182,9 @@ comparison.
 Two paths timed:
 
 1. `from_str::<ServiceDoc>` — typed homogeneous decode. The
-   apples-to-apples for nimkdl `parseInto[seq[Service]]`.
+   apples-to-apples for nkdl `parseInto[seq[Service]]`.
 2. `to_string(&doc)` — typed encode. **The apples-to-apples for
-   nimkdl `encodeFrom(seq[Service])`.**
+   nkdl `encodeFrom(seq[Service])`.**
 
 facet-kdl has no exposed AST-only path; everything goes through
 typed deserialize. The crate depends on `kdl ^6.5.0` (kdl-rs), so

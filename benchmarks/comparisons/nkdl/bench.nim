@@ -1,4 +1,4 @@
-## Comprehensive nimkdl bench harness for the cross-impl comparison.
+## Comprehensive nkdl bench harness for the cross-impl comparison.
 ##
 ## Mirrors the layout of the Rust/C harnesses in this directory:
 ## one container build + one binary that times every measurable
@@ -34,7 +34,7 @@
 ## Build flags: -d:release -d:nimCallDepthLimit=20000 -p:/work/src.
 
 import std/[os, strutils, times, strformat, monotimes]
-import kdl
+import nkdl
 
 proc peakRssKb(): int =
   ## High-water-mark resident set size in KB. Reads /proc/self/status's
@@ -97,7 +97,7 @@ proc main() =
   let src = readFile(svcPath)
 
   # 1. AST parse - shared corpus, matches kdl-rs/ckdl/knus parse_ast.
-  echo "=== nimkdl parse (AST build, release+orc) ===\n"
+  echo "=== nkdl parse (AST build, release+orc) ===\n"
   let cases = @[
     ("realistic-config.kdl",         fixtureDir / "realistic-config.kdl",        5_000),
     ("Cargo.kdl",                    fixtureDir / "Cargo.kdl",                  10_000),
@@ -117,17 +117,17 @@ proc main() =
     report(name, c.len, iters, el)
 
   # 2 + 3. Typed decode: both paths, same fixture.
-  echo "\n=== nimkdl typed decode (homogeneous-services-100.kdl) ===\n"
+  echo "\n=== nkdl typed decode (homogeneous-services-100.kdl) ===\n"
   echo "  Service schema: same as facet-kdl/main.rs + knus/main.rs"
   echo "  (name arg, port u16/int prop, replicas prop, enabled prop)\n"
   block:
     let el = timeIt(5_000):
       discard decode[seq[Service]](src)
-    report("nimkdl decode[seq[Service]]  (AST + walk)", src.len, 5_000, el)
+    report("nkdl decode[seq[Service]]  (AST + walk)", src.len, 5_000, el)
   block:
     let el = timeIt(5_000):
       discard parseInto[seq[Service]](src)
-    report("nimkdl parseInto[seq[Service]] (direct, #1)", src.len, 5_000, el)
+    report("nkdl parseInto[seq[Service]] (direct, #1)", src.len, 5_000, el)
   echo ""
   echo "  apples-to-apples competitors for the direct path:"
   echo "    knus       parse::<Vec<Service>>           (see knus/main.rs)"
@@ -136,19 +136,19 @@ proc main() =
   echo "    ckdl       -- n/a, no typed decode path --"
 
   # 4 + 5. Typed encode on flat homogeneous shape.
-  echo "\n=== nimkdl typed encode FLAT (100 Service nodes, no children) ===\n"
+  echo "\n=== nkdl typed encode FLAT (100 Service nodes, no children) ===\n"
   let svcs = decode[seq[Service]](src)
   doAssert svcs.isOk
   let services = svcs.get
   block:
     let el = timeIt(5_000):
       discard encode(services, emPretty)
-    report("nimkdl encode(seq[Service], emPretty)", src.len, 5_000, el)
+    report("nkdl encode(seq[Service], emPretty)", src.len, 5_000, el)
   block:
     let el = timeIt(5_000):
       let r = encodeFrom(services)
       discard r.get
-    report("nimkdl encodeFrom(seq[Service])  (direct, #1)", src.len, 5_000, el)
+    report("nkdl encodeFrom(seq[Service])  (direct, #1)", src.len, 5_000, el)
   echo ""
   echo "  apples-to-apples competitors for typed encode:"
   echo "    facet-kdl  to_string(&doc)                 (see facet-kdl/main.rs)"
@@ -157,7 +157,7 @@ proc main() =
   echo "    ckdl       streaming emitter only — not directly comparable"
 
   # 6. Typed encode on nested Server-with-Action children.
-  echo "\n=== nimkdl typed encode NESTED (25 Server x 4 Action children = 100 inner) ===\n"
+  echo "\n=== nkdl typed encode NESTED (25 Server x 4 Action children = 100 inner) ===\n"
   var servers = newSeq[Server](25)
   for i in 0 ..< 25:
     servers[i] = Server(name: "host-" & $i, port: 1000 + i, actions: @[
@@ -168,12 +168,12 @@ proc main() =
   block:
     let el = timeIt(5_000):
       discard encode(servers, emPretty)
-    report("nimkdl encode(seq[Server], emPretty)", encOut.len, 5_000, el)
+    report("nkdl encode(seq[Server], emPretty)", encOut.len, 5_000, el)
   block:
     let el = timeIt(5_000):
       let r = encodeFrom(servers)
       discard r.get
-    report("nimkdl encodeFrom(seq[Server])  (direct, #1)", encOut.len, 5_000, el)
+    report("nkdl encodeFrom(seq[Server])  (direct, #1)", encOut.len, 5_000, el)
   echo ""
   echo "  No directly comparable harness — facet-kdl's bench is flat-only."
   echo "  This row exists to defend against \"flat-only encode\" critique."

@@ -5,7 +5,7 @@
 ## fixture knus benches against. Acceptance criterion: parseInto[T]
 ## matches or beats knus's 23.2K ops/s.
 import std/[os, times, strformat, monotimes]
-import kdl
+import nkdl
 
 type Service {.kdlNode: "service".} = object
   name {.kdlArg.}: string

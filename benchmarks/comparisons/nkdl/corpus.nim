@@ -12,16 +12,16 @@
 ## is "how long does this parser take to chew through the whole
 ## corpus." Rejection speed is part of real-world throughput.
 ##
-## Usage: nimkdl-corpus <corpus-dir>
+## Usage: nkdl-corpus <corpus-dir>
 ## Output:
-##   nimkdl  corpus  N=<files>  bytes=<KB>  iters=<N>  total=<ms>  MB/s=<X>  ok=<acc>/<all>
+##   nkdl  corpus  N=<files>  bytes=<KB>  iters=<N>  total=<ms>  MB/s=<X>  ok=<acc>/<all>
 
 import std/[algorithm, monotimes, os, strformat, strutils, times]
-import kdl
+import nkdl
 
 proc main() =
   if paramCount() < 1:
-    echo "usage: nimkdl-corpus <corpus-dir>"
+    echo "usage: nkdl-corpus <corpus-dir>"
     quit(2)
   let dir = paramStr(1)
   if not dirExists(dir):
@@ -56,6 +56,6 @@ proc main() =
   let usPerFile = elapsed * 1_000_000.0 / float(totalParses)
   let filesPerSec = float(totalParses) / elapsed
   let kbsPerSec = (float(totalBytes) * float(iters)) / (elapsed * 1024.0)
-  echo &"  nimkdl  corpus  files={files.len}  bytes={totalBytes}  iters={iters}  us/file={usPerFile:.2f}  files/s={filesPerSec/1000:.1f}K  KB/s={kbsPerSec:.0f}  ok={okCount}/{files.len}"
+  echo &"  nkdl    corpus  files={files.len}  bytes={totalBytes}  iters={iters}  us/file={usPerFile:.2f}  files/s={filesPerSec/1000:.1f}K  KB/s={kbsPerSec:.0f}  ok={okCount}/{files.len}"
 
 main()

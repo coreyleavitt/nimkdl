@@ -1,12 +1,12 @@
 ## Test the curated public API surface (M6).
 ##
-## `import kdl` is supposed to give the public surface only — lexer
-## internals (Token / TokenKind / Lexer / lex) live in `kdl/lexer`
-## and are not part of `import kdl`.
+## `import nkdl` is supposed to give the public surface only — lexer
+## internals (Token / TokenKind / Lexer / lex) live in `nkdl/lexer`
+## and are not part of `import nkdl`.
 
 import std/unittest
 
-import ../src/kdl   # the curated `import kdl` umbrella
+import ../src/nkdl   # the curated `import nkdl` umbrella
 
 suite "public API surface (M6)":
   test "AST types are reachable":
@@ -45,8 +45,8 @@ suite "public API surface (M6)":
   test "lexer internals are NOT in the umbrella":
     # The hygiene test: writing `Token`, `TokenKind`, `Lexer`, or
     # calling `lex(...)` directly should NOT compile against the
-    # `import kdl` namespace. Users who need them go through
-    # `import kdl/lexer`.
+    # `import nkdl` namespace. Users who need them go through
+    # `import nkdl/lexer`.
     check not compiles(typeof(Token))
     check not compiles(typeof(TokenKind))
     check not compiles(typeof(Lexer))

@@ -1,9 +1,9 @@
-## Edit-then-encode throughput. Both nimkdl and kdl-rs are explicitly
+## Edit-then-encode throughput. Both nkdl and kdl-rs are explicitly
 ## designed for byte-lossless edit-then-emit workflows (the editor /
 ## formatter / config-rewriter use case). This bench exercises the
 ## full cycle: parse(preserveFormat) → mutate one node → encode().
 ##
-## nimkdl strategy: per-node `parseHash`; on encode, mutated subtrees
+## nkdl strategy: per-node `parseHash`; on encode, mutated subtrees
 ## emit canonical while siblings preserve verbatim source bytes.
 ##
 ## kdl-rs strategy: per-token whitespace storage; on encode, walks the
@@ -14,11 +14,11 @@
 ## workflow on a single file. Same cycle shape on both parsers.
 
 import std/[monotimes, os, strformat, times]
-import kdl
+import nkdl
 
 proc main() =
   if paramCount() < 1:
-    echo "usage: nimkdl-edit <fixture-path>"
+    echo "usage: nkdl-edit <fixture-path>"
     quit(2)
   let path = paramStr(1)
   if not fileExists(path):
@@ -42,6 +42,6 @@ proc main() =
   let us = el / float(iters) * 1_000_000.0
   let ops = float(iters) / el
   let fixture = path.extractFilename
-  echo &"  nimkdl  edit-encode  {fixture:<30} {us:>8.1f}us avg   {ops/1000:>8.1f}K ops/s   {src.len} bytes"
+  echo &"  nkdl    edit-encode  {fixture:<30} {us:>8.1f}us avg   {ops/1000:>8.1f}K ops/s   {src.len} bytes"
 
 main()

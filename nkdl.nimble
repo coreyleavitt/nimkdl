@@ -1,12 +1,6 @@
-# Package metadata for kdl — KDL v2 parser + type-driven codegen for amoxtli.
+# Package metadata for nkdl — KDL v2 parser + type-driven codegen.
 #
-# Lives in-tree (lib/kdl/) rather than a sibling repo because the surface is
-# bounded, amoxtli is the only consumer, and we need tight coevolution of
-# the parser, codegen macros, and diagnostic shape. If we ever extract:
-# `git subtree split --prefix=lib/kdl main` produces a clean standalone repo
-# with full history.
-#
-# See lib/kdl/README.md for spec coverage + design philosophy + the explicit
+# See README.md for spec coverage + design philosophy + the explicit
 # decisions not to implement KSL or KQL.
 
 version       = "0.1.0"

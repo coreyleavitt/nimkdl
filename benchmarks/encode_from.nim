@@ -1,5 +1,5 @@
 import std/[os, times, monotimes]
-import kdl
+import nkdl
 
 type Service {.kdlNode: "service".} = object
   name {.kdlArg.}: string

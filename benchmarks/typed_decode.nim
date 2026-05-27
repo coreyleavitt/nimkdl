@@ -1,7 +1,7 @@
 ## Typed-decode bench. Matches the knus typed path so we have a fair
 ## "parse + decode into a typed Vec<T>" head-to-head.
 import std/[os, times, strformat, monotimes]
-import kdl
+import nkdl
 
 type Service {.kdlNode: "service".} = object
   name {.kdlArg.}: string
@@ -26,6 +26,6 @@ proc main() =
   let us = el / iters.float * 1e6
   let ops = iters.float / el
 
-  echo &"nimkdl typed decode[seq[Service]]: {us:.1f}us avg   {ops/1000:.1f}K ops/s   {src.len} bytes"
+  echo &"nkdl typed decode[seq[Service]]: {us:.1f}us avg   {ops/1000:.1f}K ops/s   {src.len} bytes"
 
 main()

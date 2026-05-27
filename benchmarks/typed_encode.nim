@@ -2,7 +2,7 @@
 ## `to_string(&value)` path. Parses once into a typed seq[Service],
 ## then times encode[seq[Service]](services) in a loop.
 import std/[os, times, strformat, monotimes]
-import kdl
+import nkdl
 
 type Service {.kdlNode: "service".} = object
   name {.kdlArg.}: string
@@ -31,6 +31,6 @@ proc main() =
   let us = el / iters.float * 1e6
   let ops = iters.float / el
 
-  echo &"nimkdl encode(seq[Service], emPretty): {us:.1f}us avg   {ops/1000:.1f}K ops/s   {src.len} bytes in"
+  echo &"nkdl encode(seq[Service], emPretty): {us:.1f}us avg   {ops/1000:.1f}K ops/s   {src.len} bytes in"
 
 main()
