@@ -34,7 +34,33 @@ done
 
 run_nimkdl() {
   echo "================================================================"
-  echo "  nimkdl (this repo)"
+  echo "  nimkdl (this repo) -- comprehensive harness"
+  echo "  parse / typed-decode (legacy + direct) / typed-encode (legacy + direct, flat + nested)"
+  echo "================================================================"
+  # Comprehensive harness: parse + typed decode (both legacy AST and
+  # direct parseInto) + typed encode (both legacy and direct encodeFrom,
+  # flat + nested shapes). All in one container build so the comparison
+  # transcript is contiguous with the Rust/C harnesses below.
+  $CONTAINER_RUNTIME run --rm \
+    -v "$REPO_ROOT:/work:Z" \
+    -v "$STAGE:/fixtures:Z" \
+    -w /work \
+    docker.io/nimlang/nim:2.2.0 \
+    sh -c '
+      set -e
+      nim c --hints:off -d:release -d:nimCallDepthLimit=20000 \
+        -p:/work/src -o:/tmp/nimkdl-bench \
+        benchmarks/comparisons/nimkdl/bench.nim 2>&1 | tail -3
+      /tmp/nimkdl-bench
+    '
+  echo ""
+}
+
+run_nimkdl_legacy() {
+  # The original parse-only bench, kept around for historical
+  # continuity with old comparison tables in BENCHMARK.md.
+  echo "================================================================"
+  echo "  nimkdl (legacy parse-only bench — for historical continuity)"
   echo "================================================================"
   $CONTAINER_RUNTIME run --rm \
     -v "$REPO_ROOT:/work:Z" -w /work \
@@ -136,11 +162,12 @@ fi
 
 for target in "$@"; do
   case "$target" in
-    nimkdl)    run_nimkdl ;;
-    ckdl)      run_ckdl ;;
-    knus)      run_knus ;;
-    facet-kdl) run_facet_kdl ;;
-    kdl-rs)    run_kdl_rs ;;
-    *) echo "unknown target: $target (nimkdl|ckdl|knus|facet-kdl|kdl-rs)" >&2; exit 1 ;;
+    nimkdl)        run_nimkdl ;;
+    nimkdl-legacy) run_nimkdl_legacy ;;
+    ckdl)          run_ckdl ;;
+    knus)          run_knus ;;
+    facet-kdl)     run_facet_kdl ;;
+    kdl-rs)        run_kdl_rs ;;
+    *) echo "unknown target: $target (nimkdl|nimkdl-legacy|ckdl|knus|facet-kdl|kdl-rs)" >&2; exit 1 ;;
   esac
 done

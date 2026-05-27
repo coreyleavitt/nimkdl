@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 540" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 720" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
   <style>
     .axis { fill: #94a3b8; font-size: 12px; }
     .label { fill: #cbd5e1; font-size: 13px; font-weight: 500; }
@@ -14,16 +14,16 @@
     .grid { stroke: #1e293b; stroke-width: 1; }
     .divider { stroke: #1e293b; stroke-width: 1; }
   </style>
-  <rect width="820" height="540" fill="#0b1220"/>
+  <rect width="820" height="720" fill="#0b1220"/>
 
   <text x="40" y="32" class="title">encode throughput (cross-implementation)</text>
-  <text x="40" y="50" class="subtitle">bars normalized within each section since modes differ in scale</text>
+  <text x="40" y="50" class="subtitle">bars normalized within each section since modes differ in scale by orders of magnitude</text>
 
   <line x1="40" y1="78" x2="780" y2="78" class="divider"/>
 
   <!-- Section 1: preserve mode -->
-  <text x="40" y="100" class="section">preserve mode</text>
-  <text x="40" y="116" class="sectiondetail">round-trip with format preservation, AST → string. realistic-config.kdl (5.6KB).</text>
+  <text x="40" y="100" class="section">preserve mode (round-trip with format preservation)</text>
+  <text x="40" y="116" class="sectiondetail">AST -> string. realistic-config.kdl (5.6KB).</text>
 
   <text x="300" y="142" class="label" text-anchor="end">nimkdl emPreserve</text>
   <text x="300" y="155" class="sublabel" text-anchor="end">returns sourceText (memcpy)</text>
@@ -33,15 +33,15 @@
   <text x="300" y="182" class="label" text-anchor="end">kdl-rs to_string</text>
   <text x="300" y="195" class="sublabel" text-anchor="end">walks AST, emits per-token trivia</text>
   <rect x="310" y="170" width="3" height="22" class="bar-rs"/>
-  <text x="320" y="186" class="value">117K ops/s  (~200x slower)</text>
+  <text x="320" y="186" class="value">112K ops/s  (~200x slower)</text>
 
   <text x="40" y="218" class="sectiondetail">different strategies. ours caches the source string and returns it; kdl-rs walks per-token trivia stored on the AST. both lossless, both correct.</text>
 
   <line x1="40" y1="240" x2="780" y2="240" class="divider"/>
 
   <!-- Section 2: canonical AST -> string -->
-  <text x="40" y="262" class="section">canonical mode</text>
-  <text x="40" y="278" class="sectiondetail">regenerate from AST, no preservation. realistic-config.kdl (5.6KB).</text>
+  <text x="40" y="262" class="section">canonical mode (AST -> string, no preservation)</text>
+  <text x="40" y="278" class="sectiondetail">realistic-config.kdl (5.6KB).</text>
 
   <text x="300" y="304" class="label" text-anchor="end">nimkdl emPretty</text>
   <text x="300" y="317" class="sublabel" text-anchor="end">multi-line, indented</text>
@@ -50,22 +50,49 @@
 
   <text x="300" y="344" class="label" text-anchor="end">kdl-rs autoformat + to_string</text>
   <text x="300" y="357" class="sublabel" text-anchor="end">canonicalize, then emit</text>
-  <rect x="310" y="332" width="139" height="22" class="bar-rs"/>
-  <text x="457" y="348" class="value">17.6K ops/s  (3.2x slower)</text>
+  <rect x="310" y="332" width="142" height="22" class="bar-rs"/>
+  <text x="460" y="348" class="value">17.9K ops/s  (3.2x slower)</text>
 
   <line x1="40" y1="380" x2="780" y2="380" class="divider"/>
 
-  <!-- Section 3: typed value -> string -->
-  <text x="40" y="402" class="section">typed value → string</text>
-  <text x="40" y="418" class="sectiondetail">serialize a typed structure back to KDL. homogeneous-services-100.kdl (~5KB, 100 Service nodes).</text>
+  <!-- Section 3: typed value -> string (FLAT) -->
+  <text x="40" y="402" class="section">typed value -> string  (FLAT: 100 Service nodes)</text>
+  <text x="40" y="418" class="sectiondetail">serialize a typed structure back to KDL. homogeneous-services-100.kdl. same Service schema across all derive-based harnesses.</text>
 
-  <text x="300" y="444" class="label" text-anchor="end">facet-kdl to_string</text>
-  <text x="300" y="457" class="sublabel" text-anchor="end">direct from typed value</text>
-  <rect x="310" y="432" width="450" height="22" class="bar-facet"/>
-  <text x="765" y="448" class="value">27.5K ops/s</text>
+  <!-- bar widths scaled so 140K = 450px. 1K = 3.214px -->
+  <text x="300" y="444" class="label" text-anchor="end">nimkdl encodeFrom (direct, #1)</text>
+  <text x="300" y="457" class="sublabel" text-anchor="end">typed value -> string, no intermediate</text>
+  <rect x="310" y="432" width="436" height="22" class="bar-ours"/>
+  <text x="751" y="448" class="value">135.7K ops/s</text>
 
-  <text x="300" y="484" class="label" text-anchor="end">nimkdl encode(seq[Service])</text>
-  <text x="300" y="497" class="sublabel" text-anchor="end">via KdlDoc intermediate (issue #1)</text>
-  <rect x="310" y="472" width="293" height="22" class="bar-ours"/>
-  <text x="610" y="488" class="value">17.9K ops/s  (1.5x slower)</text>
+  <text x="300" y="484" class="label" text-anchor="end">facet-kdl to_string</text>
+  <text x="300" y="497" class="sublabel" text-anchor="end">direct from typed value</text>
+  <rect x="310" y="472" width="91" height="22" class="bar-facet"/>
+  <text x="409" y="488" class="value">28.4K ops/s  (4.8x slower)</text>
+
+  <text x="300" y="524" class="label" text-anchor="end">nimkdl encode (legacy)</text>
+  <text x="300" y="537" class="sublabel" text-anchor="end">via KdlDoc intermediate</text>
+  <rect x="310" y="512" width="66" height="22" class="bar-ours" opacity="0.55"/>
+  <text x="385" y="528" class="value">20.5K ops/s  (6.6x slower)</text>
+
+  <text x="300" y="564" class="label" text-anchor="end">knus / kdl-rs / ckdl</text>
+  <text x="300" y="577" class="sublabel" text-anchor="end">no typed-encode path exposed</text>
+  <text x="320" y="568" class="value">n/a — see README "what is NOT compared"</text>
+
+  <line x1="40" y1="600" x2="780" y2="600" class="divider"/>
+
+  <!-- Section 4: typed value -> string (NESTED) -->
+  <text x="40" y="622" class="section">typed value -> string  (NESTED: 25 Server x 4 Action children = 100 inner)</text>
+  <text x="40" y="638" class="sectiondetail">same total work as flat but exercises indent + recursion. no competitor harness times this shape.</text>
+
+  <!-- 325K -> 450 px; 1K = 1.384px -->
+  <text x="300" y="664" class="label" text-anchor="end">nimkdl encodeFrom (direct)</text>
+  <text x="300" y="677" class="sublabel" text-anchor="end">nested shape, denser output</text>
+  <rect x="310" y="652" width="450" height="22" class="bar-ours"/>
+  <text x="765" y="668" class="value">325.5K ops/s</text>
+
+  <text x="300" y="704" class="label" text-anchor="end">nimkdl encode (legacy)</text>
+  <text x="300" y="717" class="sublabel" text-anchor="end">via KdlDoc intermediate</text>
+  <rect x="310" y="692" width="48" height="22" class="bar-ours" opacity="0.55"/>
+  <text x="367" y="708" class="value">34.8K ops/s  (9.4x slower)</text>
 </svg>

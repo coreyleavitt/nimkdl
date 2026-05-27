@@ -12,14 +12,13 @@
     .bar-knus  { fill: #a78bfa; }
     .bar-rs    { fill: #64748b; }
     .grid { stroke: #1e293b; stroke-width: 1; }
-    .leader { stroke: #f1f5f9; stroke-width: 1; stroke-dasharray: 2 2; }
     .legend { font-size: 12px; }
   </style>
   <rect width="880" height="760" fill="#0b1220"/>
 
   <text x="40" y="32" class="title">parse throughput, all fixtures, all parsers</text>
-  <text x="40" y="50" class="subtitle">bars normalized to the row leader (whichever parser wins that row)</text>
-  <text x="40" y="68" class="note">apples-to-ish-apples: ckdl drains events (no AST), the others build their library's default representation. see BENCHMARK.md.</text>
+  <text x="40" y="50" class="subtitle">bars normalized to the row leader. Source: benchmarks/comparisons/last-run.txt</text>
+  <text x="40" y="68" class="note">apples-to-ish-apples: ckdl drains events (no AST); the others build their library's default representation. see BENCHMARK.md.</text>
 
   <rect x="430" y="20" width="14" height="14" class="bar-ours"/>
   <text x="448" y="32" class="legend" fill="#cbd5e1">nimkdl</text>
@@ -44,102 +43,111 @@
   <text x="810" y="722" class="axis" text-anchor="middle">100%</text>
   <text x="550" y="742" class="axis" text-anchor="middle">throughput vs row leader</text>
 
+  <!-- realistic-config: leader nimkdl 23.9K. ckdl/nimkdl=0.644, knus=0.109, kdl-rs=0.050 -->
   <text x="280" y="118" class="label" text-anchor="end">realistic-config.kdl</text>
   <text x="280" y="131" class="sublabel" text-anchor="end">5.6KB, language-dense</text>
   <rect x="290" y="106" width="520" height="9" class="bar-ours"/>
-  <rect x="290" y="118" width="366" height="9" class="bar-ckdl"/>
-  <rect x="290" y="130" width="62"  height="9" class="bar-knus"/>
-  <rect x="290" y="142" width="29"  height="9" class="bar-rs"/>
-  <text x="815" y="115" class="value" font-size="10">21.9K</text>
+  <rect x="290" y="118" width="335" height="9" class="bar-ckdl"/>
+  <rect x="290" y="130" width="57"  height="9" class="bar-knus"/>
+  <rect x="290" y="142" width="26"  height="9" class="bar-rs"/>
+  <text x="815" y="115" class="value" font-size="10">23.9K</text>
   <text x="815" y="127" class="value" font-size="10">15.4K</text>
   <text x="815" y="139" class="value" font-size="10">2.6K</text>
   <text x="815" y="151" class="value" font-size="10">1.2K</text>
 
+  <!-- Cargo.kdl: leader nimkdl 297.8K. ckdl=0.745, knus=0.050, kdl-rs=0.079 -->
   <text x="280" y="180" class="label" text-anchor="end">Cargo.kdl</text>
   <text x="280" y="193" class="sublabel" text-anchor="end">238B, strings only</text>
   <rect x="290" y="168" width="520" height="9" class="bar-ours"/>
-  <rect x="290" y="180" width="436" height="9" class="bar-ckdl"/>
-  <rect x="290" y="192" width="28"  height="9" class="bar-knus"/>
-  <rect x="290" y="204" width="46"  height="9" class="bar-rs"/>
-  <text x="815" y="177" class="value" font-size="10">271K</text>
-  <text x="815" y="189" class="value" font-size="10">228K</text>
-  <text x="815" y="201" class="value" font-size="10">15K</text>
-  <text x="815" y="213" class="value" font-size="10">24K</text>
+  <rect x="290" y="180" width="388" height="9" class="bar-ckdl"/>
+  <rect x="290" y="192" width="26"  height="9" class="bar-knus"/>
+  <rect x="290" y="204" width="41"  height="9" class="bar-rs"/>
+  <text x="815" y="177" class="value" font-size="10">297.8K</text>
+  <text x="815" y="189" class="value" font-size="10">222.1K</text>
+  <text x="815" y="201" class="value" font-size="10">14.9K</text>
+  <text x="815" y="213" class="value" font-size="10">23.6K</text>
 
+  <!-- ci.kdl: leader nimkdl 85.8K. ckdl=0.612, knus=0.035, kdl-rs=0.058 -->
   <text x="280" y="242" class="label" text-anchor="end">ci.kdl</text>
   <text x="280" y="255" class="sublabel" text-anchor="end">1KB, mixed</text>
   <rect x="290" y="230" width="520" height="9" class="bar-ours"/>
-  <rect x="290" y="242" width="340" height="9" class="bar-ckdl"/>
-  <rect x="290" y="254" width="19"  height="9" class="bar-knus"/>
-  <rect x="290" y="266" width="32"  height="9" class="bar-rs"/>
-  <text x="815" y="239" class="value" font-size="10">80.4K</text>
-  <text x="815" y="251" class="value" font-size="10">52.6K</text>
+  <rect x="290" y="242" width="318" height="9" class="bar-ckdl"/>
+  <rect x="290" y="254" width="18"  height="9" class="bar-knus"/>
+  <rect x="290" y="266" width="30"  height="9" class="bar-rs"/>
+  <text x="815" y="239" class="value" font-size="10">85.8K</text>
+  <text x="815" y="251" class="value" font-size="10">52.5K</text>
   <text x="815" y="263" class="value" font-size="10">3.0K</text>
-  <text x="815" y="275" class="value" font-size="10">4.9K</text>
+  <text x="815" y="275" class="value" font-size="10">5.0K</text>
 
+  <!-- website.kdl: leader nimkdl 65.3K. ckdl=0.559, knus=0.044, kdl-rs=0.055 -->
   <text x="280" y="304" class="label" text-anchor="end">website.kdl</text>
   <text x="280" y="317" class="sublabel" text-anchor="end">2KB, HTML-ish</text>
   <rect x="290" y="292" width="520" height="9" class="bar-ours"/>
-  <rect x="290" y="304" width="362" height="9" class="bar-ckdl"/>
-  <rect x="290" y="316" width="28"  height="9" class="bar-knus"/>
-  <rect x="290" y="328" width="34"  height="9" class="bar-rs"/>
-  <text x="815" y="301" class="value" font-size="10">54.9K</text>
-  <text x="815" y="313" class="value" font-size="10">38.2K</text>
+  <rect x="290" y="304" width="290" height="9" class="bar-ckdl"/>
+  <rect x="290" y="316" width="23"  height="9" class="bar-knus"/>
+  <rect x="290" y="328" width="29"  height="9" class="bar-rs"/>
+  <text x="815" y="301" class="value" font-size="10">65.3K</text>
+  <text x="815" y="313" class="value" font-size="10">36.5K</text>
   <text x="815" y="325" class="value" font-size="10">2.9K</text>
   <text x="815" y="337" class="value" font-size="10">3.6K</text>
 
+  <!-- flat-deps-100: leader nimkdl 15.7K. ckdl=0.879, knus=0.051, kdl-rs=0.076 -->
   <text x="280" y="366" class="label" text-anchor="end">flat-deps-100.kdl</text>
   <text x="280" y="379" class="sublabel" text-anchor="end">4KB, ~100 flat nodes</text>
   <rect x="290" y="354" width="520" height="9" class="bar-ours"/>
-  <rect x="290" y="366" width="492" height="9" class="bar-ckdl"/>
-  <rect x="290" y="378" width="24"  height="9" class="bar-knus"/>
-  <rect x="290" y="390" width="42"  height="9" class="bar-rs"/>
-  <text x="815" y="363" class="value" font-size="10">14.9K</text>
-  <text x="815" y="375" class="value" font-size="10">14.1K</text>
-  <text x="815" y="387" class="value" font-size="10">0.7K</text>
+  <rect x="290" y="366" width="457" height="9" class="bar-ckdl"/>
+  <rect x="290" y="378" width="26"  height="9" class="bar-knus"/>
+  <rect x="290" y="390" width="40"  height="9" class="bar-rs"/>
+  <text x="815" y="363" class="value" font-size="10">15.7K</text>
+  <text x="815" y="375" class="value" font-size="10">13.8K</text>
+  <text x="815" y="387" class="value" font-size="10">0.8K</text>
   <text x="815" y="399" class="value" font-size="10">1.2K</text>
 
+  <!-- tree-d8-b3: leader nimkdl 116. ckdl=0.905, knus=0.035, kdl-rs=0.072 -->
   <text x="280" y="428" class="label" text-anchor="end">tree-d8-b3.kdl</text>
   <text x="280" y="441" class="sublabel" text-anchor="end">794KB, ~9.8k nested nodes</text>
   <rect x="290" y="416" width="520" height="9" class="bar-ours"/>
-  <rect x="290" y="428" width="510" height="9" class="bar-ckdl"/>
-  <rect x="290" y="440" width="20"  height="9" class="bar-knus"/>
-  <rect x="290" y="452" width="40"  height="9" class="bar-rs"/>
-  <text x="815" y="425" class="value" font-size="10">104</text>
-  <text x="815" y="437" class="value" font-size="10">102</text>
+  <rect x="290" y="428" width="471" height="9" class="bar-ckdl"/>
+  <rect x="290" y="440" width="18"  height="9" class="bar-knus"/>
+  <rect x="290" y="452" width="37"  height="9" class="bar-rs"/>
+  <text x="815" y="425" class="value" font-size="10">116</text>
+  <text x="815" y="437" class="value" font-size="10">105</text>
   <text x="815" y="449" class="value" font-size="10">4</text>
   <text x="815" y="461" class="value" font-size="10">8</text>
 
+  <!-- deep-chain-100: leader ckdl 22.5K. nimkdl=0.862, knus=0.029, kdl-rs=0.056 -->
   <text x="280" y="490" class="label" text-anchor="end">deep-chain-100.kdl</text>
   <text x="280" y="503" class="sublabel" text-anchor="end">2.7KB, depth-100 linear</text>
-  <rect x="290" y="478" width="405" height="9" class="bar-ours"/>
+  <rect x="290" y="478" width="448" height="9" class="bar-ours"/>
   <rect x="290" y="490" width="520" height="9" class="bar-ckdl"/>
   <rect x="290" y="502" width="15"  height="9" class="bar-knus"/>
-  <rect x="290" y="514" width="30"  height="9" class="bar-rs"/>
-  <text x="815" y="487" class="value" font-size="10">16.2K</text>
-  <text x="815" y="499" class="value" font-size="10" fill="#f59e0b" font-weight="600">20.8K</text>
+  <rect x="290" y="514" width="29"  height="9" class="bar-rs"/>
+  <text x="815" y="487" class="value" font-size="10">19.4K</text>
+  <text x="815" y="499" class="value" font-size="10" fill="#f59e0b" font-weight="600">22.5K</text>
   <text x="815" y="511" class="value" font-size="10">0.6K</text>
-  <text x="815" y="523" class="value" font-size="10">1.2K</text>
+  <text x="815" y="523" class="value" font-size="10">1.3K</text>
 
+  <!-- unicode-heavy: leader nimkdl 64.0K. ckdl=0.933, knus=0.048, kdl-rs=0.088 -->
   <text x="280" y="568" class="label" text-anchor="end">unicode-heavy.kdl</text>
   <text x="280" y="581" class="sublabel" text-anchor="end">1.2KB, multi-script idents</text>
   <rect x="290" y="556" width="520" height="9" class="bar-ours"/>
-  <rect x="290" y="568" width="500" height="9" class="bar-ckdl"/>
-  <rect x="290" y="580" width="27"  height="9" class="bar-knus"/>
-  <rect x="290" y="592" width="45"  height="9" class="bar-rs"/>
-  <text x="815" y="565" class="value" font-size="10">60.9K</text>
-  <text x="815" y="577" class="value" font-size="10">58.5K</text>
+  <rect x="290" y="568" width="485" height="9" class="bar-ckdl"/>
+  <rect x="290" y="580" width="25"  height="9" class="bar-knus"/>
+  <rect x="290" y="592" width="46"  height="9" class="bar-rs"/>
+  <text x="815" y="565" class="value" font-size="10">64.0K</text>
+  <text x="815" y="577" class="value" font-size="10">59.7K</text>
   <text x="815" y="589" class="value" font-size="10">3.1K</text>
-  <text x="815" y="601" class="value" font-size="10">5.3K</text>
+  <text x="815" y="601" class="value" font-size="10">5.6K</text>
 
+  <!-- homogeneous-services: nimkdl parseInto wins at 22.9K. Show that as the comparable bar. -->
   <text x="280" y="630" class="label" text-anchor="end">homogeneous-services-100.kdl</text>
-  <text x="280" y="643" class="sublabel" text-anchor="end">5KB, typed-decode workload</text>
-  <rect x="290" y="618" width="252" height="9" class="bar-ours"/>
-  <rect x="290" y="630" width="219" height="9" class="bar-ckdl"/>
-  <rect x="290" y="642" width="520" height="9" class="bar-knus"/>
+  <text x="280" y="643" class="sublabel" text-anchor="end">5KB, typed-decode workload (see typed-decode chart for full breakdown)</text>
+  <rect x="290" y="618" width="520" height="9" class="bar-ours"/>
+  <rect x="290" y="630" width="220" height="9" class="bar-ckdl"/>
+  <rect x="290" y="642" width="502" height="9" class="bar-knus"/>
   <rect x="290" y="654" width="23"  height="9" class="bar-rs"/>
-  <text x="815" y="627" class="value" font-size="10">10.9K decode</text>
-  <text x="815" y="639" class="value" font-size="10">9.5K parse</text>
-  <text x="815" y="651" class="value" font-size="10" fill="#a78bfa" font-weight="600">22.5K typed</text>
+  <text x="815" y="627" class="value" font-size="10">22.9K parseInto</text>
+  <text x="815" y="639" class="value" font-size="10">9.7K parse</text>
+  <text x="815" y="651" class="value" font-size="10">22.1K typed</text>
   <text x="815" y="663" class="value" font-size="10">1.0K parse</text>
 </svg>

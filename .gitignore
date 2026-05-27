@@ -28,3 +28,6 @@ benchmarks/comparisons/facet-kdl/target/
 benchmarks/comparisons/facet-kdl/Cargo.lock
 benchmarks/comparisons/facet-kdl/src/
 benchmarks/encode_from
+
+# Comparison run transcript
+benchmarks/comparisons/last-run.txt

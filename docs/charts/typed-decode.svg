@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 360" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif">
   <style>
     .axis { fill: #94a3b8; font-size: 13px; }
     .label { fill: #cbd5e1; font-size: 14px; font-weight: 500; }
@@ -12,46 +12,60 @@
     .bar-rs    { fill: #64748b; }
     .grid { stroke: #1e293b; stroke-width: 1; }
   </style>
-  <rect width="760" height="360" fill="#0b1220"/>
+  <rect width="760" height="420" fill="#0b1220"/>
 
   <text x="40" y="32" class="title">typed decode (parse + populate typed structures)</text>
-  <text x="40" y="50" class="subtitle">homogeneous-services-100.kdl (~5KB, 100 Service nodes)</text>
+  <text x="40" y="50" class="subtitle">homogeneous-services-100.kdl (5.2KB, 100 Service nodes) — same schema across all derive-based harnesses</text>
 
-  <line x1="180" y1="80"  x2="180" y2="320" class="grid"/>
-  <line x1="300" y1="80"  x2="300" y2="320" class="grid"/>
-  <line x1="420" y1="80"  x2="420" y2="320" class="grid"/>
-  <line x1="540" y1="80"  x2="540" y2="320" class="grid"/>
-  <line x1="660" y1="80"  x2="660" y2="320" class="grid"/>
-  <line x1="180" y1="320" x2="700" y2="320" class="grid"/>
+  <!-- bars: y=80,130,180,230,280,330; each 32 tall. grid ends at y=380. axis labels at y=400. -->
+  <line x1="180" y1="74"  x2="180" y2="380" class="grid"/>
+  <line x1="280" y1="74"  x2="280" y2="380" class="grid"/>
+  <line x1="380" y1="74"  x2="380" y2="380" class="grid"/>
+  <line x1="480" y1="74"  x2="480" y2="380" class="grid"/>
+  <line x1="580" y1="74"  x2="580" y2="380" class="grid"/>
+  <line x1="680" y1="74"  x2="680" y2="380" class="grid"/>
+  <line x1="180" y1="380" x2="700" y2="380" class="grid"/>
 
-  <text x="180" y="342" class="axis" text-anchor="middle">0</text>
-  <text x="300" y="342" class="axis" text-anchor="middle">5K</text>
-  <text x="420" y="342" class="axis" text-anchor="middle">10K</text>
-  <text x="540" y="342" class="axis" text-anchor="middle">15K</text>
-  <text x="660" y="342" class="axis" text-anchor="middle">20K</text>
+  <text x="180" y="402" class="axis" text-anchor="middle">0</text>
+  <text x="280" y="402" class="axis" text-anchor="middle">5K</text>
+  <text x="380" y="402" class="axis" text-anchor="middle">10K</text>
+  <text x="480" y="402" class="axis" text-anchor="middle">15K</text>
+  <text x="580" y="402" class="axis" text-anchor="middle">20K</text>
+  <text x="680" y="402" class="axis" text-anchor="middle">25K ops/s</text>
 
-  <text x="170" y="103" class="label" text-anchor="end">knus</text>
-  <text x="170" y="119" class="sublabel" text-anchor="end">parse::&lt;Vec&lt;Service&gt;&gt;</text>
-  <rect x="180" y="86"  width="557" height="32" class="bar-knus"/>
-  <text x="745" y="108" class="value" text-anchor="end">23,200</text>
+  <!-- nimkdl parseInto: 22.9K -> width 458 -->
+  <text x="170" y="97" class="label" text-anchor="end">nimkdl</text>
+  <text x="170" y="113" class="sublabel" text-anchor="end">parseInto[seq[Service]] (direct, #1)</text>
+  <rect x="180" y="80"  width="458" height="32" class="bar-ours"/>
+  <text x="648" y="102" class="value">22,900</text>
 
-  <text x="170" y="153" class="label" text-anchor="end">nimkdl</text>
-  <text x="170" y="169" class="sublabel" text-anchor="end">decode[seq[Service]]</text>
-  <rect x="180" y="136" width="262" height="32" class="bar-ours"/>
-  <text x="450" y="158" class="value">10,900</text>
+  <!-- knus typed: 22.1K -> 442 -->
+  <text x="170" y="147" class="label" text-anchor="end">knus</text>
+  <text x="170" y="163" class="sublabel" text-anchor="end">parse::&lt;Vec&lt;Service&gt;&gt;</text>
+  <rect x="180" y="130" width="442" height="32" class="bar-knus"/>
+  <text x="632" y="152" class="value">22,100</text>
 
-  <text x="170" y="203" class="label" text-anchor="end">knus parse_ast</text>
-  <text x="170" y="219" class="sublabel" text-anchor="end">Rust, untyped baseline</text>
-  <rect x="180" y="186" width="65" height="32" class="bar-knus" opacity="0.5"/>
-  <text x="253" y="208" class="value">2,700</text>
+  <!-- nimkdl decode legacy: 10.9K -> 218 -->
+  <text x="170" y="197" class="label" text-anchor="end">nimkdl (legacy)</text>
+  <text x="170" y="213" class="sublabel" text-anchor="end">decode[seq[Service]] (AST + walk)</text>
+  <rect x="180" y="180" width="218" height="32" class="bar-ours" opacity="0.55"/>
+  <text x="408" y="202" class="value">10,900</text>
 
-  <text x="170" y="253" class="label" text-anchor="end">facet-kdl</text>
-  <text x="170" y="269" class="sublabel" text-anchor="end">from_str&lt;ServiceDoc&gt;</text>
-  <rect x="180" y="236" width="24" height="32" class="bar-facet"/>
-  <text x="212" y="258" class="value">1,000</text>
+  <!-- knus parse_ast: 2.6K -> 52 -->
+  <text x="170" y="247" class="label" text-anchor="end">knus parse_ast</text>
+  <text x="170" y="263" class="sublabel" text-anchor="end">untyped AST baseline</text>
+  <rect x="180" y="230" width="52" height="32" class="bar-knus" opacity="0.5"/>
+  <text x="240" y="252" class="value">2,600</text>
 
-  <text x="170" y="303" class="label" text-anchor="end">kdl-rs</text>
-  <text x="170" y="319" class="sublabel" text-anchor="end">parse_v2 (no typed path)</text>
-  <rect x="180" y="286" width="24" height="32" class="bar-rs"/>
-  <text x="212" y="308" class="value">1,000</text>
+  <!-- kdl-rs: 1.0K -> 20 (no typed path) -->
+  <text x="170" y="297" class="label" text-anchor="end">kdl-rs</text>
+  <text x="170" y="313" class="sublabel" text-anchor="end">parse_v2 — n/a, no typed path</text>
+  <rect x="180" y="280" width="20" height="32" class="bar-rs"/>
+  <text x="208" y="302" class="value">1,000</text>
+
+  <!-- facet-kdl: 0.9K -> 18 -->
+  <text x="170" y="347" class="label" text-anchor="end">facet-kdl</text>
+  <text x="170" y="363" class="sublabel" text-anchor="end">from_str&lt;ServiceDoc&gt;</text>
+  <rect x="180" y="330" width="18" height="32" class="bar-facet"/>
+  <text x="206" y="352" class="value">900</text>
 </svg>

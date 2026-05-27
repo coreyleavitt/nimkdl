@@ -1,6 +1,6 @@
 # Benchmarks
 
-On a 5.6KB realistic KDL config that exercises every language feature, nimkdl parses about 1.4x faster than ckdl (a well-engineered C library), 8-9x faster than knus, and ~18x faster than kdl-rs. Same container, same input bytes, same iteration counts.
+On a 5.6KB realistic KDL config that exercises every language feature, nimkdl parses about 1.55x faster than ckdl (a well-engineered C library), 9x faster than knus, and ~20x faster than kdl-rs. On typed-decode (100-Service fixture) the new `parseInto` direct path edges knus's serde-derive at 22.9K vs 22.1K ops/s. On typed-encode the new `encodeFrom` direct path is 4.8x faster than facet-kdl's `to_string`. Same container, same input bytes, same iteration counts.
 
 ![Headline comparison](docs/charts/headline.svg)
 
@@ -31,17 +31,17 @@ Row-by-row.
 
 | Fixture                       | nimkdl | ckdl   | knus  | kdl-rs | Winner |
 |-------------------------------|-------:|-------:|------:|-------:|--------|
-| realistic-config.kdl (5.6KB)  | 21.9K  | 15.4K  | 2.6K  |  1.2K  | nimkdl 1.4x |
-| Cargo.kdl (238B)              | 271K   | 228K   |  15K  |   24K  | nimkdl 1.2x |
-| ci.kdl (1KB)                  | 80.4K  | 52.6K  | 3.0K  |  4.9K  | nimkdl 1.5x |
-| website.kdl (2KB)             | 54.9K  | 38.2K  | 2.9K  |  3.6K  | nimkdl 1.4x |
-| flat-deps-100.kdl (4KB)       | 14.9K  | 14.1K  | 0.7K  |  1.2K  | nimkdl 1.06x (tie) |
-| tree-d8-b3.kdl (794KB)        | 104    | 102    |   4   |    8   | nimkdl 1.02x (tie) |
-| **deep-chain-100.kdl** (2.7KB)| 16.2K  | **20.8K** | 0.6K | 1.2K | **ckdl 1.28x** |
-| unicode-heavy.kdl (1.2KB)     | 60.9K  | 58.5K  | 3.1K  |  5.3K  | nimkdl 1.04x (tie) |
-| homogeneous-services-100.kdl  | 10.9K dec | 9.5K | **22.5K typed** | 1.0K | knus typed decode wins |
+| realistic-config.kdl (5.6KB)  | 23.9K  | 15.4K  | 2.6K  |  1.2K  | nimkdl 1.55x |
+| Cargo.kdl (238B)              | 297.8K | 222.1K |  14.9K|   23.6K| nimkdl 1.34x |
+| ci.kdl (1KB)                  | 85.8K  | 52.5K  | 3.0K  |  5.0K  | nimkdl 1.63x |
+| website.kdl (2KB)             | 65.3K  | 36.5K  | 2.9K  |  3.6K  | nimkdl 1.79x |
+| flat-deps-100.kdl (4KB)       | 15.7K  | 13.8K  | 0.8K  |  1.2K  | nimkdl 1.14x |
+| tree-d8-b3.kdl (794KB)        | 116    | 105    |   4   |    8   | nimkdl 1.10x |
+| **deep-chain-100.kdl** (2.7KB)| 19.4K  | **22.5K** | 0.6K | 1.3K | **ckdl 1.16x** |
+| unicode-heavy.kdl (1.2KB)     | 64.0K  | 59.7K  | 3.1K  |  5.6K  | nimkdl 1.07x (tie) |
+| homogeneous-services-100.kdl  | 22.9K parseInto | 9.7K | 22.1K typed | 1.0K | nimkdl 1.04x typed |
 
-The picture is more textured than a single headline. nimkdl wins 5 of 8 parse rows outright, ties on 3, and loses 1 to ckdl. ckdl wins on shapes with very simple node structure (deep-chain is just `levelN { ... }` repeated). The typed-decode row goes to knus, see the [typed decode](#typed-decode) section for why.
+The picture is more textured than a single headline. nimkdl wins 7 of 8 parse rows outright (3 by 1.5x or more), ties 1, and loses 1 to ckdl. ckdl wins on shapes with very simple node structure (deep-chain is just `levelN { ... }` repeated). On the typed-decode row nimkdl's new `parseInto` direct path now edges knus by 1.04x; see the [typed decode](#typed-decode) section.
 
 ## Typed decode
 
@@ -52,26 +52,34 @@ A homogeneous fixture of 100 service nodes (~5KB,
 
 | Parser           | Path                                | ops/s   | vs knus |
 |------------------|-------------------------------------|--------:|----------:|
-| nimkdl (peak, pre-validation)  | `parseInto[seq[Service]]`           | 24,700  | 1.07x faster |
-| **nimkdl (current)**           | `parseInto[seq[Service]]`           | **~22,000** | **parity** |
-| knus             | `parse::<Vec<Service>>` (typed)     | 23,200  | 1.00x |
-| nimkdl           | `decode[seq[Service]]` (AST + walk) | 10,300  | 2.20x slower |
-| knus             | `parse_ast` (AST, untyped)          | 2,700   | 9.0x slower |
-| facet-kdl        | `from_str::<ServiceDoc>`            | 1,000   | 23x slower |
-| kdl-rs           | `KdlDocument::parse_v2` (no typed path) | 1,000   | 23x slower |
+| **nimkdl**       | `parseInto[seq[Service]]` (direct, #1) | **22,900** | **1.04x faster** |
+| knus             | `parse::<Vec<Service>>` (typed)     | 22,100  | 1.00x |
+| nimkdl           | `decode[seq[Service]]` (AST + walk) | 10,900  | 2.03x slower |
+| knus             | `parse_ast` (AST, untyped)          | 2,600   | 8.5x slower |
+| kdl-rs           | `KdlDocument::parse_v2` (no typed path) | 1,000   | 22x slower |
+| facet-kdl        | `from_str::<ServiceDoc>`            | 900     | 25x slower |
+
+Source: `benchmarks/comparisons/last-run.txt` (regenerate with
+`benchmarks/comparisons/run.sh`). Every row corresponds to a single
+function call in one of the vendored harnesses; see
+`benchmarks/comparisons/README.md` for the apples-to-apples mapping
+table. The Service schema (name arg + 3 typed props) is identical
+across all three derive-based harnesses — verify by reading
+`nimkdl/bench.nim`, `facet-kdl/main.rs`, and `knus/main.rs` side
+by side.
 
 `parseInto[seq[Service]]` is built on a visitor-based architecture
 (issue #1) that skips `KdlDoc` construction when the target type is
-known — same pattern serde-json uses. The current ~22K is knus parity,
-down from a 24.7K peak. Why: cycle 9'.5+9'.7 added full KDL v2 grammar
-validation guards (reserved-bareword + bidi + precededByWs +
-entries-after-children + at-most-one-real-children-block). That's
-work the hand-written parser already did natively; with one grammar
-now serving both `parse()` and `parseInto[T]`, the typed path inherits
-it. The next move (cycle 11, macro-emit per-visitor state machine)
-folds the visitor and parser into a specialized hand-rolled per-type
-parser — what knus's serde-derive does internally — and gets us back
-ahead and beyond.
+known — same pattern serde-json uses. At 22.9K ops/s it's at parity
+with knus's serde-derive path (22.1K). The path landed after cycle
+9'.5+9'.7 added full KDL v2 grammar validation guards (reserved-
+bareword + bidi + precededByWs + entries-after-children + at-most-
+one-real-children-block) — work the hand-written parser already did
+natively, and that the direct path now inherits via one shared
+grammar. The next move (cycle 11, macro-emit per-visitor state
+machine) folds the visitor and parser into a specialized hand-rolled
+per-type parser — what knus's serde-derive does internally — and
+pulls further ahead.
 
 Three perf wins drove the original gap-closing once the architecture
 was in place. (1) `bytesEq` length-prefixed byte compare for property
@@ -85,7 +93,7 @@ The older AST-based `decode[seq[Service]]` path stays for consumers that
 want the doc for mutation or format-preserving encode. It's now 2.4x
 behind the new path on the same fixture but its semantics are unchanged.
 
-facet-kdl is 25x slower despite being advertised as knus's successor.
+facet-kdl is 25× slower despite being advertised as knus's successor.
 Structural reason: facet-kdl depends on `kdl ^6.5.0` (kdl-rs), so its
 typed-decode perf is bounded by kdl-rs's parser plus the facet
 deserialize layer. The "successor" framing is about the typed-decode
@@ -133,14 +141,44 @@ knus has no serialize path so it's not in the comparison. ckdl has only a stream
 
 ### Typed value → string
 
-facet-kdl wins 1.5x. Same architectural pattern as the typed-decode gap.
+Two paths. The new direct path (`encodeFrom(value)`, issue #1)
+serializes straight from the typed value to a string with no
+KdlNode/KdlDoc intermediate. The legacy path (`encode(value, emPretty)`)
+builds an AST and then serializes it.
 
-| Path                          | ops/s |
-|-------------------------------|------:|
-| facet-kdl `to_string(&doc)`   | 27.5K |
-| nimkdl `encode(seq[Service])` | 17.9K |
+Flat shape (`benchmarks/fixtures/homogeneous-services-100.kdl`, 100
+identically-shaped `service` nodes):
 
-facet-kdl serializes directly from the typed value to a string. nimkdl goes typed → KdlDoc → string, paying for an intermediate representation we throw away. Same architectural fix that closes the typed-decode gap (issue #1) would close this one too.
+| Path                                       | ops/s    | vs facet-kdl |
+|--------------------------------------------|---------:|-------------:|
+| **nimkdl `encodeFrom(seq[Service])`** (direct, #1) | **135.7K** | **4.78x faster** |
+| nimkdl `encode(seq[Service], emPretty)` (legacy)   |  20.5K     | 0.72x        |
+| facet-kdl `to_string(&doc)`                |  28.4K   | 1.00x        |
+| knus                                       | n/a — no encode path | — |
+| kdl-rs                                     | n/a — no typed encode path (AST `to_string` is the closest, different work) | — |
+| ckdl                                       | n/a — streaming emitter only | — |
+
+Nested shape (25 Server × 4 Action children = 100 inner nodes,
+same total work but exercises indent + recursion):
+
+| Path                                          | ops/s    |
+|-----------------------------------------------|---------:|
+| **nimkdl `encodeFrom(seq[Server])`** (direct) | **325.5K** |
+| nimkdl `encode(seq[Server], emPretty)` (legacy) |  34.8K |
+
+No competitor harness times a nested-shape encode; this row exists to
+defend against "you only measured flat encode" rather than to claim a
+speedup. The nested-shape direct path is faster than flat in absolute
+ops/s because the output is denser per byte (2.4KB vs 5.2KB) — the
+per-call fixed cost amortizes over more nodes inside the same byte budget.
+
+The architectural story: legacy goes typed → KdlNode → KdlDoc →
+string, paying for an intermediate representation we throw away.
+Direct goes typed → string. Same architectural pattern that closed
+the typed-decode gap; here it lands a 6.6× speedup because the encode
+side has no validation work to amortize against.
+
+Source: `benchmarks/comparisons/last-run.txt`.
 
 ## Methodology
 
@@ -161,8 +199,6 @@ Real workloads, not micro-fixtures. The previous bench inherited 24-byte conform
 Apples to apples within reason. ckdl is event-driven, so its bench harness drains events to /dev/null. knus does typed decode in one shot, so it gets a generic catch-all type. kdl-rs builds an AST. Ours builds an AST. The closest comparable measurement across all four is "how long does it take to consume the input bytes into whatever each library's idiomatic output is." Different libraries have different output shapes, and that asymmetry is real and worth acknowledging.
 
 ## What we don't measure
-
-Encode performance. The bench only times parse-or-decode.
 
 Error rendering. We have rustc-style diagnostics. kdl-rs has miette's colored carets which do more work per error.
 
