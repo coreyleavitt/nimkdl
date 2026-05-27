@@ -12,6 +12,8 @@ jobs:
     container: nimlang/nim:2.2.0
     steps:
       - uses: actions/checkout@v4
+      - name: trust workdir for git (container uid mismatch w/ runner)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: nimble test
         run: nimble -y test
       - name: perfGuard (no KdlNode deep-copy)
