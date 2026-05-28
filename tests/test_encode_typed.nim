@@ -1,10 +1,13 @@
-## Cycle E.1 — encode[T] tracer.
+## Tests for `encode[T]` — the typed-value encode entry point.
 ##
-## Acceptance: encode[T](v) produces byte-identical output to the
-## legacy `encode[T](v, emPretty).get` path (value → KdlNode → KdlDoc →
-## string) for a simple object type. Architectural symmetry with the
-## decode-side win: parseInto[T] skipped KdlDoc, encode[T] skips
-## KdlNode + KdlDoc.
+## Coverage is layered: flat object emit → children blocks → Option[T]
+## fields → kdlReserved validation → string escaping → mode handling
+## (emPretty / emCompact / emPreserve degradation) → numeric and
+## tagged child shapes (forcedTag, Option[Tagged], seq[Tagged]) →
+## variant fail-fast (peEncodeUnsupported). Most tests assert
+## byte-for-byte parity against `encode(doc, mode)` (the AST-level
+## emit) built from the same data — catches divergence between the
+## two independent implementations of the same spec.
 
 import std/[strutils, unittest]
 
@@ -17,7 +20,7 @@ kdl:
     replicas {.kdlProp.}: int = 1
     enabled {.kdlProp.}: bool = true
 
-suite "encode[T] tracer (cycle E.1)":
+suite "encode[T] flat object: args + props":
 
   test "single Service value: direct encode matches legacy KdlDoc encode":
     let s = Service(name: "web", port: 8080, replicas: 2, enabled: true)
@@ -47,7 +50,7 @@ kdl:
     name {.kdlArg.}: string
     actions {.kdlChild.}: seq[Action]
 
-suite "encode[T] children blocks (cycle E.5)":
+suite "encode[T] children blocks":
 
   test "Server with seq[Action] children — direct matches legacy":
     let s = Server(name: "web", actions: @[
@@ -70,7 +73,7 @@ kdl:
     retries {.kdlProp.}: Option[int]
     desc {.kdlProp.}: Option[string]
 
-suite "encode[T] Option[T] (cycle E.4)":
+suite "encode[T] Option[T] fields":
 
   test "Option some(int) emits prop=value":
     let t = WithOpt(name: "build", retries: some(3), desc: none(string))
@@ -96,7 +99,7 @@ kdl:
   type Tagged {.kdlNode: "tagged".} = object
     bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
 
-suite "encode[T] kdlReserved (cycle E.6)":
+suite "encode[T] kdlReserved validation":
 
   test "valid ipv4 emits `(ipv4)` tag prefix":
     let t = Tagged(bindAddr: "192.0.2.1")
@@ -115,7 +118,7 @@ suite "encode[T] kdlReserved (cycle E.6)":
     check r.isErr
     check r.getErr.code == peReservedTypeInvalid
 
-suite "encode[T] string escaping (cycle E.3)":
+suite "encode[T] string escaping":
 
   proc roundTripsEqual(s: Service) =
     let viaLegacy = encode(s, emPretty)
@@ -151,20 +154,15 @@ suite "encode[T] string escaping (cycle E.3)":
   test "name with non-ASCII utf8 (☃ snowman)":
     roundTripsEqual(Service(name: "snow☃man", port: 9))
 
-# Encode-path review round-1 regressions:
-#   C1 — numeric reserved tags ((u8), (i32), etc.) used to fail validation
-#         in the direct path because the value was always wrapped as
-#         kvString. kdlEncodeValue dispatch fixes it.
-#   C2 — kdlReserved on a kdlArg field used to be silently skipped in the
-#         direct path (no validation, no (tag) prefix emit).
-#   H1 — uint64 above int64.high used to silently emit as a negative
-#         decimal after a lossy cast; now promotes to bigint.
+# Numeric kdlReserved validation, kdlReserved on kdlArg, uint64 bigint
+# promotion: behaviors that were broken in earlier iterations of the
+# direct path. The fixes are upstream; these suites pin the contract.
 
 kdl:
   type WithU8 {.kdlNode: "port".} = object
     n {.kdlProp, kdlReserved: "u8".}: int
 
-suite "encode: numeric kdlReserved tag (C1 regression)":
+suite "encode: numeric kdlReserved tag validation":
   test "valid (u8) value encodes":
     let r = encode(WithU8(n: 200))
     check r.isOk
@@ -183,7 +181,7 @@ kdl:
   type Bind {.kdlNode: "bind".} = object
     addr1 {.kdlArg, kdlReserved: "ipv4".}: string
 
-suite "encode: kdlReserved on kdlArg (C2 regression)":
+suite "encode: kdlReserved on kdlArg fields":
   test "valid arg emits with (ipv4) tag prefix":
     let r = encode(Bind(addr1: "127.0.0.1"))
     check r.isOk
@@ -200,16 +198,14 @@ kdl:
   type BigU {.kdlNode: "big".} = object
     n {.kdlProp.}: uint64
 
-# Round-2 H1: type-level kdlReserved on the node was silently dropped
-# by the direct-buffer path. The legacy encode[T] sets
-# nodeSym.typeAnnotation; encode only emitted the node name with
-# no `(tag)` prefix, breaking encode == encode(emPretty) parity.
+# Type-level `{.kdlReserved: "X".}` on the node must emit `(X)name` at
+# the top level — symmetric with the field-level pragma covered above.
 
 kdl:
   type Versioned {.kdlNode: "module", kdlReserved: "v2".} = object
     field {.kdlProp.}: string
 
-suite "encode: type-level kdlReserved emits (tag) prefix (round-2 H1)":
+suite "encode: type-level kdlReserved node prefix":
   test "node carries (v2) tag in output":
     let v = Versioned(field: "ok")
     let r = encode(v)
@@ -287,7 +283,7 @@ suite "encode: emCompact mode":
     let s = Service(name: "ok", port: 1, replicas: 1, enabled: true)
     check encode(s, emPreserve).get == encode(s, emPretty).get
 
-suite "encode: uint64 bigint promotion (H1 regression)":
+suite "encode: uint64 bigint promotion":
   test "uint64 within int64.high encodes as plain int":
     let r = encode(BigU(n: 12345'u64))
     check r.isOk
@@ -401,3 +397,29 @@ suite "encode: variant types fail cleanly with peEncodeUnsupported":
     check r.isErr
     check r.getErr.code == peEncodeUnsupported
     check "variant" in r.getErr.hint
+
+# Depth guard mirrors MaxParserDepth (256). Programmatically-constructed
+# deep ASTs would stack-overflow without the cap.
+
+suite "encode depth cap":
+  test "AST encode raises AssertionDefect past MaxEncodeDepth":
+    # Build a (MaxEncodeDepth+1)-deep doc bottom-up: construct the
+    # leaf, wrap it in a parent that has the leaf as its sole child,
+    # repeat. The resulting root is `MaxEncodeDepth + 2` levels deep,
+    # so encode(doc, emPretty) recurses past the cap.
+    var doc = newDoc()
+    var node = newNode(doc, "n")
+    for _ in 0 .. MaxEncodeDepth:
+      var parent = newNode(doc, "n")
+      parent.children.add(node)
+      node = parent
+    doc.add(node)
+    expect AssertionDefect:
+      discard encode(doc, emPretty)
+
+  test "typed encode returns peParseDepthExceeded past MaxEncodeDepth":
+    let s = Service(name: "x", port: 1)
+    var buf = ""
+    let r = kdlEncodeIntoImpl(s, buf, emPretty, MaxEncodeDepth + 1)
+    check r.isErr
+    check r.getErr.code == peParseDepthExceeded

@@ -66,6 +66,18 @@ const
     ## above any practical doc while keeping the table at ~16 KB of
     ## `.rodata`. Beyond this the emitter falls back to `repeat`.
 
+  MaxEncodeDepth* = 256
+    ## Mirror of `MaxParserDepth`. Parsed docs are bounded by the
+    ## parser's cap; programmatically-constructed ASTs (test helpers,
+    ## hand-built KdlNode trees, repeated parse-then-graft chains) can
+    ## exceed it and stack-overflow the recursive emitters. Guard at
+    ## the same threshold so encode rejects what decode would have.
+    ## The AST emit path (emitNode / emitNodePreserveAndHash) raises an
+    ## AssertionDefect on overflow — they return `string`, not
+    ## `Result`, so there's no Err channel. The typed direct path
+    ## (kdlEncodeIntoImpl, codegen.nim) returns
+    ## `Err(peParseDepthExceeded)` instead.
+
   Indents = (proc(): array[PrecomputedIndentLevels, string] =
     for i in 0 ..< PrecomputedIndentLevels:
       result[i] = PrettyIndent.repeat(i))()
@@ -108,29 +120,20 @@ func canEmitBare(s: string): bool =
 # String escaping
 # ---------------------------------------------------------------------------
 
+# Forward-declare appendEscapedBody so escapeStringBody can delegate to
+# it — single source of truth for the escape rules. The actual
+# implementation lives in the "Direct-buffer emit primitives" section
+# below because it belongs with the other no-allocation appendX procs;
+# this forward decl just hoists the symbol into scope here.
+func appendEscapedBody*(buf: var string, s: string) {.noSideEffect, inline.}
+
 func escapeStringBody(s: string): string =
   ## Escape only what's necessary for a valid double-quoted KDL string.
   ## Round-trip stable: re-parsing the output yields back the same bytes.
-  ##
-  ## **Keep in sync with `appendEscapedBody` below** — the two are paired
-  ## (AST-path vs direct-buffer-path) and any new escape rule must land
-  ## in both. The duplication is justified by the direct path's
-  ## no-allocation guarantee, not by independent semantics.
+  ## Allocating wrapper around `appendEscapedBody` for the AST-emit
+  ## path; the direct-buffer path uses appendEscapedBody directly.
   result = ""
-  for c in s:
-    case c
-    of '"':  result.add("\\\"")
-    of '\\': result.add("\\\\")
-    of '\n': result.add("\\n")
-    of '\t': result.add("\\t")
-    of '\r': result.add("\\r")
-    of '\b': result.add("\\b")
-    of '\f': result.add("\\f")
-    of '\0'..'\x07', '\x0B', '\x0E'..'\x1F', '\x7F':
-      # Non-printable bytes get \u{XX}
-      result.add("\\u{" & toHex(int(c), 2) & "}")
-    else:
-      result.add(c)
+  appendEscapedBody(result, s)
 
 func quotedString(s: string): string {.inline.} =
   "\"" & escapeStringBody(s) & "\""
@@ -148,9 +151,9 @@ func emitIdent(s: string): string {.inline.} =
 # ---------------------------------------------------------------------------
 
 func appendEscapedBody*(buf: var string, s: string) {.noSideEffect, inline.} =
-  ## Direct-buffer counterpart to `escapeStringBody`. Same escape rules,
-  ## written to a caller-provided buffer instead of returning a string.
-  ## **Keep in sync with `escapeStringBody` above.**
+  ## Single source of truth for KDL string escaping. The allocating
+  ## `escapeStringBody` (above) delegates here, so both the AST emit
+  ## path and the direct-buffer emit path go through the same rules.
   for ch in s:
     case ch
     of '\\':   buf.add('\\'); buf.add('\\')
@@ -355,6 +358,12 @@ func emitEntry(e: KdlEntry, interner: Interner): string =
 
 func emitNode(n: KdlNode, interner: Interner,
               mode: EncodeMode, indent: int): string =
+  if indent > MaxEncodeDepth:
+    raise newException(AssertionDefect,
+      "encode: node nesting exceeded MaxEncodeDepth (" & $MaxEncodeDepth &
+      "). Parsed docs are bounded by the parser; this almost certainly " &
+      "means a programmatically-constructed AST has a recursive child " &
+      "structure beyond what KDL allows.")
   let pad = (if mode == emPretty: indentStr(indent) else: "")
   result.add(pad)
   if n.typeAnnotation != InvalidInterned:
@@ -546,6 +555,10 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
   ## 4. In-place changes → surgical textual splice into source bytes.
   ## 5. No element-level splice fired but hash mismatched → the change
   ##    is in name or type annotation; canonical fallback for this node.
+  if indent > MaxEncodeDepth:
+    raise newException(AssertionDefect,
+      "encode(emPreserve): node nesting exceeded MaxEncodeDepth (" &
+      $MaxEncodeDepth & "). See MaxEncodeDepth's docstring.")
   let pad = indentStr(indent)
 
   # Recurse to children first. This is the linchpin of the linear-hash
@@ -606,15 +619,20 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
     spanS >= 0 and spanE >= spanS and spanE <= output.len
 
   # Track bad-bounds separately from anySpliced. If ANY child/entry has
-  # malformed spans, the partial splices we'd return would interleave
-  # spliced bytes with stale source bytes for the malformed slot —
-  # silent wrong output. Force canonicalEmit in that case even if
-  # other splices succeeded (round-4 H2).
+  # malformed spans — whether against `doc.sourceText` (validSpanInto)
+  # or against the local `output` we're splicing into (safeSpliceBounds)
+  # — the partial splices we'd return would interleave spliced bytes
+  # with stale source bytes for the malformed slot, silently. Force
+  # canonicalEmit when any malformed-span skip fired, regardless of
+  # whether OTHER splices succeeded (round-4 H2 fixed safeSpliceBounds
+  # path; round-5 H1 extends to the sibling validSpanInto checks).
   var anyBadBounds = false
 
   for i in countdown(n.children.high, 0):
     let c = n.children[i]
-    if not validSpanInto(c.span, doc.sourceText): continue
+    if not validSpanInto(c.span, doc.sourceText):
+      anyBadBounds = true
+      continue
     # Skip clean children via hash compare — zero-alloc, no string compare.
     if childResults[i].hash == c.parseHash: continue
     let s = c.span.start.offset - base
@@ -627,7 +645,9 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
 
   for i in countdown(n.entries.high, 0):
     let entry = n.entries[i]
-    if not validSpanInto(entry.span, doc.sourceText): continue
+    if not validSpanInto(entry.span, doc.sourceText):
+      anyBadBounds = true
+      continue
     if hashEntry(entry, doc.interner) == entry.parseHash: continue
     let s = entry.span.start.offset - base
     let e = entry.span.finish.offset - base
@@ -696,6 +716,7 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
     # inter-node trivia — header comments, blank lines between
     # siblings, the trailing newline of the file — for free.
     let topShape = int(doc.parseTopLevelCount) == doc.nodes.len
+    var anyBadBounds = false
     if doc.sourceText.len > 0 and topShape:
       result = doc.sourceText
       # `result` is progressively mutated in reverse-index order. Each
@@ -708,26 +729,39 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
       # rewritten territory. Nim's string slicing doesn't crash on
       # out-of-range bounds; it silently returns the wrong substring,
       # producing doubled / missing bytes. Detect that and fall back
-      # to canonical per-node emit for the whole doc (round-4 H1,
-      # mirrors the per-child safeSpliceBounds guard added round 2).
-      var docBadBounds = false
+      # to canonical per-node emit for the whole doc (round-4 H1 +
+      # round-5 H1 extension, mirrors the per-child safeSpliceBounds
+      # guard from round 2).
+      #
+      # Naming: `anyBadBounds` matches the node-level loop's flag in
+      # emitNodePreserveAndHash. Same concept, same recovery action.
       for i in countdown(doc.nodes.high, 0):
         let n = doc.nodes[i]
-        if not validSpanInto(n.span, doc.sourceText): continue
+        if not validSpanInto(n.span, doc.sourceText):
+          anyBadBounds = true
+          break
         let s = n.span.start.offset
         let e = n.span.finish.offset
         if s < 0 or e < s or e > result.len:
-          docBadBounds = true
+          anyBadBounds = true
           break
         let nodeOut = emitNodePreserve(n, doc, 0)
         let nodeSource = doc.sourceText[s ..< e]
         if nodeOut != nodeSource:
           result = result[0 ..< s] & nodeOut & result[e ..< result.len]
-      if not docBadBounds:
+      if not anyBadBounds:
         return result
-      # Otherwise fall through to the per-node canonical emit below.
-    # Structural change at the top level OR no sourceText to splice
-    # into. Fall back to per-node emit joined by newlines.
+    # One of:
+    #   - sourceText empty (built-from-scratch doc)
+    #   - structural change at the top level (parseTopLevelCount mismatch)
+    #   - bad bounds in the splice loop above (anyBadBounds set)
+    # In any of those cases, fall back to per-node emit joined by
+    # newlines. `result` may hold a partially-spliced doc.sourceText
+    # from the loop above — the assignment below replaces it from
+    # scratch, so the partial mutations are discarded. Reset
+    # explicitly so the invariant is local to this block rather than
+    # relying on the assignment order.
+    result = ""
     var parts: seq[string] = @[]
     for n in doc.nodes:
       parts.add(emitNodePreserve(n, doc, 0))

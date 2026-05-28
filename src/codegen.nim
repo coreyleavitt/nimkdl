@@ -740,6 +740,18 @@ macro deriveEncode(typ: typedesc): untyped =
       hasUnsupported = true
       unsupportedReason = "Option[T] on a kdlArg (positional) field"
   var directBody = newStmtList()
+  # Depth guard: parsed docs are bounded by the parser's MaxParserDepth,
+  # but programmatically-constructed typed values (deep ref-object
+  # chains, hand-assembled trees) can recurse without limit and
+  # stack-overflow. Match the parser's cap symmetrically; the typed
+  # encode returns Err here (unlike the AST emit path which raises
+  # AssertionDefect — it returns `string`, not `Result`).
+  directBody.add quote do:
+    if `indentIdent` > MaxEncodeDepth:
+      return err[void, ParseError](initError(peParseDepthExceeded,
+        pointSpan(StartPosition),
+        "encode: node nesting exceeded MaxEncodeDepth (" &
+        $MaxEncodeDepth & ")"))
   if hasUnsupported:
     let reasonLit = newLit(unsupportedReason)
     let typeNameLit = newLit(typeNameStr)
