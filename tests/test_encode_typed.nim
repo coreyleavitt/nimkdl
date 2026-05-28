@@ -4,10 +4,11 @@
 ## fields → kdlReserved validation → string escaping → mode handling
 ## (emPretty / emCompact / emPreserve degradation) → numeric and
 ## tagged child shapes (forcedTag, Option[Tagged], seq[Tagged]) →
-## variant fail-fast (peEncodeUnsupported). Most tests assert
-## byte-for-byte parity against `encode(doc, mode)` (the AST-level
-## emit) built from the same data — catches divergence between the
-## two independent implementations of the same spec.
+## variant fail-fast (peEncodeUnsupported) → depth cap
+## (MaxEncodeDepth). Most tests assert byte-for-byte parity against
+## `encode(doc, mode)` (the AST-level emit) built from the same data
+## — catches divergence between the two independent implementations of
+## the same spec.
 
 import std/[strutils, unittest]
 
@@ -42,7 +43,7 @@ suite "encode[T] flat object: args + props":
     check viaLegacy.isOk
     check encode(s).get == viaLegacy.get
 
-# Cycle E.5 — children blocks
+# Children blocks: typed values with nested kdlChild fields
 kdl:
   type Action {.kdlNode: "action".} = object
     tmpl {.kdlArg, kdlRename: "template".}: string
@@ -66,7 +67,7 @@ suite "encode[T] children blocks":
     check viaLegacy.isOk
     check encode(s).get == viaLegacy.get
 
-# Cycle E.4 — Option[T] fields
+# Option[T] fields: some(v) emits; none omits the prop entirely
 kdl:
   type WithOpt {.kdlNode: "task".} = object
     name {.kdlArg.}: string
@@ -94,7 +95,7 @@ suite "encode[T] Option[T] fields":
     check viaLegacy.isOk
     check encode(t).get == viaLegacy.get
 
-# Cycle E.6 — kdlReserved tag emission + validation
+# kdlReserved tag emission + Layer-1 content validation at encode time
 kdl:
   type Tagged {.kdlNode: "tagged".} = object
     bindAddr {.kdlProp, kdlReserved: "ipv4".}: string
@@ -401,8 +402,8 @@ suite "encode: variant types fail cleanly with peEncodeUnsupported":
 # Depth guard mirrors MaxParserDepth (256). Programmatically-constructed
 # deep ASTs would stack-overflow without the cap.
 
-suite "encode depth cap":
-  test "AST encode raises AssertionDefect past MaxEncodeDepth":
+suite "encode: depth cap":
+  test "AST encode raises ValueError past MaxEncodeDepth":
     # Build a (MaxEncodeDepth+1)-deep doc bottom-up: construct the
     # leaf, wrap it in a parent that has the leaf as its sole child,
     # repeat. The resulting root is `MaxEncodeDepth + 2` levels deep,
@@ -414,10 +415,16 @@ suite "encode depth cap":
       parent.children.add(node)
       node = parent
     doc.add(node)
-    expect AssertionDefect:
+    expect ValueError:
       discard encode(doc, emPretty)
 
   test "typed encode returns peParseDepthExceeded past MaxEncodeDepth":
+    # Direct call with indent past the cap — proves the guard fires.
+    # Recursive trigger isn't naturally testable in the typed path:
+    # Nim's `Option[T]`/`seq[T]` kdlChild fields can't self-reference
+    # without `ref T`, which the codegen doesn't emit through. The AST
+    # recursive test above covers the recursive-trigger semantics;
+    # this test pins the typed-path error code + early return.
     let s = Service(name: "x", port: 1)
     var buf = ""
     let r = kdlEncodeIntoImpl(s, buf, emPretty, MaxEncodeDepth + 1)

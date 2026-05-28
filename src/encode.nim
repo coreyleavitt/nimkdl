@@ -31,6 +31,18 @@
 ## to `parse(x)` for any well-formed input. Byte-identical round-trip
 ## is *not* guaranteed — the encoder normalizes whitespace, number bases,
 ## and equivalent identifier forms.
+##
+## ## Implementation note: splice paths and bounds
+##
+## The `emPreserve` surgical-splice path writes into a buffer derived
+## from the original `doc.sourceText`. **Splice offsets must always be
+## bounds-checked against the buffer's CURRENT length**, not the
+## original sourceText length — earlier splices in the loop may have
+## changed it. Splicing with stale offsets silently corrupts output
+## (Nim's string slicing returns empty / full strings rather than
+## crashing). The splice loops here use `anyBadBounds` flags + a
+## canonicalEmit fall-back to detect and recover; do not reintroduce
+## an unguarded `output[s..<e]` style splice anywhere in this file.
 
 import std/strutils
 
@@ -68,15 +80,11 @@ const
 
   MaxEncodeDepth* = 256
     ## Mirror of `MaxParserDepth`. Parsed docs are bounded by the
-    ## parser's cap; programmatically-constructed ASTs (test helpers,
-    ## hand-built KdlNode trees, repeated parse-then-graft chains) can
-    ## exceed it and stack-overflow the recursive emitters. Guard at
-    ## the same threshold so encode rejects what decode would have.
-    ## The AST emit path (emitNode / emitNodePreserveAndHash) raises an
-    ## AssertionDefect on overflow — they return `string`, not
-    ## `Result`, so there's no Err channel. The typed direct path
-    ## (kdlEncodeIntoImpl, codegen.nim) returns
-    ## `Err(peParseDepthExceeded)` instead.
+    ## parser's cap; programmatically-constructed ASTs can exceed it
+    ## and stack-overflow the recursive emitters. Guarding at the same
+    ## threshold means encode rejects exactly what decode would have.
+    ## Overflow semantics live with the affected emitters (`emitNode`,
+    ## `emitNodePreserveAndHash`, `kdlEncodeIntoImpl`).
 
   Indents = (proc(): array[PrecomputedIndentLevels, string] =
     for i in 0 ..< PrecomputedIndentLevels:
@@ -125,6 +133,9 @@ func canEmitBare(s: string): bool =
 # implementation lives in the "Direct-buffer emit primitives" section
 # below because it belongs with the other no-allocation appendX procs;
 # this forward decl just hoists the symbol into scope here.
+#
+# Note: pragmas (`{.noSideEffect, inline.}`) must match between the
+# forward decl and the definition — Nim enforces this.
 func appendEscapedBody*(buf: var string, s: string) {.noSideEffect, inline.}
 
 func escapeStringBody(s: string): string =
@@ -184,6 +195,9 @@ func appendIdent*(buf: var string, s: string) {.noSideEffect, inline.} =
 
 func appendStringValue*(buf: var string, s: string) {.noSideEffect, inline.} =
   ## Canonical form prefers a bare-ident form for string values.
+  ## Same body as `appendIdent` above — kept separate because the names
+  ## document intent at call sites (identifier vs string value). Any
+  ## future escape-rule or bareword change must update both.
   if canEmitBare(s):
     buf.add(s)
   else:
@@ -358,8 +372,15 @@ func emitEntry(e: KdlEntry, interner: Interner): string =
 
 func emitNode(n: KdlNode, interner: Interner,
               mode: EncodeMode, indent: int): string =
+  ## **Raises `ValueError` when `indent > MaxEncodeDepth`.** The AST emit
+  ## path returns `string`, not `Result`, so deep-AST overflow has no
+  ## Err channel. Raising a `CatchableError` subtype (rather than an
+  ## `AssertionDefect`) lets library consumers that build ASTs from
+  ## untrusted sources wrap `encode(doc, …)` in `try/except ValueError`
+  ## and recover; the typed direct path returns
+  ## `Err(peParseDepthExceeded)` for the same condition.
   if indent > MaxEncodeDepth:
-    raise newException(AssertionDefect,
+    raise newException(ValueError,
       "encode: node nesting exceeded MaxEncodeDepth (" & $MaxEncodeDepth &
       "). Parsed docs are bounded by the parser; this almost certainly " &
       "means a programmatically-constructed AST has a recursive child " &
@@ -556,9 +577,10 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
   ## 5. No element-level splice fired but hash mismatched → the change
   ##    is in name or type annotation; canonical fallback for this node.
   if indent > MaxEncodeDepth:
-    raise newException(AssertionDefect,
+    # ValueError, not AssertionDefect — see emitNode's header for why.
+    raise newException(ValueError,
       "encode(emPreserve): node nesting exceeded MaxEncodeDepth (" &
-      $MaxEncodeDepth & "). See MaxEncodeDepth's docstring.")
+      $MaxEncodeDepth & ")")
   let pad = indentStr(indent)
 
   # Recurse to children first. This is the linchpin of the linear-hash
