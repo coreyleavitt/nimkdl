@@ -144,3 +144,27 @@ suite "round-trip — D15: encode-decode identity":
     let v1 = roundtrip(v0)
     check v1.name == v0.name
     check v1.tag == none(string)
+
+  type Renamed {.kdlNode: "renamed".} = object
+    tmpl {.kdlProp, kdlRename: "template".}: string
+
+  deriveEncode(Renamed)
+  deriveDecode(Renamed)
+
+  test "kdlRename round-trips correctly":
+    let v0 = Renamed(tmpl: "default")
+    let v1 = roundtrip(v0)
+    check v1.tmpl == v0.tmpl
+
+  type Reserved {.kdlNode: "reserved".} = object
+    addr1 {.kdlArg, kdlReserved: "ipv4".}: string
+    port {.kdlProp, kdlReserved: "u16".}: int
+
+  deriveEncode(Reserved)
+  deriveDecode(Reserved)
+
+  test "kdlReserved tags round-trip identically":
+    let v0 = Reserved(addr1: "10.0.0.1", port: 443)
+    let v1 = roundtrip(v0)
+    check v1.addr1 == v0.addr1
+    check v1.port == v0.port

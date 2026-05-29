@@ -494,3 +494,23 @@ suite "derive_decode — D9: kdlReserved tag validation":
     var h: HostD
     let res = kdlDecode(h, f.cursor)
     check res.isErr
+
+suite "derive_decode — D12: kdlRename":
+
+  type CfgD {.kdlNode: "cfg".} = object
+    tmpl {.kdlProp, kdlRename: "template".}: string
+
+  deriveDecode(CfgD)
+
+  test "kdlRename substitutes wire key on decode":
+    let f = mkCursor("cfg template=\"default\"")
+    var c: CfgD
+    let res = kdlDecode(c, f.cursor)
+    check res.isOk
+    check c.tmpl == "default"
+
+  test "Nim field name does NOT decode (wire key is renamed)":
+    let f = mkCursor("cfg tmpl=\"x\"")
+    var c: CfgD
+    let res = kdlDecode(c, f.cursor)
+    check res.isErr  # "tmpl" is unknown property
