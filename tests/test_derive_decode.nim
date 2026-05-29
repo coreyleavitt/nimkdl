@@ -514,3 +514,53 @@ suite "derive_decode — D12: kdlRename":
     var c: CfgD
     let res = kdlDecode(c, f.cursor)
     check res.isErr  # "tmpl" is unknown property
+
+suite "derive_decode — D5: perfect-hash dispatch (>8 kdlProp fields)":
+
+  type Wide {.kdlNode: "w".} = object
+    a {.kdlProp.}: int
+    b {.kdlProp.}: int
+    c {.kdlProp.}: int
+    d {.kdlProp.}: int
+    e {.kdlProp.}: int
+    f {.kdlProp.}: int
+    g {.kdlProp.}: int
+    h {.kdlProp.}: int
+    i {.kdlProp.}: int
+    j {.kdlProp.}: int  # 10 props — triggers the hash-dispatch path
+
+  deriveDecode(Wide)
+
+  test "all 10 props decode in order":
+    let src = "w a=1 b=2 c=3 d=4 e=5 f=6 g=7 h=8 i=9 j=10"
+    let fix = mkCursor(src)
+    var w: Wide
+    let res = kdlDecode(w, fix.cursor)
+    check res.isOk
+    check w.a == 1
+    check w.b == 2
+    check w.c == 3
+    check w.d == 4
+    check w.e == 5
+    check w.f == 6
+    check w.g == 7
+    check w.h == 8
+    check w.i == 9
+    check w.j == 10
+
+  test "props in scrambled order — hash dispatch is order-independent":
+    let src = "w j=10 a=1 e=5 c=3 h=8 b=2 g=7 d=4 i=9 f=6"
+    let fix = mkCursor(src)
+    var w: Wide
+    let res = kdlDecode(w, fix.cursor)
+    check res.isOk
+    check w.a == 1
+    check w.j == 10
+    check w.e == 5
+
+  test "unknown prop on wide type returns error":
+    let src = "w zzz=99"
+    let fix = mkCursor(src)
+    var w: Wide
+    let res = kdlDecode(w, fix.cursor)
+    check res.isErr

@@ -24,7 +24,7 @@
 ## - D1: tracer — single kdlArg string field
 ## - D2-D15: per docs/branch-rebuild-plan.md
 
-import std/macros
+import std/[macros, sets]
 
 import std/options  # the emitted decoder constructs `some(value)` for Option[T] fields
 export options       # so user code doesn't need to import options separately
@@ -498,20 +498,30 @@ macro deriveDecode*(T: typedesc): untyped =
     childKeyLets.add(quote do:
       let `sym` = `lit`)
     childKeySyms.add(sym)
-  # Helper: build an if-elif-else for a list of (PropField, keySym, slot)
-  # tuples. The slot-bit marker is appended to each branch's body so
-  # the required-field check sees the prop as satisfied.
+  # FNV-1a 32-bit, evaluated at macro time so each prop key's hash
+  # becomes a const branch label. Must match cursor.tokenBytesHash
+  # byte-for-byte (FNV-1a 32-bit; offset 0x811C9DC5; prime 0x01000193).
+  proc fnv32(s: string): uint32 =
+    result = 0x811C9DC5'u32
+    for ch in s:
+      result = result xor uint32(uint8(ch))
+      result = result * 0x01000193'u32
+
   proc buildPropIf(fields: seq[PropField], keys: seq[NimNode],
                    slots: seq[int], tags: seq[NimNode]): NimNode =
+    ## ≤8 fields → bytesEq if-elif chain (cheaper than hash for small N).
+    ## >8 fields with no macro-time hash collisions → case-on-FNV-32
+    ## dispatch with bytesEq confirmation per branch.
     if fields.len == 0:
       return quote do:
         return err[void, ParseError](
           initError(peTypeUnknownField, `evSym2`.span,
-                  "unknown property"))
-    var ifNode = newNimNode(nnkIfStmt)
-    for i, (fName, fType, _, _) in fields:
+                    "unknown property"))
+    # Per-field decode body — shared across both dispatch shapes.
+    proc branchBodyFor(i: int): NimNode =
+      let fName = fields[i].name
+      let fType = fields[i].typ
       let fIdent = ident(fName)
-      let keySym = keys[i]
       let tokIndexExpr = quote do: `evSym2`.propValueTok
       let target = quote do: `vSym`.`fIdent`
       let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
@@ -525,12 +535,53 @@ macro deriveDecode*(T: typedesc): untyped =
             return err[void, ParseError](
               initError(peTypeReservedMismatch, `evSym2`.span,
                         "expected (" & `tagSym` & ") annotation on value"))
-      let fullBody = quote do:
+      quote do:
         `reservedCheck`
         `decodeBody`
         `mark`
+    # Perfect-hash path for wide types — only if no macro-time hash
+    # collisions (we don't iterate seeds; fall back to if-elif on
+    # collision).
+    var useHash = fields.len > 8
+    var hashes: seq[uint32]
+    if useHash:
+      var seen = initHashSet[uint32]()
+      for f in fields:
+        let h = fnv32(f.wireKey)
+        if h in seen:
+          useHash = false
+          break
+        seen.incl(h)
+        hashes.add(h)
+    if useHash:
+      var caseStmt = newTree(nnkCaseStmt,
+        newCall(bindSym"tokenBytesHash", cSym,
+                quote do: `evSym2`.propKeyTok))
+      for i in 0 ..< fields.len:
+        let hLit = newLit(hashes[i])
+        let keySym = keys[i]
+        let decodeBlock = branchBodyFor(i)
+        # bytesEq confirmation guards against runtime hash collisions
+        # from unknown keys that happen to map to a known field's hash.
+        let confirmed = quote do:
+          if bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`):
+            `decodeBlock`
+          else:
+            return err[void, ParseError](
+              initError(peTypeUnknownField, `evSym2`.span,
+                        "unknown property"))
+        caseStmt.add(newTree(nnkOfBranch, hLit, confirmed))
+      caseStmt.add(newTree(nnkElse, quote do:
+        return err[void, ParseError](
+          initError(peTypeUnknownField, `evSym2`.span,
+                    "unknown property"))))
+      return caseStmt
+    # Default: if-elif chain.
+    var ifNode = newNimNode(nnkIfStmt)
+    for i in 0 ..< fields.len:
+      let keySym = keys[i]
       let cond = quote do: bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`)
-      ifNode.add(newNimNode(nnkElifBranch).add(cond).add(fullBody))
+      ifNode.add(newNimNode(nnkElifBranch).add(cond).add(branchBodyFor(i)))
     ifNode.add(newNimNode(nnkElse).add(quote do:
       return err[void, ParseError](
         initError(peTypeUnknownField, `evSym2`.span,

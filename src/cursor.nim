@@ -218,6 +218,22 @@ template bytesEq*(c: StringCursor, tokIdx: int, s: string): bool =
   else:
     n == s.len and equalMem(unsafeAddr c.source[o], unsafeAddr s[0], n)
 
+proc tokenBytesHash*(c: StringCursor, tokIdx: int): uint32 =
+  ## FNV-1a 32-bit hash over the source bytes of token at `tokIdx`.
+  ## Used by deriveDecode's perfect-hash kdlProp dispatch (Stage D5).
+  ## The macro precomputes hashes for known wire-keys at compile time
+  ## and emits a `case tokenBytesHash(c, propKeyTok):` dispatch with
+  ## those compile-time constants as branch labels — O(1) prop lookup
+  ## for wide types. Each branch still bytesEq-confirms (handles the
+  ## astronomically unlikely runtime collision from an unknown key).
+  let t = c.stream[].tokens[tokIdx]
+  let o = int(t.span.offset)
+  let n = int(t.span.length)
+  result = 0x811C9DC5'u32
+  for i in 0 ..< n:
+    result = result xor uint32(uint8(c.source[o + i]))
+    result = result * 0x01000193'u32
+
 proc peekSlashdashKindAt(c: StringCursor, atIdx: int): SlashdashKind =
   ## Determine the slashdash kind given the cursor's state and the
   ## token at `atIdx` (the resolved target after newline skipping).
