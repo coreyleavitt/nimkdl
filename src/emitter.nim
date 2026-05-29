@@ -48,3 +48,56 @@ func newBufferEmitter*(): BufferEmitter =
 func finish*(e: var BufferEmitter): string =
   ## Return the accumulated bytes. Subsequent pushes are undefined.
   result = e.buf
+
+# ---------------------------------------------------------------------------
+# Byte-writing primitives (perf-first)
+# ---------------------------------------------------------------------------
+#
+# All push methods funnel through `appendBytes` and `appendByte`. These
+# grow the buffer via `setLen` + raw-byte assignment, mirroring the
+# trick the deleted encode.nim used to keep the hot path off the
+# `add()` capacity-check loop.
+
+func appendBytes(e: var BufferEmitter, bs: openArray[char]) {.inline.} =
+  let oldLen = e.buf.len
+  e.buf.setLen(oldLen + bs.len)
+  for i in 0 ..< bs.len:
+    e.buf[oldLen + i] = bs[i]
+
+func appendByte(e: var BufferEmitter, b: char) {.inline.} =
+  let oldLen = e.buf.len
+  e.buf.setLen(oldLen + 1)
+  e.buf[oldLen] = b
+
+# ---------------------------------------------------------------------------
+# Push API — synthesized path (openArray[char])
+# ---------------------------------------------------------------------------
+
+func pushNodeBegin*(e: var BufferEmitter, name: openArray[char]) =
+  ## Begin a node with the given name. Subsequent pushArg* / pushProp*
+  ## attach entries; pushChildrenBegin / pushChildrenEnd nest a child
+  ## block; pushNodeEnd terminates. Caller is responsible for protocol
+  ## balance.
+  e.appendBytes(name)
+
+func pushNodeEnd*(e: var BufferEmitter) =
+  ## Terminate the current node. Canonical mode emits a single newline
+  ## as the node terminator.
+  e.appendByte('\n')
+
+# ---------------------------------------------------------------------------
+# Typed-value argument pushes (codegen zero-overhead path)
+# ---------------------------------------------------------------------------
+#
+# deriveEncode emits direct calls to these — no KdlValue construction,
+# no kind-discriminant dispatch on the hot path. Each method is
+# responsible for the leading separator (space before the value when an
+# entry is being added to an open node).
+
+func pushArgInt*(e: var BufferEmitter, v: int64) =
+  ## Append a positional integer argument to the currently-open node.
+  e.appendByte(' ')
+  # Render via the stdlib int-to-string fast path. Switching to a
+  ## numlit-based formatter is a Stage A follow-on if profiling shows
+  ## the alloc here mattering.
+  e.appendBytes($v)
