@@ -52,6 +52,9 @@ task test, "Run unit tests":
   if existsEnv("NKDL_PROPTEST"):
     exec cmd & " tests/test_safety_properties.nim"
     exec cmd & " tests/test_crosscat_properties.nim"
+    exec cmd & " tests/test_substrate_properties.nim"
+    exec cmd & " tests/test_cat2_properties.nim"
+    exec cmd & " tests/test_cat3_properties.nim"
   else:
     echo "[skip] property suites — being rebuilt as P1-P12 in Stages A-F"
 
