@@ -29,6 +29,8 @@ import std/macros
 import ./ast
 import ./cursor
 import ./doc_build  # tokenAsString — single source of truth for token → string
+import ./lexer      # TokenKind / KeywordKind dispatch in emitted code
+import ./numlit     # decodeIntFromToken / decodeFloatFromToken
 import ./spans
 
 # ---------------------------------------------------------------------------
@@ -130,11 +132,70 @@ macro deriveDecode*(T: typedesc): untyped =
     case $fType
     of "string":
       branchBody = quote do:
-        `vSym`.`fIdent` = tokenAsString(`cSym`.stream[].tokens[`evSym2`.argTok],
-                                        `cSym`.stream[], `cSym`.source)
+        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
+        case tok.kind
+        of tkString, tkRawString, tkIdent:
+          `vSym`.`fIdent` = tokenAsString(tok, `cSym`.stream[], `cSym`.source)
+        else:
+          return err[void, ParseError](
+            initError(peTypeMismatch, tok.span,
+                      "expected string value"))
+    of "int", "int8", "int16", "int32", "int64":
+      # We widen the destination assignment to fit; numlit returns
+      # int64 and the case narrows back at the field type.
+      let fTypeNode = fType
+      branchBody = quote do:
+        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
+        if tok.kind != tkNumber:
+          return err[void, ParseError](
+            initError(peTypeMismatch, tok.span,
+                      "expected integer value"))
+        let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
+        let decoded = decodeIntFromToken(nPayload, tok.span)
+        if decoded.isErr:
+          return err[void, ParseError](decoded.getErr)
+        `vSym`.`fIdent` = `fTypeNode`(decoded.get)
+    of "float", "float32", "float64":
+      let fTypeNode = fType
+      branchBody = quote do:
+        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
+        case tok.kind
+        of tkNumber:
+          let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
+          let decoded = decodeFloatFromToken(nPayload, tok.span)
+          if decoded.isErr:
+            return err[void, ParseError](decoded.getErr)
+          `vSym`.`fIdent` = `fTypeNode`(decoded.get)
+        of tkKeyword:
+          case tok.keyword
+          of kwInf:    `vSym`.`fIdent` = `fTypeNode`(Inf)
+          of kwNegInf: `vSym`.`fIdent` = `fTypeNode`(NegInf)
+          of kwNan:    `vSym`.`fIdent` = `fTypeNode`(NaN)
+          else:
+            return err[void, ParseError](
+              initError(peTypeMismatch, tok.span,
+                        "expected float value"))
+        else:
+          return err[void, ParseError](
+            initError(peTypeMismatch, tok.span,
+                      "expected float value"))
+    of "bool":
+      branchBody = quote do:
+        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
+        if tok.kind != tkKeyword:
+          return err[void, ParseError](
+            initError(peTypeMismatch, tok.span,
+                      "expected bool value"))
+        case tok.keyword
+        of kwTrue:  `vSym`.`fIdent` = true
+        of kwFalse: `vSym`.`fIdent` = false
+        else:
+          return err[void, ParseError](
+            initError(peTypeMismatch, tok.span,
+                      "expected bool value"))
     else:
-      error("deriveDecode (D1): kdlArg field type " & $fType &
-            " not yet supported (D2 widens)")
+      error("deriveDecode: kdlArg field type " & $fType &
+            " not yet supported (cycles D1/D2 cover string/int/float/bool)")
     argCase.add(newTree(nnkOfBranch, idxLit, branchBody))
   # else branch: too many positional args
   argCase.add(newTree(nnkElse,
