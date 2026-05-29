@@ -154,3 +154,67 @@ suite "derive_encode — C5: kdlChild seq[T]":
     var e = newBufferEmitter()
     kdlEncode(m, e)
     check e.finish() == "manifest \"n\" {\n    item \"x\"\n}\n"
+
+suite "derive_encode — C6: self-recursive Tree (closes #11 by construction)":
+
+  type Tree {.kdlNode: "tree".} = object
+    value {.kdlArg.}: string
+    children {.kdlChild.}: seq[Tree]
+
+  deriveEncode(Tree)
+
+  test "single leaf — depth 1":
+    var t = Tree(value: "root")
+    var e = newBufferEmitter()
+    kdlEncode(t, e)
+    check e.finish() == "tree \"root\"\n"
+
+  test "depth 2 — root with two leaves":
+    var t = Tree(value: "root", children: @[Tree(value: "a"), Tree(value: "b")])
+    var e = newBufferEmitter()
+    kdlEncode(t, e)
+    check e.finish() == "tree \"root\" {\n    tree \"a\"\n    tree \"b\"\n}\n"
+
+  test "depth 3 — the #11 structural test":
+    var t = Tree(
+      value: "L1",
+      children: @[
+        Tree(value: "L2a",
+             children: @[Tree(value: "L3a"), Tree(value: "L3b")]),
+        Tree(value: "L2b"),
+      ])
+    var e = newBufferEmitter()
+    kdlEncode(t, e)
+    check e.finish() == (
+      "tree \"L1\" {\n" &
+      "    tree \"L2a\" {\n" &
+      "        tree \"L3a\"\n" &
+      "        tree \"L3b\"\n" &
+      "    }\n" &
+      "    tree \"L2b\"\n" &
+      "}\n"
+    )
+
+  test "deeply linear chain — depth 5":
+    var t = Tree(value: "1", children: @[
+      Tree(value: "2", children: @[
+        Tree(value: "3", children: @[
+          Tree(value: "4", children: @[
+            Tree(value: "5"),
+          ]),
+        ]),
+      ]),
+    ])
+    var e = newBufferEmitter()
+    kdlEncode(t, e)
+    check e.finish() == (
+      "tree \"1\" {\n" &
+      "    tree \"2\" {\n" &
+      "        tree \"3\" {\n" &
+      "            tree \"4\" {\n" &
+      "                tree \"5\"\n" &
+      "            }\n" &
+      "        }\n" &
+      "    }\n" &
+      "}\n"
+    )
