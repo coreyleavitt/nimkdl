@@ -194,10 +194,8 @@ suite "trivia preservation — surgical splice (B1: in-place entry edit)":
       check "threshold=0.8" in text     # edited
       check "enabled #true" in text     # sibling entry preserved
 
-suite "trivia preservation — surgical splice (B2: shape-change fallback)":
-  test "adding a new entry falls back to canonical for that node only":
-    # New entry → shape change → that node goes canonical. Siblings
-    # of THAT NODE (other top-level nodes) preserve verbatim.
+suite "trivia preservation — shape-change (B2: tombstone-aware walk)":
+  test "pure-add entry preserves sibling-entry source bytes + sibling top-level node":
     let src = "// header\nrule \"a\" enabled=#true\nrule \"b\" enabled=#false\n"
     let r = parse(src, preserveFormat = true)
     check r.isOk
@@ -205,14 +203,13 @@ suite "trivia preservation — surgical splice (B2: shape-change fallback)":
       var doc = r.get
       doc.nodes[0].setProp(doc, "newkey", newIntValue(42))
       let text = encode(doc, emPreserve)
-      # Sibling rule "b" still verbatim, including its exact source bytes.
-      check "rule \"b\" enabled=#false" in text
+      check "rule \"b\" enabled=#false" in text  # sibling node verbatim
       check "// header" in text
-      # rule "a" canonical, contains the new key.
-      check "newkey=42" in text
+      check "newkey=42" in text                  # new entry appended
+      check "enabled=#true" in text              # original sibling-entry preserved
 
-  test "removing an entry falls back to canonical for that node only":
-    let src = "// keep this comment\nrule a=1 b=2 c=3\nother thing\n"
+  test "pure-remove entry preserves other entries' source bytes":
+    let src = "// keep this comment\nrule a=1   b=2     c=3\nother thing\n"
     let r = parse(src, preserveFormat = true)
     check r.isOk
     if r.isOk:
@@ -220,16 +217,106 @@ suite "trivia preservation — surgical splice (B2: shape-change fallback)":
       check doc.nodes[0].removeProp(doc, "b")
       let text = encode(doc, emPreserve)
       check "// keep this comment" in text
-      check "other thing" in text       # sibling preserved
+      check "other thing" in text                # sibling top-level preserved
+      check "a=1" in text                        # surviving entry preserved
+      check "c=3" in text
+      check "b=2" notin text                     # removed entry gone
+
+  test "pure-remove entry preserves trailing comment on the same line":
+    let src = "rule a=1 b=2 // trailing context\nother\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      check doc.nodes[0].removeProp(doc, "b")
+      let text = encode(doc, emPreserve)
+      check "a=1" in text
+      check "b=2" notin text
+      check "// trailing context" in text        # trailing trivia preserved
+
+  test "pure-remove child preserves sibling children + node framing":
+    let src = "rule \"x\" {\n  // first note\n  enabled #true\n  // second note\n  threshold 0.7\n}\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      check doc.nodes[0].removeChild(doc, "enabled") == 1
+      let text = encode(doc, emPreserve)
+      check "rule \"x\"" in text                 # framing preserved
+      check "threshold 0.7" in text              # surviving child preserved
+      check "// second note" in text             # trivia between gone-child and surviving
+      check "enabled #true" notin text
+
+  test "pure-add child to existing children block":
+    let src = "rule {\n  // existing note\n  enabled #true\n}\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      var newchild = newNode(doc, "threshold")
+      newchild.addArg(doc, newFloatValue(0.8))
+      doc.nodes[0].addChild(doc, newchild)
+      let text = encode(doc, emPreserve)
+      check "// existing note" in text           # original trivia preserved
+      check "enabled #true" in text              # original child verbatim
+      check "threshold" in text                  # appended
+      check text.endsWith("}\n") or text.endsWith("}")
+
+  test "mixed remove+add inside a single node":
+    let src = "rule a=1 b=2 c=3\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      check doc.nodes[0].removeProp(doc, "b")
+      doc.nodes[0].setProp(doc, "d", newIntValue(4))
+      let text = encode(doc, emPreserve)
+      check "a=1" in text                        # surviving original
+      check "c=3" in text                        # surviving original
+      check "d=4" in text                        # appended
+      check "b=2" notin text                     # removed
+
+  test "doc-level remove preserves sibling nodes + inter-node trivia":
+    let src = "// file header\nfirst a=1\n\n// section\nsecond b=2\nthird c=3\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      check doc.removeNode("second") == 1
+      let text = encode(doc, emPreserve)
+      check "// file header" in text
+      check "first a=1" in text                  # sibling preserved
+      check "third c=3" in text                  # sibling preserved
+      check "second" notin text                  # removed
+
+  test "doc-level add appends new top-level node":
+    let src = "first a=1\nsecond b=2\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      var newnode = newNode(doc, "added")
+      newnode.addArg(doc, newIntValue(99))
+      doc.insert(doc.nodes.len, newnode)
+      let text = encode(doc, emPreserve)
+      check "first a=1" in text
+      check "second b=2" in text
+      check "added" in text
+      check "99" in text
 
 when defined(kdlHashStats):
-  suite "trivia preservation — encoder hashes each node at most once":
-    # Quadratic-hashing regression guard. The natural recursive
-    # implementation calls hashNodeContent(n) at every level — which
-    # itself recurses through the subtree — so an N-deep tree gets
-    # hashed O(N²) bytes per encode. Threading the hash through the
-    # recursion makes it O(N).
-    test "hash-call count is bounded by node count":
+  suite "trivia preservation — encoder skips per-node hashing":
+    # Pre-gap-3 the encoder computed `hashNodeFromChildHashes` for
+    # every node in the slow path — O(N) full-content hashes per
+    # encode pass. The dirty-flag fix makes that work entirely
+    # unnecessary: clean subtrees emit source bytes after an O(1)
+    # `subtreeDirty` check; only dirty subtrees walk entries (and
+    # only entries inside a dirty subtree get hashed). Edits that
+    # touch one node in an otherwise-clean tree should cost ~0
+    # `hashNodeFromChildHashes` calls. Per-entry `hashEntry` still
+    # fires inside the dirty subtree's forward walk (cheap; catches
+    # raw field mutation that bypassed the builder API).
+    test "node-level hash work is zero across encode passes":
       let src = """
         rule "a" {
           action "x" enabled=#true
@@ -243,20 +330,15 @@ when defined(kdlHashStats):
       let r = parse(src, preserveFormat = true)
       check r.isOk
       var doc = r.get
-      # Force a mutation so the encoder takes the per-node freshness
-      # path (the no-mutation path is a fast-return of doc.sourceText
-      # with zero hash calls and isn't what we're measuring).
+      # Edit one top-level node. Siblings + a's children remain clean.
       doc.nodes[0].setProp(doc, "touched", newBoolValue(true))
-      # Count nodes — including all descendants. We expect at most
-      # one hash computation per node.
-      proc countNodes(ns: seq[KdlNode]): int =
-        for n in ns:
-          result.inc
-          result.inc countNodes(n.children)
-      let nodeCount = countNodes(doc.nodes)
       kdlHashCallCount = 0
       discard encode(doc, emPreserve)
-      check kdlHashCallCount <= nodeCount
+      # Zero node-level (`hashNodeFromChildHashes` / `hashNodeContent`)
+      # work — the doc-level raw-mutation safety check is gated on
+      # `doc.mutated == false`, which is false here (the setProp
+      # flipped it), so even debug builds skip it.
+      check kdlHashCallCount == 0
 
 when not defined(release):
   # Raw-field mutation should be caught with a useful diagnostic
@@ -292,3 +374,157 @@ when not defined(release):
       doc.markMutated()  # caller acknowledges; encode takes slow path
       let text = encode(doc, emPreserve)
       check "\"y with space\"" in text
+
+suite "trivia preservation — framing-only edits preserve interior":
+  # When only a node's `name` or `typeAnnotation` changes (no entry or
+  # child mutated), the preserving emit canonical-emits just the new
+  # `(tag)name` and then preserves `sourceText[headSpan.finish..<
+  # span.finish]` verbatim. The pre-headSpan code fell back to fully
+  # canonical for this edit class, losing interior trivia. These tests
+  # pin the new contract.
+
+  test "rename node preserves inter-entry trivia":
+    let src = "old  a=1   b=2     c=3\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].setName(doc, "new")
+      let text = encode(doc, emPreserve)
+      check text.startsWith("new")
+      check "  a=1   " in text       # original 2 + 3 spaces around a=1
+      check "     c=3" in text       # original 5 spaces before c=3
+
+  test "rename node preserves trailing comment":
+    let src = "old a=1 // important context\nother"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].setName(doc, "renamed")
+      let text = encode(doc, emPreserve)
+      check "renamed" in text
+      check "// important context" in text
+
+  test "add type annotation preserves child block layout":
+    let src = "rule {\n  // inner note\n  enabled #true\n  threshold 0.7\n}\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].setTypeAnnotation(doc, "v2")
+      let text = encode(doc, emPreserve)
+      check "(v2)rule" in text
+      check "// inner note" in text     # interior preserved
+      check "enabled #true" in text     # exact entry spacing preserved
+      check "threshold 0.7" in text
+
+suite "trivia preservation — tagged source mutation (proptest counterexample)":
+  # Proptest property #3 (stateful round-trip) found this in 5 examples
+  # on first run. Pre-fix: parser set `n.span.start = nameTok.span.start`
+  # — pointing at the name, NOT at `(tag)`. Doc-level walk emitted
+  # `sourceText[0..span.start]` as inter-node trivia, which included the
+  # original `(type)` prefix. The dirty node then canonical-emitted its
+  # framing as `(type)node`, producing `(type)(type)node a=0` — invalid
+  # syntax, re-parse failed.
+  #
+  # Fix: visitBeginNode sets `span.start = tagStart` when a tag is
+  # present, and headLen covers the full `(tag)name` framing. visitEndNode
+  # preserves span.start and only updates span.finish.
+
+  test "mutating a tagged-source node produces parseable output":
+    let src = "(type)node"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    if r.isOk:
+      var doc = r.get
+      doc.nodes[0].setProp(doc, "a", newIntValue(0))
+      let text = encode(doc, emPreserve)
+      check "(type)" in text
+      check text.count("(type)") == 1   # no doubling
+      let r2 = parse(text, preserveFormat = true)
+      check r2.isOk
+      if r2.isOk:
+        check docEqual(doc, r2.get)
+
+suite "trivia preservation — malformed-span fallback (regression)":
+  # Test the structural guarantee of the forward-walk emit: spans that
+  # don't satisfy the walk's monotonicity invariants (out-of-order,
+  # overlapping, out-of-range, past sourceText.len) fall the encoder
+  # back to canonical instead of silently producing corrupt output.
+  #
+  # Historical context: pre-forward-walk, emPreserve did in-place
+  # splicing into a buffer derived from doc.sourceText. Span offsets
+  # came from the parser against the ORIGINAL sourceText length, but
+  # the buffer's length changed as earlier splices fired — and Nim's
+  # string slicing on out-of-range bounds silently returns the wrong
+  # substring (empty for negative high, full string for over-range)
+  # rather than crashing. That made malformed-span corruption invisible.
+  # Six rounds of code review chased the bug-class across six sites.
+  #
+  # The forward-walk architecture eliminates the bug class structurally
+  # (reads from immutable sourceText, writes to append-only output) and
+  # bounds-checks each cursor advance. Programmatically-constructed
+  # ASTs with malformed spans — which a real fuzzer or future mutation
+  # API can produce — now fall back cleanly. These tests pin that
+  # contract.
+
+  test "child span pointing past sourceText.len falls back to canonical":
+    let r = parse("rule a=1 b=2", preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    # Force the dirty branch: edit one entry so myHash != parseHash.
+    doc.nodes[0].setProp(doc, "b", newIntValue(99))
+    # Corrupt one entry's span to point past sourceText.len.
+    let n = addr doc.nodes[0]
+    n[].entries[0].span = initSpan(initPosition(100), initPosition(200))
+    # Encode must not crash and must not silently splice junk.
+    let text = encode(doc, emPreserve)
+    # Canonical output: contains the edited "b=99" and the rule name.
+    check "rule" in text
+    check "b=99" in text
+    # No phantom 200-byte slice from over-range bounds.
+    check text.len < 200
+
+  test "out-of-order entry spans fall back to canonical":
+    let r = parse("rule a=1 b=2 c=3", preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    doc.nodes[0].setProp(doc, "c", newIntValue(99))
+    # Swap entry[0] and entry[1] spans so the walk sees out-of-order.
+    let n = addr doc.nodes[0]
+    let s0 = n[].entries[0].span
+    n[].entries[0].span = n[].entries[1].span
+    n[].entries[1].span = s0
+    # Forward walk detects `s < cursor` on the second iteration and
+    # falls back to canonical — no silent splice into stale offsets.
+    let text = encode(doc, emPreserve)
+    check "rule" in text
+    check "c=99" in text
+
+  test "zero-width span (start == finish) handled cleanly":
+    let r = parse("rule a=1 b=2", preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    doc.nodes[0].setProp(doc, "b", newIntValue(99))
+    let n = addr doc.nodes[0]
+    # Collapse entry[0]'s span to a zero-width point at offset 5.
+    n[].entries[0].span = initSpan(initPosition(5), initPosition(5))
+    let text = encode(doc, emPreserve)
+    check "rule" in text
+    check "b=99" in text
+
+  test "top-level node span overshooting sourceText falls back":
+    let r = parse("rule a=1\nother b=2\n", preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    doc.nodes[1].setProp(doc, "b", newIntValue(99))
+    # Corrupt the second top-level node's span to overshoot.
+    doc.nodes[1].span = initSpan(initPosition(5),
+                                  initPosition(doc.sourceText.len + 500))
+    let text = encode(doc, emPreserve)
+    check "rule" in text
+    check "other" in text
+    check "b=99" in text
+    # No giant junk slice from the over-range bound.
+    check text.len < doc.sourceText.len + 500

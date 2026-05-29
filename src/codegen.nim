@@ -1834,10 +1834,24 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
   # skipped, and a failing variant node produces exactly one error
   # instead of one-per-remaining-entry.
   let nodeNameLit = newLit(nodeName)
+  # `cur: ref \`builderName\`` (not by value) breaks the value-
+  # recursion cycle for self-recursive types like
+  # `Tree.children: seq[Tree]` — TreeVBuilder contains TreeVBuilderSeq
+  # which contains TreeVBuilder; without the ref that's infinite-
+  # size by Nim's rules. The ref is the minimum-perf-impact fix
+  # (only this one field is indirect; XVBuilder field accesses stay
+  # direct on the hot path). Per-T allocation cost is amortized by
+  # reset-in-place on subsequent visitBeginNode events (see the
+  # seqWrapProcs emission below).
+  #
+  # The TypeDef is moved into `builderType`'s single nnkTypeSection
+  # so the mutual reference resolves cleanly inside one type
+  # definition — the original two-separate-sections layout forward-
+  # referenced and failed for self-recursive types (nkdl#7).
   let seqBuilderType = quote do:
     type `seqBuilderName` = object
       results: seq[`typSym`]
-      cur: `builderName`
+      cur: ref `builderName`
       pendingNodeAnno: string
       skipping: bool
       allMode: bool
@@ -1855,10 +1869,15 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         return ok(void, ParseError)
       `bIdent`.skipping = false
       `bIdent`.curFailed = false
-      `bIdent`.cur = `builderName`()
+      # `cur` is a `ref TVBuilder` (nkdl#7 minimum-perf fix). Allocate
+      # lazily on the first event of each kdlBuildVisitorSeq call,
+      # reset contents in place on every subsequent visitBeginNode —
+      # one heap alloc per decode call, not per node.
+      if `bIdent`.cur.isNil: `bIdent`.cur = new(`builderName`)
+      else: `bIdent`.cur[] = default(`builderName`)
       `bIdent`.cur.pendingNodeAnno = `bIdent`.pendingNodeAnno
       `bIdent`.pendingNodeAnno = ""
-      let r0 = visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
+      let r0 = visitBeginNode(`bIdent`.cur[], `nameStrIdent`, `spanIdent`)
       if r0.isErr and `bIdent`.allMode:
         if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r0.getErr)
         `bIdent`.curFailed = true
@@ -1870,7 +1889,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      let r = visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`,
+      let r = visitArg(`bIdent`.cur[], `idxIdent`, `tokIdent`,
                        `streamIdent`, `entrySpanIdent`)
       if r.isErr and `bIdent`.allMode:
         if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
@@ -1884,7 +1903,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      let r = visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`,
+      let r = visitProp(`bIdent`.cur[], `keyStrIdent`, `tokIdent`,
                         `streamIdent`, `entrySpanIdent`)
       if r.isErr and `bIdent`.allMode:
         if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
@@ -1897,7 +1916,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      visitValueTypeAnno(`bIdent`.cur, `annoStrIdent`, `annoSpanIdent`)
+      visitValueTypeAnno(`bIdent`.cur[], `annoStrIdent`, `annoSpanIdent`)
     proc visitNodeTypeAnno(`bIdent`: var `seqBuilderName`,
                            `annoStrIdent`: openArray[char],
                            `annoSpanIdent`: Span):
@@ -1908,12 +1927,12 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      visitBeginChildren(`bIdent`.cur)
+      visitBeginChildren(`bIdent`.cur[])
     proc visitEndChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      visitEndChildren(`bIdent`.cur)
+      visitEndChildren(`bIdent`.cur[])
     proc visitEndNode(`bIdent`: var `seqBuilderName`, `nodeFullSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping:
@@ -1921,7 +1940,7 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
         return ok(void, ParseError)
       if `bIdent`.curFailed:
         return ok(void, ParseError)
-      let r = visitEndNode(`bIdent`.cur, `nodeFullSpanIdent`)
+      let r = visitEndNode(`bIdent`.cur[], `nodeFullSpanIdent`)
       if r.isErr:
         if `bIdent`.allMode:
           if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
@@ -1977,10 +1996,38 @@ proc emitVariantVisitor(typ, typSym: NimNode, shape: TypeShape): NimNode =
     template visitorCaps*(_: typedesc[`seqBuilderName`]): set[VisitorCap] =
       {vcArgs, vcProps, vcChildren, vcValueAnno, vcNodeAnno}
 
+  # See deriveVisitor non-variant path for the rationale: hoist the
+  # seq-builder TypeDef into builderType's nnkTypeSection so the
+  # two types share one section (nkdl#7 mutual-reference fix).
+  block hoistSeqType:
+    var section = seqBuilderType
+    while section.kind == nnkStmtList and section.len == 1:
+      section = section[0]
+    doAssert section.kind == nnkTypeSection,
+      "expected seqBuilderType to wrap a type section; got " & $section.kind
+    for td in section: builderType.add(td)
+
+  # Forward declarations of seq-wrapper visitor procs — see the
+  # non-variant deriveVisitor for the rationale.
+  let seqForwardDecls = newStmtList()
+  block buildForwards:
+    var stmts = seqWrapProcs
+    while stmts.kind == nnkStmtList and stmts.len == 1:
+      stmts = stmts[0]
+    proc addForwardOf(p: NimNode) =
+      if p.kind == nnkProcDef:
+        let copy = copyNimTree(p)
+        copy[6] = newEmptyNode()
+        seqForwardDecls.add(copy)
+    if stmts.kind == nnkProcDef:
+      addForwardOf(stmts)
+    elif stmts.kind == nnkStmtList:
+      for p in stmts: addForwardOf(p)
+
   result = newStmtList(
-    builderType, beginNodeProc, argProc, propProc, valueAnnoProc, endNodeProc,
-    kvpProc, seqBuilderType, seqWrapProcs, capsTemplate, kvpSeqProc,
-    kvpAllProc, kvpAllSeqProc)
+    builderType, seqForwardDecls, beginNodeProc, argProc, propProc,
+    valueAnnoProc, endNodeProc, kvpProc, seqWrapProcs, capsTemplate,
+    kvpSeqProc, kvpAllProc, kvpAllSeqProc)
   when defined(dumpKdlGen):
     echo "=== emitVariantVisitor for ", repr(typ), " ==="
     echo result.repr
@@ -2116,10 +2163,18 @@ macro deriveVisitor(typ: typedesc): untyped =
         # the AST-walk path's R2-H1 behavior).
         builderFields.add newIdentDefs(
           ident(c.nimName & "_seen"), ident("bool"))
-  let builderType = newNimNode(nnkTypeSection).add(
-    newNimNode(nnkTypeDef).add(builderName, newEmptyNode(),
-      newNimNode(nnkObjectTy).add(newEmptyNode(), newEmptyNode(),
-        builderFields)))
+  let builderTypeDef = newNimNode(nnkTypeDef).add(builderName, newEmptyNode(),
+    newNimNode(nnkObjectTy).add(newEmptyNode(), newEmptyNode(),
+      builderFields))
+  # `builderType` is the type-section emission point. We attach the
+  # seq-wrapper's TypeDef into the same section below (nkdl#7 fix):
+  # putting both types in one section permits the mutual reference
+  # `TVBuilderSeq.cur: ref TVBuilder` / `TVBuilder.children_b:
+  # TVBuilderSeq` that self-recursive `seq[Self]` kdlChild fields
+  # need. The `ref` on `cur` (vs the old by-value) is the indirection
+  # that lets Nim accept the cycle — without it, TreeVBuilder would
+  # be transitively-by-value-self-containing (infinite size).
+  let builderType = newNimNode(nnkTypeSection).add(builderTypeDef)
 
   # 2. visitBeginNode: name match + apply field defaults.
   var defaultsBody = newStmtList()
@@ -2681,10 +2736,24 @@ macro deriveVisitor(typ: typedesc): untyped =
   # surrounding parseDocumentWith (driven with errorBuf) handles
   # parser-level error recovery and resync; this flag handles the
   # visitor side of the same contract.
+  # `cur: ref \`builderName\`` (not by value) breaks the value-
+  # recursion cycle for self-recursive types like
+  # `Tree.children: seq[Tree]` — TreeVBuilder contains TreeVBuilderSeq
+  # which contains TreeVBuilder; without the ref that's infinite-
+  # size by Nim's rules. The ref is the minimum-perf-impact fix
+  # (only this one field is indirect; XVBuilder field accesses stay
+  # direct on the hot path). Per-T allocation cost is amortized by
+  # reset-in-place on subsequent visitBeginNode events (see the
+  # seqWrapProcs emission below).
+  #
+  # The TypeDef is moved into `builderType`'s single nnkTypeSection
+  # so the mutual reference resolves cleanly inside one type
+  # definition — the original two-separate-sections layout forward-
+  # referenced and failed for self-recursive types (nkdl#7).
   let seqBuilderType = quote do:
     type `seqBuilderName` = object
       results: seq[`typSym`]
-      cur: `builderName`
+      cur: ref `builderName`
       pendingNodeAnno: string
       skipping: bool
       allMode: bool
@@ -2720,10 +2789,15 @@ macro deriveVisitor(typ: typedesc): untyped =
         return ok(void, ParseError)
       `bIdent`.skipping = false
       `bIdent`.curFailed = false
-      `bIdent`.cur = `builderName`()
+      # `cur` is a `ref TVBuilder` (nkdl#7 minimum-perf fix). Allocate
+      # lazily on the first event of each kdlBuildVisitorSeq call,
+      # reset contents in place on every subsequent visitBeginNode —
+      # one heap alloc per decode call, not per node.
+      if `bIdent`.cur.isNil: `bIdent`.cur = new(`builderName`)
+      else: `bIdent`.cur[] = default(`builderName`)
       `bIdent`.cur.pendingNodeAnno = `bIdent`.pendingNodeAnno
       `bIdent`.pendingNodeAnno = ""
-      let r0 = visitBeginNode(`bIdent`.cur, `nameStrIdent`, `spanIdent`)
+      let r0 = visitBeginNode(`bIdent`.cur[], `nameStrIdent`, `spanIdent`)
       if r0.isErr and `bIdent`.allMode:
         if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r0.getErr)
         `bIdent`.curFailed = true
@@ -2735,7 +2809,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      let r = visitArg(`bIdent`.cur, `idxIdent`, `tokIdent`,
+      let r = visitArg(`bIdent`.cur[], `idxIdent`, `tokIdent`,
                        `streamIdent`, `entrySpanIdent`)
       if r.isErr and `bIdent`.allMode:
         if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
@@ -2749,7 +2823,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      let r = visitProp(`bIdent`.cur, `keyStrIdent`, `tokIdent`,
+      let r = visitProp(`bIdent`.cur[], `keyStrIdent`, `tokIdent`,
                         `streamIdent`, `entrySpanIdent`)
       if r.isErr and `bIdent`.allMode:
         if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
@@ -2762,7 +2836,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      visitValueTypeAnno(`bIdent`.cur, `annoStrIdent`, `annoSpanIdent`)
+      visitValueTypeAnno(`bIdent`.cur[], `annoStrIdent`, `annoSpanIdent`)
     proc visitNodeTypeAnno(`bIdent`: var `seqBuilderName`,
                            `annoStrIdent`: openArray[char],
                            `annoSpanIdent`: Span):
@@ -2775,12 +2849,12 @@ macro deriveVisitor(typ: typedesc): untyped =
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      visitBeginChildren(`bIdent`.cur)
+      visitBeginChildren(`bIdent`.cur[])
     proc visitEndChildren(`bIdent`: var `seqBuilderName`):
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping or `bIdent`.curFailed:
         return ok(void, ParseError)
-      visitEndChildren(`bIdent`.cur)
+      visitEndChildren(`bIdent`.cur[])
     proc visitEndNode(`bIdent`: var `seqBuilderName`, `nodeFullSpanIdent`: Span):
         Result[void, ParseError] {.noSideEffect.} =
       if `bIdent`.skipping:
@@ -2790,7 +2864,7 @@ macro deriveVisitor(typ: typedesc): untyped =
         # Error already captured during this node; skip commit so the
         # half-built `cur.result` doesn't leak into `results`.
         return ok(void, ParseError)
-      let r = visitEndNode(`bIdent`.cur, `nodeFullSpanIdent`)
+      let r = visitEndNode(`bIdent`.cur[], `nodeFullSpanIdent`)
       if r.isErr:
         if `bIdent`.allMode:
           if `bIdent`.errors.len < MaxAccumulatedErrors: `bIdent`.errors.add(r.getErr)
@@ -2853,10 +2927,49 @@ macro deriveVisitor(typ: typedesc): untyped =
     template visitorCaps*(_: typedesc[`seqBuilderName`]): set[VisitorCap] =
       {vcArgs, vcProps, vcChildren, vcValueAnno, vcNodeAnno}
 
+  # Hoist the seq-builder's TypeDef into the singular builder's
+  # single nnkTypeSection so the two types are mutually visible at
+  # type-resolution time (nkdl#7). The `quote do: type X = object ...`
+  # form wraps the section in an nnkStmtList — unwrap it down to the
+  # TypeDef and add to builderType. Then emit no longer references
+  # seqBuilderType as a standalone statement.
+  block hoistSeqType:
+    var section = seqBuilderType
+    while section.kind == nnkStmtList and section.len == 1:
+      section = section[0]
+    doAssert section.kind == nnkTypeSection,
+      "expected seqBuilderType to wrap a type section; got " & $section.kind
+    for td in section: builderType.add(td)
+
+  # Forward declarations of the seq-wrapper visitor procs. For self-
+  # recursive types (`Tree.children: seq[Tree]`), the per-T
+  # `XVBuilder.visitBeginNode` body has a child-dispatch call
+  # `visitBeginNode(b.<slot>, ...)` where the slot is `XVBuilderSeq`
+  # — registered in the SAME deriveVisitor output as the per-T body.
+  # Without forward decls Nim type-checks per-T bodies before the
+  # seq-wrapper signatures are registered, and resolution fails for
+  # self-recursive types. (Non-self-recursive types are fine because
+  # the seq-wrapper for the OTHER type was emitted by an earlier
+  # deriveVisitor call.)
+  let seqForwardDecls = newStmtList()
+  block buildForwards:
+    var stmts = seqWrapProcs
+    while stmts.kind == nnkStmtList and stmts.len == 1:
+      stmts = stmts[0]
+    proc addForwardOf(p: NimNode) =
+      if p.kind == nnkProcDef:
+        let copy = copyNimTree(p)
+        copy[6] = newEmptyNode()
+        seqForwardDecls.add(copy)
+    if stmts.kind == nnkProcDef:
+      addForwardOf(stmts)
+    elif stmts.kind == nnkStmtList:
+      for p in stmts: addForwardOf(p)
+
   result = newStmtList(
-    builderType, beginNodeProc, argProc, propProc, valueAnnoProc, restProcs,
-    kvpProc, seqBuilderType, seqWrapProcs, capsTemplate, kvpSeqProc,
-    kvpAllProc, kvpAllSeqProc)
+    builderType, seqForwardDecls, beginNodeProc, argProc, propProc,
+    valueAnnoProc, restProcs, kvpProc, seqWrapProcs, capsTemplate,
+    kvpSeqProc, kvpAllProc, kvpAllSeqProc)
   when defined(dumpKdlGen):
     echo "=== deriveVisitor for ", repr(typ), " ==="
     echo result.repr

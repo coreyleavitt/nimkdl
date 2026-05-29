@@ -26,6 +26,13 @@ type
       ## lex-side interner for typed-path perf, so the token's `ident`
       ## handle is `InvalidInterned`; we read via the token's span instead.
     pendingNodeAnno: InternedStr
+    pendingNodeAnnoSpan: Span
+      ## Span of the `(tag)` bytes for the pending node annotation.
+      ## visitBeginNode consumes it so that for tagged nodes the
+      ## resulting `KdlNode.span.start` points at the `(` (not at the
+      ## name token), which keeps the doc-level encoder walk's
+      ## inter-node trivia from including the tag prefix — see the
+      ## tagged-source-mutation bug surfaced by proptest.
     pendingValueAnno: InternedStr
     childHashesStack: seq[seq[Hash128]]
       ## Per-frame accumulator of children's parseHash, used only when
@@ -63,8 +70,11 @@ proc finish*(b: sink DocBuilder): KdlDoc {.noSideEffect.} =
 proc visitNodeTypeAnno*(b: var DocBuilder, annoStr: openArray[char],
                         annoSpan: Span): Result[void, ParseError]
     {.noSideEffect.} =
-  ## Stash for the next visitBeginNode to consume.
+  ## Stash for the next visitBeginNode to consume. The span lets
+  ## visitBeginNode extend the resulting KdlNode.span backwards to
+  ## cover the `(tag)` prefix.
   b.pendingNodeAnno = b.doc.interner.intern(annoStr)
+  b.pendingNodeAnnoSpan = annoSpan
   ok(void, ParseError)
 
 proc visitValueTypeAnno*(b: var DocBuilder, annoStr: openArray[char],
@@ -78,9 +88,22 @@ proc visitBeginNode*(b: var DocBuilder, nameStr: openArray[char],
                      nodeSpan: Span): Result[void, ParseError]
     {.noSideEffect.} =
   let nameHandle = b.doc.interner.intern(nameStr)
+  # `nodeSpan` here is the parser's name-token span. For tagged nodes
+  # we extend span backwards to cover the `(tag)` prefix so the doc-
+  # level encoder walk's inter-node trivia doesn't duplicate it. The
+  # resulting span runs `[tagStart, nameEnd]`; visitEndNode preserves
+  # span.start and updates only span.finish to the node's true end.
+  # headLen = full `(tag)name` length so the encoder framing-edit
+  # path knows where the interior begins.
+  let headStart =
+    if b.pendingNodeAnno != InvalidInterned: b.pendingNodeAnnoSpan.start
+    else: nodeSpan.start
+  let headEnd = nodeSpan.finish
   b.stack.add(KdlNode(name: nameHandle,
                       typeAnnotation: b.pendingNodeAnno,
-                      entries: @[], children: @[], span: nodeSpan))
+                      entries: @[], children: @[],
+                      span: initSpan(headStart, headEnd),
+                      headLen: uint32(headEnd.offset - headStart.offset)))
   b.pendingNodeAnno = InvalidInterned
   if b.doc.preserveFormat:
     b.childHashesStack.add(@[])
@@ -190,12 +213,15 @@ proc visitEndChildren*(b: var DocBuilder): Result[void, ParseError] {.noSideEffe
 
 proc visitEndNode*(b: var DocBuilder, nodeFullSpan: Span):
     Result[void, ParseError] {.noSideEffect.} =
-  ## Pop current node frame, stamp node.span with the FULL span
-  ## (from name through last consumed token — required by encode's
-  ## emPreserve splice path), compute parseHash if preserveFormat,
-  ## attach to parent, propagate hash up.
+  ## Pop current node frame, extend node.span to the FULL node end
+  ## (last consumed token), compute parseHash if preserveFormat,
+  ## attach to parent, propagate hash up. We **preserve span.start**
+  ## as set by visitBeginNode — for tagged nodes that covers the
+  ## `(tag)` prefix, and overwriting it with nodeFullSpan.start (which
+  ## is the name token start, after the tag) would re-introduce the
+  ## doc-level "duplicate tag in inter-node trivia" bug.
   var n = b.stack.pop()
-  n.span = nodeFullSpan
+  n.span = initSpan(n.span.start, nodeFullSpan.finish)
   if b.doc.preserveFormat:
     let childHashes = b.childHashesStack.pop()
     n.parseHash = hashNodeFromChildHashes(n, b.doc.interner, childHashes)

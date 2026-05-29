@@ -73,6 +73,24 @@ type
     keArgument   ## positional value after a node name (e.g. `rule "id"`)
     keProperty   ## key=value pair (e.g. `enabled=#true`)
 
+  MutationState* = ref object
+    ## Sidecar for the preserving encoder's per-node mutation tracking.
+    ## See `KdlNode.mutState`.
+    dirty*: bool
+      ## True iff this node's name, type annotation, entries, or
+      ## children have been mutated through the builder API.
+      ## Propagated bottom-up at encode time as `subtreeDirty =
+      ## n.dirty or any(child.subtreeDirty)` — controls whether the
+      ## encoder takes the source-bytes fast path (clean) or forward-
+      ## walks the node's interior (dirty).
+    removedEntries*: seq[KdlEntry]
+      ## Tombstones for entries deleted via `removeProp` / `removeArg`.
+      ## Retain the original `span` so the encoder's shape-change walk
+      ## can skip the deleted source bytes without re-emitting them.
+    removedChildren*: seq[KdlNode]
+      ## Same role for children deleted via `removeChild` /
+      ## `replaceChild`.
+
   KdlEntry* = object
     ## `parseHash` is set by the parser to a fingerprint of the
     ## entry's canonical content. The encoder's `emPreserve` mode
@@ -117,6 +135,25 @@ type
       ## siblings still preserved).
     parseChildCount*: int32
       ## Same role for children.
+    headLen*: uint32
+      ## Length (bytes) of the `(tag)name` framing relative to
+      ## `span.start.offset`. Together with `span.start` it locates
+      ## the head end without storing a full second Span (saves 4
+      ## bytes per node vs an inline `headSpan: Span`; matters on the
+      ## parse hot path where KdlNode cache footprint dominates).
+      ## Used by the preserving encoder's framing-only-edit path:
+      ## canonical-emit the new `(tag)name`, then forward-walk
+      ## `sourceText[span.start + headLen ..< span.finish]` to
+      ## preserve original interior trivia. Zero for programmatically-
+      ## constructed nodes — the encoder's framing-edit path skips
+      ## them and the canonical fallback handles those.
+    mutState*: MutationState
+      ## Lazily-allocated sidecar carrying `dirty` plus tombstones for
+      ## removed entries / children. Nil by default — parsed nodes
+      ## don't pay for it. First mutation through the builder API
+      ## allocates it. Keeps the in-AST `KdlNode` ~48 bytes smaller
+      ## than embedding these fields inline, which matters because
+      ## KdlNode sits on the hot path of parse + decode + encode.
 
   KdlDoc* = object
     ## A parsed KDL document. The interner is owned by the doc; all
@@ -156,6 +193,13 @@ type
       ## per-node loop with newline joins).
     interner*: Interner
     nodes*: seq[KdlNode]
+    removedNodes*: seq[KdlNode]
+      ## Doc-level tombstones — same role as `KdlNode.removedChildren`
+      ## but for top-level nodes removed via `doc.removeNode` /
+      ## `doc.replaceNode`. Lets the preserving encoder's doc-level
+      ## shape-change walk skip the original source bytes of removed
+      ## nodes without forfeiting inter-node trivia preservation for
+      ## surviving siblings.
 
 when defined(probeKdlNodeCopy):
   # CI guard — compile any consumer with -d:probeKdlNodeCopy and Nim
@@ -526,13 +570,31 @@ func nodes*(doc: KdlDoc, name: string): seq[KdlNode] =
 # itself a mutation of the interner. Read-only operations take
 # `KdlDoc`.
 
-proc markMutated*(doc: var KdlDoc) {.inline.} =
-  ## Disclaim source-byte preservation. Sets `doc.mutated = true` so
-  ## `encode(doc, emPreserve)` falls back to canonical. The mutation
-  ## helpers below call this for you; expose it for consumers who edit
-  ## the AST through raw field access (`doc.nodes[i].entries[j] = ...`)
-  ## rather than the helpers.
+template ensureMutState(n: var KdlNode) =
+  ## Lazily allocate the mutation sidecar. Called by every builder-API
+  ## mutator on its first touch so `dirty` and tombstones have a home.
+  if n.mutState == nil: n.mutState = MutationState()
+
+func dirty*(n: KdlNode): bool {.inline.} =
+  ## Non-nil-aware accessor. Used by encode for the subtreeDirty fold.
+  n.mutState != nil and n.mutState.dirty
+
+proc markMutated*(doc: var KdlDoc) =
+  ## Disclaim source-byte preservation. Sets `doc.mutated = true` AND
+  ## marks every node (recursively) `dirty = true`, so the encoder
+  ## can't take the source-bytes fast path on any subtree. The
+  ## mutation helpers set `dirty` precisely on the touched node;
+  ## expose this for consumers who edit the AST through raw field
+  ## access (`doc.nodes[i].entries[j] = ...`) where the helpers
+  ## couldn't update `dirty` on their behalf. Per-entry hash compare
+  ## inside the encoder's forward walk then catches the actually-
+  ## mutated entry and canonical-emits it.
   doc.mutated = true
+  proc dirtyAll(nodes: var seq[KdlNode]) =
+    for n in nodes.mitems:
+      ensureMutState(n); n.mutState.dirty = true
+      dirtyAll(n.children)
+  dirtyAll(doc.nodes)
 
 proc clearSource*(doc: var KdlDoc) {.inline.} =
   ## Disclaim source preservation explicitly: drop the cached sourceText
@@ -563,6 +625,7 @@ proc addArg*(n: var KdlNode, doc: var KdlDoc, v: KdlValue) {.inline.} =
   ## docs. Values constructed via `newStringValue` / `newIntValue` /
   ## etc. carry `InvalidInterned` and are always safe.
   n.entries.add(KdlEntry(kind: keArgument, argValue: v, span: n.span))
+  ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
 proc setArg*(n: var KdlNode, doc: var KdlDoc, idx: int,
@@ -576,19 +639,37 @@ proc setArg*(n: var KdlNode, doc: var KdlDoc, idx: int,
       if argSeen == idx:
         n.entries[i] = KdlEntry(kind: keArgument, argValue: v,
                                 span: n.entries[i].span)
+        ensureMutState(n); n.mutState.dirty = true
         doc.mutated = true
         return true
       inc argSeen
   false
 
+func isParsedEntry*(e: KdlEntry): bool {.inline.} =
+  ## An entry that came from the parser has a non-zero parseHash (set
+  ## when preserveFormat=true) and its span lies inside source. Used
+  ## to decide whether removing it should tombstone (preserve span for
+  ## the encoder's shape-change walk) or just drop (no source bytes
+  ## to skip for builder-API-constructed entries).
+  e.parseHash != default(Hash128) and e.span.length > 0
+
+func isParsedNode*(n: KdlNode): bool {.inline.} =
+  n.parseHash != default(Hash128) and n.span.length > 0
+
 proc removeArg*(n: var KdlNode, doc: var KdlDoc, idx: int): bool =
   ## Remove the `idx`-th positional argument. Returns false when out of
-  ## range.
+  ## range. Original entries are tombstoned so the preserving encoder
+  ## can skip their source bytes without re-emitting; builder-API-
+  ## constructed entries are dropped.
   var argSeen = 0
   for i in 0 ..< n.entries.len:
     if n.entries[i].kind == keArgument:
       if argSeen == idx:
+        ensureMutState(n)
+        if isParsedEntry(n.entries[i]):
+          n.mutState.removedEntries.add(n.entries[i])
         n.entries.delete(i)
+        n.mutState.dirty = true
         doc.mutated = true
         return true
       inc argSeen
@@ -597,6 +678,7 @@ proc removeArg*(n: var KdlNode, doc: var KdlDoc, idx: int): bool =
 proc addChild*(n: var KdlNode, doc: var KdlDoc, c: sink KdlNode) {.inline.} =
   ## Append a child node.
   n.children.add(c)
+  ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
 proc insertChild*(n: var KdlNode, doc: var KdlDoc, idx: int,
@@ -604,6 +686,7 @@ proc insertChild*(n: var KdlNode, doc: var KdlDoc, idx: int,
   ## Insert a child node at `idx`. Clamps to the seq's bounds.
   let i = max(0, min(idx, n.children.len))
   n.children.insert(c, i)
+  ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
 proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
@@ -614,6 +697,7 @@ proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
   ## **Cross-doc caveat:** see `addArg`. Use `migrateValue(srcDoc,
   ## doc, v)` first when `v` was constructed against a different doc.
   let key = doc.interner.intern(name)
+  ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
   for i in 0 ..< n.entries.len:
     if n.entries[i].kind == keProperty and n.entries[i].propName == key:
@@ -625,12 +709,17 @@ proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
 
 proc removeProp*(n: var KdlNode, doc: var KdlDoc, name: string): bool =
   ## Remove the first property with the given name. Returns true iff
-  ## a property was removed.
+  ## a property was removed. Parsed entries are tombstoned (see
+  ## `removeArg`).
   var i = 0
   while i < n.entries.len:
     if n.entries[i].kind == keProperty and
        doc.interner.equals(n.entries[i].propName, name):
+      ensureMutState(n)
+      if isParsedEntry(n.entries[i]):
+        n.mutState.removedEntries.add(n.entries[i])
       n.entries.delete(i)
+      n.mutState.dirty = true
       doc.mutated = true
       return true
     inc i
@@ -638,22 +727,34 @@ proc removeProp*(n: var KdlNode, doc: var KdlDoc, name: string): bool =
 
 proc removeChild*(n: var KdlNode, doc: var KdlDoc, name: string): int =
   ## Remove every child whose name matches. Returns the number removed.
+  ## Parsed children are tombstoned (see `removeArg`).
   var i = 0
   while i < n.children.len:
     if doc.interner.equals(n.children[i].name, name):
+      ensureMutState(n)
+      if isParsedNode(n.children[i]):
+        n.mutState.removedChildren.add(n.children[i])
       n.children.delete(i)
       inc result
     else:
       inc i
-  if result > 0: doc.mutated = true
+  if result > 0:
+    n.mutState.dirty = true
+    doc.mutated = true
 
 proc replaceChild*(n: var KdlNode, doc: var KdlDoc, name: string,
                    replacement: sink KdlNode): bool =
   ## Replace the first child with the given name. Returns true iff a
-  ## match was found and replaced.
+  ## match was found and replaced. The original (if parsed) is
+  ## tombstoned so the preserving encoder can skip its source bytes
+  ## while emitting the replacement canonically.
   for i in 0 ..< n.children.len:
     if doc.interner.equals(n.children[i].name, name):
+      ensureMutState(n)
+      if isParsedNode(n.children[i]):
+        n.mutState.removedChildren.add(n.children[i])
       n.children[i] = replacement
+      n.mutState.dirty = true
       doc.mutated = true
       return true
   false
@@ -661,15 +762,18 @@ proc replaceChild*(n: var KdlNode, doc: var KdlDoc, name: string,
 proc setName*(n: var KdlNode, doc: var KdlDoc, name: string) {.inline.} =
   ## Change the node's name. Interns the new name via the doc.
   n.name = doc.interner.intern(name)
+  ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
 proc setTypeAnnotation*(n: var KdlNode, doc: var KdlDoc, tag: string) {.inline.} =
   ## Tag the node with a type annotation.
   n.typeAnnotation = doc.interner.intern(tag)
+  ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
 proc clearTypeAnnotation*(n: var KdlNode, doc: var KdlDoc) {.inline.} =
   n.typeAnnotation = InvalidInterned
+  ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
 proc setTypeAnnotation*(v: var KdlValue, doc: var KdlDoc, tag: string) {.inline.} =
@@ -707,9 +811,13 @@ proc migrateValue*(srcDoc: KdlDoc, dstDoc: var KdlDoc, v: var KdlValue) =
 
 proc removeNode*(doc: var KdlDoc, name: string): int =
   ## Remove every top-level node with the given name. Returns count.
+  ## Parsed nodes are tombstoned (preserves their source spans for the
+  ## doc-level shape-change walk).
   var i = 0
   while i < doc.nodes.len:
     if doc.interner.equals(doc.nodes[i].name, name):
+      if isParsedNode(doc.nodes[i]):
+        doc.removedNodes.add(doc.nodes[i])
       doc.nodes.delete(i)
       inc result
     else:
@@ -719,9 +827,12 @@ proc removeNode*(doc: var KdlDoc, name: string): int =
 proc replaceNode*(doc: var KdlDoc, name: string,
                   replacement: sink KdlNode): bool =
   ## Replace the first top-level node with the given name. Returns true
-  ## iff a match was found and replaced.
+  ## iff a match was found and replaced. Parsed originals are
+  ## tombstoned.
   for i in 0 ..< doc.nodes.len:
     if doc.interner.equals(doc.nodes[i].name, name):
+      if isParsedNode(doc.nodes[i]):
+        doc.removedNodes.add(doc.nodes[i])
       doc.nodes[i] = replacement
       doc.mutated = true
       return true

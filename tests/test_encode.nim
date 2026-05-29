@@ -210,6 +210,26 @@ suite "encode: edge cases":
     roundTrip("rule {\n}"):
       discard
 
+  test "float.high round-trips losslessly (proptest counterexample)":
+    # Proptest property `special floats round-trip` found that the
+    # encoder's previous `$float` formatter dropped a digit near
+    # `float.high`, producing a string that re-parsed to a slightly
+    # different double. Switched to 17-sig-digit formatBiggestFloat —
+    # the IEEE 754 round-trip minimum.
+    var d = newDoc()
+    var n = newNode(d, "x")
+    n.addArg(d, newFloatValue(1.7976931348623157e308))   # float.high
+    d.add(n)
+    let text = encode(d, emPretty)
+    let r = parse(text)
+    check r.isOk
+    if r.isOk:
+      check r.get.nodes.len == 1
+      check r.get.nodes[0].entries.len == 1
+      let v = r.get.nodes[0].entries[0].argValue
+      check v.kind == kvFloat
+      check v.floatVal == 1.7976931348623157e308
+
 suite "encode: big integers (slice-6, kvBigInt)":
   test "hex literal exceeding int64.high but fitting uint64":
     # Spec corpus hex.kdl: 0xabcdef1234567890 = 12379813812177893520

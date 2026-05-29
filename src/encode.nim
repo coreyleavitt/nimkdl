@@ -32,19 +32,22 @@
 ## is *not* guaranteed — the encoder normalizes whitespace, number bases,
 ## and equivalent identifier forms.
 ##
-## ## Implementation note: splice paths and bounds
+## ## Implementation note: forward-walk preserve emit
 ##
-## The `emPreserve` surgical-splice path writes into a buffer derived
-## from the original `doc.sourceText`. **Splice offsets must always be
-## bounds-checked against the buffer's CURRENT length**, not the
-## original sourceText length — earlier splices in the loop may have
-## changed it. Splicing with stale offsets silently corrupts output
-## (Nim's string slicing returns empty / full strings rather than
-## crashing). The splice loops here use `anyBadBounds` flags + a
-## canonicalEmit fall-back to detect and recover; do not reintroduce
-## an unguarded `output[s..<e]` style splice anywhere in this file.
+## `emPreserve` uses a **forward-walk with monotonic cursor** at both
+## the document and node levels (`encode` doc-block, `emitPreserveNode`).
+## Reads come from immutable `doc.sourceText`; writes append to a fresh
+## output buffer. There is no in-place splicing into a buffer whose
+## offsets are simultaneously being mutated — that pattern (rounds 2-5
+## of the historical code review) silently corrupts output because
+## Nim's string slicing returns empty / full strings rather than
+## crashing on out-of-range bounds. Each iteration of the walk
+## bounds-checks the next item's span against the current cursor; any
+## overlap / out-of-order span falls the whole walk back to canonical
+## emit. Do not reintroduce `output = output[0..<s] & x & output[e..<output.len]`
+## style splices anywhere in this file.
 
-import std/strutils
+import std/[algorithm, strutils]
 
 import ./ast
 import ./fnv
@@ -84,12 +87,12 @@ const
     ## and stack-overflow the recursive emitters. Guarding at the same
     ## threshold means encode rejects exactly what decode would have.
     ## Overflow semantics live with the affected emitters (`emitNode`,
-    ## `emitNodePreserveAndHash`, `kdlEncodeIntoImpl`).
+    ## `emitPreserveNode`, `kdlEncodeIntoImpl`).
 
   Indents = (proc(): array[PrecomputedIndentLevels, string] =
     for i in 0 ..< PrecomputedIndentLevels:
       result[i] = PrettyIndent.repeat(i))()
-    ## Pre-computed indent strings for `emitNode` / `emitNodePreserve` so
+    ## Pre-computed indent strings for `emitNode` / `emitPreserveNode` so
     ## the hot path looks up `Indents[indent]` instead of allocating
     ## `PrettyIndent.repeat(indent)` per node.
 
@@ -210,10 +213,17 @@ func appendFloat*(buf: var string, f: float) {.noSideEffect.} =
   ## Direct-buffer counterpart to `emitFloat`. Same special-value mapping
   ## (`Inf`/`NegInf`/`NaN` → `#inf`/`#-inf`/`#nan`).
   ## **Keep in sync with `emitFloat` further down.**
+  ##
+  ## Precision: 17 significant digits — the IEEE 754 minimum to
+  ## guarantee `float ↔ string ↔ float` round-trip for ALL doubles.
+  ## Nim's default `$float` uses a shorter form that loses a digit
+  ## near `float.high` / `float.low` (proptest counterexample
+  ## 2026-05-28). Don't shrink without verifying round-trip on the
+  ## full corpus of float bit patterns.
   if f == Inf: buf.add("#inf"); return
   if f == NegInf: buf.add("#-inf"); return
   if f != f: buf.add("#nan"); return
-  let s = $f
+  let s = formatBiggestFloat(f, ffDefault, 17)
   buf.add(s)
   if '.' notin s and 'e' notin s and 'E' notin s:
     buf.add(".0")
@@ -268,16 +278,17 @@ func appendFieldValue*[T: enum](buf: var string, e: T) {.noSideEffect, inline.} 
 # ---------------------------------------------------------------------------
 
 func emitFloat(f: float): string =
-  ## Canonical float format. Specials go through v2 keywords; finite values
-  ## use Nim's default repr (which rounds to short-but-stable text).
+  ## Canonical float format. Specials go through v2 keywords; finite
+  ## values use 17 significant digits (IEEE 754 round-trip minimum;
+  ## see `appendFloat`'s precision note).
   ## **Keep in sync with `appendFloat` above** — the two are paired
   ## (AST-path vs direct-buffer-path); any new special-value or
   ## fraction-shape rule must land in both.
   if f == Inf: return "#inf"
   if f == NegInf: return "#-inf"
   if f != f: return "#nan"  # NaN
+  let s = formatBiggestFloat(f, ffDefault, 17)
   # Force a fractional component so re-parsing classifies as float
-  let s = $f
   if '.' in s or 'e' in s or 'E' in s:
     s
   else:
@@ -495,15 +506,24 @@ func hashNodeContent*(n: KdlNode, interner: Interner): Hash128 =
   for i, c in n.children: childHashes[i] = hashNodeContent(c, interner)
   hashNodeFromChildHashes(n, interner, childHashes)
 
-func emitNamePart(n: KdlNode, interner: Interner): string =
-  ## The "head" of a node — type annotation + name + entries — without
-  ## the children block or trailing newline. Shared between canonical
-  ## emit and the preserving emit's mismatched-subtree case.
+func emitNameHead(n: KdlNode, interner: Interner): string =
+  ## Just `(tag)name` — the framing bytes whose source-side end is
+  ## located by `KdlNode.headLen` (relative to `span.start`). Used by
+  ## the preserving emit's framing-only-edit path: emit the new
+  ## framing, then preserve `sourceText[span.start + headLen ..<
+  ## span.finish]` verbatim.
   if n.typeAnnotation != InvalidInterned:
     result.add('(')
     result.add(emitIdent(interner.lookup(n.typeAnnotation)))
     result.add(')')
   result.add(emitIdent(interner.lookup(n.name)))
+
+func emitNamePart(n: KdlNode, interner: Interner): string =
+  ## `(tag)name` plus entries inline, joined by single spaces — the
+  ## full node head without the children block or trailing newline.
+  ## Shared between canonical emit and the preserving emit's
+  ## shape-changed / span-malformed fallback paths.
+  result = emitNameHead(n, interner)
   for e in n.entries:
     result.add(' ')
     result.add(emitEntry(e, interner))
@@ -515,7 +535,7 @@ func validSpanInto(span: Span, source: string): bool {.inline.} =
 
 func feedEntryInto(h: var Hash128, e: KdlEntry, interner: Interner) =
   ## Fold an entry's content into a running hash. Extracted so
-  ## `hashNodeContent` and `emitNodePreserveAndHash` share one
+  ## `hashNodeContent` and `emitPreserveNode` share one
   ## implementation; refactor of the inline block previously duplicated
   ## across both.
   fnv128Update(h, 0x1f'u8)                       # US — entry framing
@@ -550,50 +570,60 @@ func hashNodeFromChildHashes*(n: KdlNode, interner: Interner,
     fnv128Update(result, 0x1e'u8)
     fnv128Mix(result, ch)
 
-func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
-                             tuple[text: string, hash: Hash128]
-
-func emitNodePreserve(n: KdlNode, doc: KdlDoc, indent: int): string {.inline.} =
-  emitNodePreserveAndHash(n, doc, indent).text
-
-func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
-                             tuple[text: string, hash: Hash128] =
-  ## Preservation strategy — bottom-up. Each call recurses into children
-  ## first, collects `(childText, childHash)` pairs, then computes `n`'s
-  ## own hash from those pre-computed child hashes via
-  ## `hashNodeFromChildHashes`. Net effect: every node in the subtree is
-  ## hashed exactly once per encode pass, regardless of how deep the
-  ## tree is. (Previous implementation called `hashNodeContent(n)` at
-  ## each level, which recursed through the full subtree — O(N²)
-  ## total hashing per encode.)
+func emitPreserveNode(n: KdlNode, doc: KdlDoc, indent: int):
+                      tuple[text: string, subtreeDirty: bool] =
+  ## Preservation strategy — dirty-flag-based cleanness + forward-walk
+  ## emit.
   ##
-  ## Branch logic mirrors the original five cases:
+  ## Cleanness is propagated bottom-up via the `dirty` flag set by
+  ## mutators: `subtreeDirty = n.dirty or any(child.subtreeDirty)`.
+  ## O(1) per node — replaces the previous O(content-size) per-node
+  ## hash computation. Tradeoff: raw field mutation (bypassing the
+  ## builder API) is no longer detected per-node in release builds;
+  ## the doc-level debug check in `encode()` remains the safety net.
   ##
-  ## 1. No valid span → canonical emit (built-from-scratch node).
-  ## 2. Hash matches parseHash → emit source bytes verbatim.
-  ## 3. Shape change (entry/child count diverged) → canonical for this
-  ##    node only (siblings still preserve via their own results).
-  ## 4. In-place changes → surgical textual splice into source bytes.
-  ## 5. No element-level splice fired but hash mismatched → the change
-  ##    is in name or type annotation; canonical fallback for this node.
+  ## Emit is a forward walk: when the subtree is dirty but the node's
+  ## entry/child *shape* is unchanged, build the output by walking
+  ## `doc.sourceText[n.span.start ..< n.span.finish]` left-to-right with
+  ## a monotonically-advancing `cursor`. For each entry/child in source
+  ## order, append the trivia between `cursor` and the item's start,
+  ## append the item's text (source bytes if clean, canonical if dirty),
+  ## then advance `cursor`. Finish with the trailing bytes from the last
+  ## item to the node's end.
+  ##
+  ## Reads come from immutable `doc.sourceText`; writes append to a
+  ## fresh `output` buffer. No offset arithmetic against a mutating
+  ## buffer — the splice anti-pattern that drove the round 2-5 bug
+  ## spiral cannot be expressed in this code.
+  ##
+  ## Per-entry "dirty" detection: `not isParsedEntry(e)` — replaced
+  ## entries (setProp/setArg construct a fresh KdlEntry; parseHash
+  ## resets to zero) AND brand-new entries (added via builder API)
+  ## both signal as dirty. Original parsed entries pass.
+  ##
+  ## Branches:
+  ## 1. No valid span (built-from-scratch) → canonical.
+  ## 2. `not subtreeDirty` → emit source bytes verbatim.
+  ## 3. Shape change (entry/child count diverged) → tombstone walk
+  ##    (delegated higher up in this function).
+  ## 4. Framing-only edit (no item dirty, `headLen` populated) →
+  ##    canonical head + preserved interior.
+  ## 5. Dirty but shape preserved → forward-walk emit.
+  ## 6. Forward walk hit out-of-range / out-of-order spans → canonical.
   if indent > MaxEncodeDepth:
-    # ValueError, not AssertionDefect — see emitNode's header for why.
     raise newException(ValueError,
       "encode(emPreserve): node nesting exceeded MaxEncodeDepth (" &
       $MaxEncodeDepth & ")")
   let pad = indentStr(indent)
 
-  # Recurse to children first. This is the linchpin of the linear-hash
-  # property: each child computes its own hash bottom-up exactly once.
-  var childResults: seq[tuple[text: string, hash: Hash128]]
+  var childResults: seq[tuple[text: string, subtreeDirty: bool]]
   childResults.setLen(n.children.len)
-  var childHashes = newSeq[Hash128](n.children.len)
+  var anyChildDirty = false
   for i in 0 ..< n.children.len:
-    childResults[i] = emitNodePreserveAndHash(n.children[i], doc, indent + 1)
-    childHashes[i] = childResults[i].hash
+    childResults[i] = emitPreserveNode(n.children[i], doc, indent + 1)
+    if childResults[i].subtreeDirty: anyChildDirty = true
 
-  let myHash = hashNodeFromChildHashes(n, doc.interner, childHashes)
-  result.hash = myHash
+  result.subtreeDirty = n.dirty or anyChildDirty
 
   template canonicalEmit() =
     result.text = pad & emitNamePart(n, doc.interner)
@@ -605,90 +635,202 @@ func emitNodePreserveAndHash(n: KdlNode, doc: KdlDoc, indent: int):
       result.text.add(pad & "}")
 
   if not validSpanInto(n.span, doc.sourceText):
-    canonicalEmit()
-    return
+    canonicalEmit(); return
 
-  if myHash == n.parseHash:
+  if not result.subtreeDirty:
     result.text = doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
     return
 
+  let nodeStart = n.span.start.offset
+  let nodeEnd = n.span.finish.offset
   let entriesShape = n.entries.len == int(n.parseEntryCount)
   let childrenShape = n.children.len == int(n.parseChildCount)
 
   if not (entriesShape and childrenShape):
-    canonicalEmit()
+    # Shape-change path. Walk originals (live + tombstoned) in source
+    # order: live → emit (source bytes or canonical based on per-item
+    # hash); tombstoned → advance cursor without emitting. New entries
+    # canonical-append after the entries section; new children either
+    # canonical-append inside the existing children block, or wrap a
+    # fresh ` {…}` block if the source had no children. Same forward-
+    # walk invariants as the shape-preserved path — out-of-order /
+    # malformed spans fall back to canonicalEmit.
+    type OrigItem = object
+      span: Span
+      liveIdx: int         ## index into n.entries / n.children; -1 if tombstoned
+    var origEntries: seq[OrigItem]
+    for i, e in n.entries:
+      if isParsedEntry(e): origEntries.add(OrigItem(span: e.span, liveIdx: i))
+    if n.mutState != nil:
+      for e in n.mutState.removedEntries:
+        if isParsedEntry(e): origEntries.add(OrigItem(span: e.span, liveIdx: -1))
+    var origChildren: seq[OrigItem]
+    for i, c in n.children:
+      if isParsedNode(c): origChildren.add(OrigItem(span: c.span, liveIdx: i))
+    if n.mutState != nil:
+      for c in n.mutState.removedChildren:
+        if isParsedNode(c): origChildren.add(OrigItem(span: c.span, liveIdx: -1))
+    # Source-order sort (parsed seqs are typically already ordered, but
+    # tombstones may be appended out of order).
+    proc cmpByStart(a, b: OrigItem): int =
+      cmp(a.span.start.offset, b.span.start.offset)
+    origEntries.sort(cmpByStart)
+    origChildren.sort(cmpByStart)
+    # Collect new (builder-API-constructed) items.
+    var newEntries: seq[KdlEntry]
+    for e in n.entries:
+      if not isParsedEntry(e): newEntries.add(e)
+    var newChildIdxs: seq[int]
+    for i, c in n.children:
+      if not isParsedNode(c): newChildIdxs.add(i)
+    # `headEnd = span.start + headLen` is the anchor — interior starts
+    # right after the (tag)name framing. Zero `headLen` means the
+    # parser didn't populate it (built-from-scratch node).
+    let headEnd = nodeStart + int(n.headLen)
+    if n.headLen == 0 or headEnd > nodeEnd:
+      canonicalEmit(); return
+    var sOut = pad & emitNameHead(n, doc.interner)
+    var cursor = headEnd
+    var shapeFellBack = false
+    block shapeWalk:
+      # ---- entries section ----
+      for it in origEntries:
+        if not validSpanInto(it.span, doc.sourceText):
+          shapeFellBack = true; break shapeWalk
+        let s = it.span.start.offset
+        let e = it.span.finish.offset
+        if s < cursor or e > nodeEnd or e < s:
+          shapeFellBack = true; break shapeWalk
+        if it.liveIdx >= 0:
+          let live = n.entries[it.liveIdx]
+          sOut.add(doc.sourceText[cursor ..< s])
+          if isParsedEntry(live) and hashEntry(live, doc.interner) == live.parseHash:
+            sOut.add(doc.sourceText[s ..< e])
+          else:
+            sOut.add(emitEntry(live, doc.interner))
+        # Tombstoned → skip; cursor advance absorbs the deleted span,
+        # including its leading trivia (the space before it).
+        cursor = e
+      for ne in newEntries:
+        sOut.add(' ')
+        sOut.add(emitEntry(ne, doc.interner))
+      # ---- children section ----
+      let hadOriginalChildren = origChildren.len > 0
+      let addingChildren = newChildIdxs.len > 0
+      if hadOriginalChildren:
+        # Preserve original ` {\n` opener via trivia from cursor.
+        for it in origChildren:
+          if not validSpanInto(it.span, doc.sourceText):
+            shapeFellBack = true; break shapeWalk
+          let s = it.span.start.offset
+          let e = it.span.finish.offset
+          if s < cursor or e > nodeEnd or e < s:
+            shapeFellBack = true; break shapeWalk
+          if it.liveIdx >= 0:
+            sOut.add(doc.sourceText[cursor ..< s])
+            sOut.add(childResults[it.liveIdx].text)
+          cursor = e
+        # New children: inject after the last original child, BEFORE the
+        # closing brace. Trailing source bytes after `cursor` include
+        # ` }` (and any trailing newline).
+        for idx in newChildIdxs:
+          sOut.add('\n')
+          sOut.add(emitNode(n.children[idx], doc.interner, emPretty,
+                            indent + 1))
+        sOut.add(doc.sourceText[cursor ..< nodeEnd])
+      elif addingChildren:
+        # No source ` {…}` block exists. Emit trailing entry-section
+        # bytes (whitespace), then synthesize a fresh canonical block.
+        # Caveat: original trailing trivia is replaced by ` {…}` plus a
+        # synthetic newline at the end.
+        sOut.add(" {\n")
+        for idx in newChildIdxs:
+          sOut.add(emitNode(n.children[idx], doc.interner, emPretty,
+                            indent + 1))
+          sOut.add('\n')
+        sOut.add(pad & "}")
+      else:
+        # No original children + no new children: emit trailing bytes
+        # from the entries section (typically a newline / end of node).
+        sOut.add(doc.sourceText[cursor ..< nodeEnd])
+
+    if shapeFellBack:
+      canonicalEmit()
+    else:
+      result.text = sOut
     return
 
-  # In-place edits only. Take source bytes, splice modified pieces.
-  # Walk children + entries by DESCENDING source span so each splice
-  # leaves earlier offsets unchanged. Children all live AFTER entries
-  # in source order (entries are inline before `{`; children are
-  # inside `{ ... }`), so children come first in the reverse walk.
-  var output = doc.sourceText[n.span.start.offset ..< n.span.finish.offset]
-  let base = n.span.start.offset
-  var anySpliced = false
+  # Forward-walk emit. Entries always precede children in KDL source
+  # order (entries inline; children inside `{...}`), and within each
+  # list the parser preserves source order — so two sequential loops
+  # sharing one cursor cover the whole node span.
+  var output = ""
+  var cursor = nodeStart
+  var fellBack = false
+  # Track whether any entry/child diverges from its parseHash. If
+  # nothing in the walk is dirty but the node-level hash still
+  # mismatches, the divergence must be in `name` or `typeAnnotation`
+  # (the framing bytes before the first entry / between sections that
+  # the walk preserves verbatim from source). Those edits can't be
+  # expressed by replacing an entry or child — fall back to canonical.
+  var anyItemDirty = false
 
-  # Splice-bounds guard: `output` is the parent node's source slice.
-  # `s` and `e` are child-relative offsets (`c.span.start - parent.start`).
-  # A well-formed parser-produced AST guarantees `0 <= s < e <= output.len`.
-  # A programmatically-constructed AST (test helpers, future mutation APIs)
-  # can violate this — and Nim's string slicing on out-of-range bounds
-  # SILENTLY returns the wrong substring (negative high → empty slice,
-  # over-range → full string), producing doubled/corrupted output rather
-  # than a crash. Treat any out-of-range span as malformed: skip the
-  # splice and fall through to canonicalEmit (see post-loop).
-  template safeSpliceBounds(spanS, spanE: int): bool =
-    spanS >= 0 and spanE >= spanS and spanE <= output.len
+  block walk:
+    for entry in n.entries:
+      if not validSpanInto(entry.span, doc.sourceText):
+        fellBack = true; break walk
+      let s = entry.span.start.offset
+      let e = entry.span.finish.offset
+      if s < cursor or e > nodeEnd or e < s:
+        fellBack = true; break walk
+      output.add(doc.sourceText[cursor ..< s])
+      # Per-entry cleanness uses the hash compare (cheap: just one
+      # entry's content) so we catch raw field mutation through
+      # `entries[i].argValue.strVal = ...`. The expensive bottom-up
+      # *node* hashing is what dirty-flag caching skipped.
+      if isParsedEntry(entry) and hashEntry(entry, doc.interner) == entry.parseHash:
+        output.add(doc.sourceText[s ..< e])
+      else:
+        output.add(emitEntry(entry, doc.interner))
+        anyItemDirty = true
+      cursor = e
+    for i in 0 ..< n.children.len:
+      let c = n.children[i]
+      if not validSpanInto(c.span, doc.sourceText):
+        fellBack = true; break walk
+      let s = c.span.start.offset
+      let e = c.span.finish.offset
+      if s < cursor or e > nodeEnd or e < s:
+        fellBack = true; break walk
+      output.add(doc.sourceText[cursor ..< s])
+      output.add(childResults[i].text)
+      if childResults[i].subtreeDirty:
+        anyItemDirty = true
+      cursor = e
+    output.add(doc.sourceText[cursor ..< nodeEnd])
 
-  # Track bad-bounds separately from anySpliced. If ANY child/entry has
-  # malformed spans — whether against `doc.sourceText` (validSpanInto)
-  # or against the local `output` we're splicing into (safeSpliceBounds)
-  # — the partial splices we'd return would interleave spliced bytes
-  # with stale source bytes for the malformed slot, silently. Force
-  # canonicalEmit when any malformed-span skip fired, regardless of
-  # whether OTHER splices succeeded (round-4 H2 fixed safeSpliceBounds
-  # path; round-5 H1 extends to the sibling validSpanInto checks).
-  var anyBadBounds = false
-
-  for i in countdown(n.children.high, 0):
-    let c = n.children[i]
-    if not validSpanInto(c.span, doc.sourceText):
-      anyBadBounds = true
-      continue
-    # Skip clean children via hash compare — zero-alloc, no string compare.
-    if childResults[i].hash == c.parseHash: continue
-    let s = c.span.start.offset - base
-    let e = c.span.finish.offset - base
-    if not safeSpliceBounds(s, e):
-      anyBadBounds = true
-      continue
-    output = output[0 ..< s] & childResults[i].text & output[e ..< output.len]
-    anySpliced = true
-
-  for i in countdown(n.entries.high, 0):
-    let entry = n.entries[i]
-    if not validSpanInto(entry.span, doc.sourceText):
-      anyBadBounds = true
-      continue
-    if hashEntry(entry, doc.interner) == entry.parseHash: continue
-    let s = entry.span.start.offset - base
-    let e = entry.span.finish.offset - base
-    if not safeSpliceBounds(s, e):
-      anyBadBounds = true
-      continue
-    output = output[0 ..< s] & emitEntry(entry, doc.interner) &
-             output[e ..< output.len]
-    anySpliced = true
-
-  if anyBadBounds or not anySpliced:
-    # Either no splice fired (the node-level hash mismatch must be in
-    # the node's name or type annotation — fall back), or some splice
-    # was skipped due to malformed spans (the partial result would
-    # interleave fresh + stale bytes silently — fall back too).
+  if fellBack:
     canonicalEmit()
-    return
-
-  result.text = output
+  elif not anyItemDirty:
+    # subtreeDirty was true (n.dirty or some descendant dirty) but the
+    # forward walk found every entry + child clean. The divergence
+    # must be in this node's own `name` or `typeAnnotation` (set by
+    # `setName` / `setTypeAnnotation`, which flip `n.dirty` directly).
+    # Emit the new `(tag)name` canonically, then preserve
+    # `sourceText[span.start + headLen ..< span.finish]` verbatim —
+    # that's the original head-to-interior whitespace, entries with
+    # original inter-entry spacing, children block layout, and
+    # trailing bytes. Requires `headLen` populated by the parser
+    # (zero for built-from-scratch nodes).
+    let headEnd = nodeStart + int(n.headLen)
+    if n.headLen > 0'u32 and headEnd <= nodeEnd:
+      var out2 = pad & emitNameHead(n, doc.interner)
+      out2.add(doc.sourceText[headEnd ..< nodeEnd])
+      result.text = out2
+    else:
+      canonicalEmit()
+  else:
+    result.text = output
 
 func encode*(doc: KdlDoc, mode = emPreserve): string =
   ## Render `doc` to KDL v2 text.
@@ -732,61 +874,70 @@ func encode*(doc: KdlDoc, mode = emPreserve): string =
               "builder API (setProp / addArg / setArg / etc.) which " &
               "flips the flag for you.")
       return doc.sourceText
-    # Doc-level splice: when sourceText is present and the top-level
-    # node count hasn't changed, walk nodes in reverse and replace
-    # each one's bytes with `emitNodePreserve` output. This preserves
-    # inter-node trivia — header comments, blank lines between
-    # siblings, the trailing newline of the file — for free.
-    let topShape = int(doc.parseTopLevelCount) == doc.nodes.len
-    var anyBadBounds = false
-    if doc.sourceText.len > 0 and topShape:
-      result = doc.sourceText
-      # `result` is progressively mutated in reverse-index order. Each
-      # iteration's span values came from the parser against the
-      # ORIGINAL sourceText length, but the splice writes into the
-      # current (mutated) `result`. After an earlier splice changed
-      # the buffer length, a later span MAY now overshoot `result.len`
-      # — or, for programmatically-constructed ASTs with overlapping
-      # top-level spans, the splice indices could land in already-
-      # rewritten territory. Nim's string slicing doesn't crash on
-      # out-of-range bounds; it silently returns the wrong substring,
-      # producing doubled / missing bytes. Detect that and fall back
-      # to canonical per-node emit for the whole doc (round-4 H1 +
-      # round-5 H1 extension, mirrors the per-child safeSpliceBounds
-      # guard from round 2).
-      #
-      # Naming: `anyBadBounds` matches the node-level loop's flag in
-      # emitNodePreserveAndHash. Same concept, same recovery action.
-      for i in countdown(doc.nodes.high, 0):
-        let n = doc.nodes[i]
-        if not validSpanInto(n.span, doc.sourceText):
-          anyBadBounds = true
-          break
-        let s = n.span.start.offset
-        let e = n.span.finish.offset
-        if s < 0 or e < s or e > result.len:
-          anyBadBounds = true
-          break
-        let nodeOut = emitNodePreserve(n, doc, 0)
-        let nodeSource = doc.sourceText[s ..< e]
-        if nodeOut != nodeSource:
-          result = result[0 ..< s] & nodeOut & result[e ..< result.len]
-      if not anyBadBounds:
-        return result
-    # One of:
-    #   - sourceText empty (built-from-scratch doc)
-    #   - structural change at the top level (parseTopLevelCount mismatch)
-    #   - bad bounds in the splice loop above (anyBadBounds set)
-    # In any of those cases, fall back to per-node emit joined by
-    # newlines. `result` may hold a partially-spliced doc.sourceText
-    # from the loop above — the assignment below replaces it from
-    # scratch, so the partial mutations are discarded. Reset
-    # explicitly so the invariant is local to this block rather than
-    # relying on the assignment order.
-    result = ""
+    # Doc-level tombstone-aware forward walk. Reads doc.sourceText
+    # left-to-right with a monotonically-advancing cursor. Original
+    # nodes — live (preserved + their own forward-walk-emit handles
+    # interior) and tombstoned (skipped) — interleave in source order;
+    # inter-node trivia (header comments, blank lines, the trailing
+    # newline) emits verbatim from sourceText. New (builder-API)
+    # top-level nodes canonical-append after the last original. Falls
+    # back to scratch emit (parts.join) on malformed spans / overlap /
+    # out-of-order.
+    if doc.sourceText.len > 0:
+      var nodeResults: seq[tuple[text: string, subtreeDirty: bool]]
+      nodeResults.setLen(doc.nodes.len)
+      for i in 0 ..< doc.nodes.len:
+        nodeResults[i] = emitPreserveNode(doc.nodes[i], doc, 0)
+      type OrigDocItem = object
+        span: Span
+        liveIdx: int     ## index into doc.nodes; -1 if tombstoned
+      var origNodes: seq[OrigDocItem]
+      for i, n in doc.nodes:
+        if isParsedNode(n):
+          origNodes.add(OrigDocItem(span: n.span, liveIdx: i))
+      for n in doc.removedNodes:
+        if isParsedNode(n):
+          origNodes.add(OrigDocItem(span: n.span, liveIdx: -1))
+      proc cmpStart(a, b: OrigDocItem): int =
+        cmp(a.span.start.offset, b.span.start.offset)
+      origNodes.sort(cmpStart)
+      var newNodeIdxs: seq[int]
+      for i, n in doc.nodes:
+        if not isParsedNode(n): newNodeIdxs.add(i)
+      let srcLen = doc.sourceText.len
+      var output = ""
+      var cursor = 0
+      var fellBack = false
+      block walkDoc:
+        for it in origNodes:
+          if not validSpanInto(it.span, doc.sourceText):
+            fellBack = true; break walkDoc
+          let s = it.span.start.offset
+          let e = it.span.finish.offset
+          if s < cursor or e > srcLen or e < s:
+            fellBack = true; break walkDoc
+          if it.liveIdx >= 0:
+            output.add(doc.sourceText[cursor ..< s])
+            output.add(nodeResults[it.liveIdx].text)
+          # Tombstoned → advance cursor past the deleted node's bytes
+          # without emit (including its leading inter-node trivia,
+          # which belonged to the removed node's neighborhood).
+          cursor = e
+        # Append new top-level nodes canonical, separated by newline.
+        for idx in newNodeIdxs:
+          if output.len > 0 and not output.endsWith("\n"):
+            output.add("\n")
+          output.add(nodeResults[idx].text)
+        # Trailing source bytes (file-final newline, trailing comments).
+        output.add(doc.sourceText[cursor ..< srcLen])
+      if not fellBack:
+        return output
+      # Malformed spans → fall through to scratch emit.
+    # Scratch emit: no sourceText / malformed spans. Loses inter-node
+    # trivia but produces a correct doc.
     var parts: seq[string] = @[]
     for n in doc.nodes:
-      parts.add(emitNodePreserve(n, doc, 0))
+      parts.add(emitPreserveNode(n, doc, 0).text)
     result = parts.join("\n")
     if result.len > 0:
       result.add("\n")
