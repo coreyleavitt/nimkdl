@@ -342,3 +342,58 @@ suite "derive_encode — C8: enum fields":
     var e = newBufferEmitter()
     kdlEncode(a, e)
     check e.finish() == "alert \"disk\"\n"
+
+suite "derive_encode — C9: variant (case object)":
+
+  type Effect = enum
+    efDeny = "deny"
+    efAllow = "allow"
+
+  type Action9 {.kdlNode: "action".} = object
+    case kind {.kdlArg.}: Effect
+    of efDeny:
+      reason {.kdlProp.}: string
+    of efAllow:
+      quota {.kdlProp.}: int
+
+  deriveEncode(Action9)
+
+  test "variant — efDeny branch emits its branch field":
+    var a = Action9(kind: efDeny, reason: "blocked")
+    var e = newBufferEmitter()
+    kdlEncode(a, e)
+    check e.finish() == "action \"deny\" reason=\"blocked\"\n"
+
+  test "variant — efAllow branch emits its different branch field":
+    var a = Action9(kind: efAllow, quota: 1000)
+    var e = newBufferEmitter()
+    kdlEncode(a, e)
+    check e.finish() == "action \"allow\" quota=1000\n"
+
+  type Shape = enum
+    skCircle = "circle"
+    skSquare = "square"
+    skEmpty = "empty"
+
+  type Drawing {.kdlNode: "drawing".} = object
+    case kind {.kdlArg.}: Shape
+    of skCircle:
+      radius {.kdlProp.}: float
+    of skSquare:
+      side {.kdlProp.}: float
+    of skEmpty:
+      discard  # branch with no fields
+
+  deriveEncode(Drawing)
+
+  test "variant — branch with no fields emits only discriminator":
+    var d = Drawing(kind: skEmpty)
+    var e = newBufferEmitter()
+    kdlEncode(d, e)
+    check e.finish() == "drawing \"empty\"\n"
+
+  test "variant — circle branch":
+    var d = Drawing(kind: skCircle, radius: 1.5)
+    var e = newBufferEmitter()
+    kdlEncode(d, e)
+    check e.finish() == "drawing \"circle\" radius=1.5\n"

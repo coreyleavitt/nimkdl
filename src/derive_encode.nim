@@ -63,31 +63,44 @@ proc nodeNameOf(typeSym: NimNode): string =
     if result[i] in {'A' .. 'Z'}:
       result[i] = char(uint8(result[i]) + 32)
 
-iterator objectFields(typeSym: NimNode): tuple[name: string, typ: NimNode,
-                                               pragmas: seq[NimNode]] =
-  ## Walk the field list of T's object type, yielding (name, type, pragma-seq)
-  ## for each field. Pragmas come from the field's IdentDefs[0] = PragmaExpr
-  ## branch.
+proc fieldInfo(identDefs: NimNode, fieldIdx: int):
+    tuple[name: string, pragmas: seq[NimNode]] =
+  ## Read (name, pragmas) for the `fieldIdx`-th field of an IdentDefs.
+  let fieldNameNode = identDefs[fieldIdx]
+  if fieldNameNode.kind == nnkPragmaExpr:
+    result.name = $fieldNameNode[0]
+    for p in fieldNameNode[1]:
+      result.pragmas.add(p)
+  else:
+    result.name = $fieldNameNode
+
+iterator regularFields(recList: NimNode):
+    tuple[name: string, typ: NimNode, pragmas: seq[NimNode]] =
+  ## Walk a RecList yielding plain (non-variant) fields. Variant
+  ## structure (RecCase) is handled separately by `findVariant`.
+  for child in recList:
+    if child.kind != nnkIdentDefs: continue
+    let fieldType = child[^2]
+    for i in 0 ..< child.len - 2:
+      let info = fieldInfo(child, i)
+      yield (name: info.name, typ: fieldType, pragmas: info.pragmas)
+
+proc findRecCase(recList: NimNode): NimNode =
+  ## Return the variant's RecCase node, or nil if the object is not a
+  ## variant. KDL deriveEncode supports at most one variant per type
+  ## (the spec doesn't model nested variants cleanly anyway).
+  for child in recList:
+    if child.kind == nnkRecCase: return child
+  nil
+
+proc objectRecList(typeSym: NimNode): NimNode =
   let impl = typeSym.getImpl
   let objTy =
     if impl[2].kind == nnkObjectTy: impl[2]
     elif impl[2].kind == nnkRefTy and impl[2][0].kind == nnkObjectTy: impl[2][0]
     else: nil
   doAssert objTy != nil, "deriveEncode: expected an object or ref object type"
-  let recList = objTy[2]
-  for identDefs in recList:
-    let fieldType = identDefs[^2]
-    for i in 0 ..< identDefs.len - 2:
-      let fieldNameNode = identDefs[i]
-      var name: string
-      var pragmas: seq[NimNode]
-      if fieldNameNode.kind == nnkPragmaExpr:
-        name = $fieldNameNode[0]
-        for p in fieldNameNode[1]:
-          pragmas.add(p)
-      else:
-        name = $fieldNameNode
-      yield (name: name, typ: fieldType, pragmas: pragmas)
+  objTy[2]
 
 proc hasPragma(pragmas: seq[NimNode], name: string): bool =
   for p in pragmas:
@@ -235,11 +248,12 @@ macro deriveEncode*(T: typedesc): untyped =
   # present.
   type ChildKind = enum ckSingle, ckSeq, ckOption
   var childFields: seq[tuple[name: string, typ: NimNode, kind: ChildKind]]
-  for (fieldName, fieldType, pragmas) in objectFields(typeSym):
+  proc dispatchField(fieldName: string, fieldType: NimNode,
+                     pragmas: seq[NimNode], targetBody: var NimNode) =
     if hasPragma(pragmas, "kdlArg"):
-      emitArgPush(body, vSym, eSym, fieldName, fieldType)
+      emitArgPush(targetBody, vSym, eSym, fieldName, fieldType)
     elif hasPragma(pragmas, "kdlProp"):
-      emitPropPush(body, vSym, eSym, fieldName, fieldType)
+      emitPropPush(targetBody, vSym, eSym, fieldName, fieldType)
     elif hasPragma(pragmas, "kdlChild"):
       if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
         childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq))
@@ -248,6 +262,48 @@ macro deriveEncode*(T: typedesc): untyped =
                          kind: ckOption))
       else:
         childFields.add((name: fieldName, typ: fieldType, kind: ckSingle))
+  let topRecList = objectRecList(typeSym)
+  # Plain non-variant fields first (in declaration order).
+  for (fieldName, fieldType, pragmas) in regularFields(topRecList):
+    dispatchField(fieldName, fieldType, pragmas, body)
+  # Variant discriminator + per-branch dispatch.
+  let recCase = findRecCase(topRecList)
+  if recCase != nil:
+    # recCase[0] is the discriminator IdentDefs. Emit the discriminator
+    # field itself like a normal kdlArg/kdlProp at its declared position.
+    let discDefs = recCase[0]
+    let discType = discDefs[^2]
+    let (discName, discPragmas) = fieldInfo(discDefs, 0)
+    dispatchField(discName, discType, discPragmas, body)
+    # Build a `case v.<disc>: of <branchVal>: <branch body>` dispatch.
+    # Per-branch fields emit their kdlArg/kdlProp/kdlChild contributions
+    # inside the matching branch body.
+    let discIdent = ident(discName)
+    var caseStmt = newTree(nnkCaseStmt, newDotExpr(vSym, discIdent))
+    for i in 1 ..< recCase.len:
+      let branch = recCase[i]
+      var branchBody = newStmtList()
+      let branchRecList =
+        if branch.kind == nnkOfBranch: branch[^1]
+        elif branch.kind == nnkElse:   branch[0]
+        else: newEmptyNode()
+      if branchRecList.kind == nnkRecList:
+        for (fName, fType, fPragmas) in regularFields(branchRecList):
+          dispatchField(fName, fType, fPragmas, branchBody)
+      if branchBody.len == 0:
+        # Empty branches must still appear in the case to be exhaustive.
+        branchBody.add newNimNode(nnkDiscardStmt).add(newEmptyNode())
+      if branch.kind == nnkOfBranch:
+        var ofBranch = newNimNode(nnkOfBranch)
+        for j in 0 ..< branch.len - 1:
+          ofBranch.add(branch[j])
+        ofBranch.add(branchBody)
+        caseStmt.add(ofBranch)
+      elif branch.kind == nnkElse:
+        var elseBranch = newNimNode(nnkElse)
+        elseBranch.add(branchBody)
+        caseStmt.add(elseBranch)
+    body.add(caseStmt)
   if childFields.len > 0:
     # Build the runtime "any present" predicate.
     var anyPresent: NimNode = nil
