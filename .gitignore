@@ -1,3 +1,9 @@
+# milpa-managed (dep cache + emitted compiler config)
+_deps/
+nim.cfg
+# uv-managed venv for the local milpa install (pre-publish)
+.venv/
+
 # Compiled test binaries
 tests/test_*
 !tests/test_*.nim

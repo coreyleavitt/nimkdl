@@ -1,0 +1,9 @@
+// nkdl dep manifest. Resolved by milpa; nim.cfg + milpa.lock are
+// emitted next to this file. nkdl itself has no runtime deps —
+// proptest is a dev/test dep pulled in via a local-path provenance
+// during the pre-publish development loop.
+name "nkdl"
+
+deps {
+    proptest local="../nimlibs/proptest"
+}
