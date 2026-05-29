@@ -26,6 +26,9 @@
 
 import std/macros
 
+import std/options  # the emitted decoder constructs `some(value)` for Option[T] fields
+export options       # so user code doesn't need to import options separately
+
 import ./ast
 import ./cursor
 import ./doc_build  # tokenAsString — single source of truth for token → string
@@ -103,12 +106,26 @@ proc objectRecList(typeSym: NimNode): NimNode =
 # Macro
 # ---------------------------------------------------------------------------
 
+proc isOptionType(t: NimNode): bool {.inline.} =
+  t.kind == nnkBracketExpr and $t[0] == "Option"
+
+proc innerOfOption(t: NimNode): NimNode {.inline.} =
+  t[1]
+
 proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
                      fieldType: NimNode, cSym: NimNode): NimNode =
   ## Emit the typed decode of a token at `tokIndexExpr` into
   ## `targetIdent`. Used by both arg-positional dispatch and
-  ## prop-by-key dispatch — single source of truth for token-to-typed
-  ## conversion.
+  ## prop-by-key dispatch. For Option[T], decode the inner T and
+  ## wrap the result in `some(...)`. For plain T, assign directly.
+  if isOptionType(fieldType):
+    let inner = innerOfOption(fieldType)
+    let tmpSym = genSym(nskVar, "decoded")
+    let innerDecode = emitTypedDecode(tmpSym, tokIndexExpr, inner, cSym)
+    return quote do:
+      var `tmpSym`: `inner`
+      `innerDecode`
+      `targetIdent` = some(`tmpSym`)
   case $fieldType
   of "string":
     return quote do:

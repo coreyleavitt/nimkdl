@@ -5,7 +5,7 @@
 ## source through StringCursor, runs the macro-generated decoder, and
 ## asserts the populated value + outcome.
 
-import std/unittest
+import std/[options, unittest]
 
 import ../src/derive_decode
 import ../src/cursor
@@ -235,3 +235,54 @@ suite "derive_decode — D4: kdlChild single + seq + self-recursive Tree":
     check t.children[0].children[1].value == "L3b"
     check t.children[1].value == "L2b"
     check t.children[1].children.len == 0
+
+suite "derive_decode — D6: Option[T] for arg / prop":
+
+  type Config {.kdlNode: "config".} = object
+    timeout {.kdlProp.}: Option[int]
+    label {.kdlProp.}: Option[string]
+
+  deriveDecode(Config)
+
+  test "Option[T] kdlProp present → Some":
+    let f = mkCursor("config timeout=30 label=\"staging\"")
+    var c: Config
+    let res = kdlDecode(c, f.cursor)
+    check res.isOk
+    check c.timeout == some(30)
+    check c.label == some("staging")
+
+  test "Option[T] kdlProp absent → None":
+    let f = mkCursor("config timeout=30")
+    var c: Config
+    let res = kdlDecode(c, f.cursor)
+    check res.isOk
+    check c.timeout == some(30)
+    check c.label == none(string)
+
+  test "all Option[T] absent → all None":
+    let f = mkCursor("config")
+    var c: Config
+    let res = kdlDecode(c, f.cursor)
+    check res.isOk
+    check c.timeout == none(int)
+    check c.label == none(string)
+
+  type Note {.kdlNode: "note".} = object
+    text {.kdlArg.}: Option[string]
+
+  deriveDecode(Note)
+
+  test "Option[T] kdlArg present → Some":
+    let f = mkCursor("note \"hi\"")
+    var n: Note
+    let res = kdlDecode(n, f.cursor)
+    check res.isOk
+    check n.text == some("hi")
+
+  test "Option[T] kdlArg absent → None":
+    let f = mkCursor("note")
+    var n: Note
+    let res = kdlDecode(n, f.cursor)
+    check res.isOk
+    check n.text == none(string)
