@@ -36,6 +36,12 @@ import ./lexer      # TokenKind / KeywordKind dispatch in emitted code
 import ./numlit     # decodeIntFromToken / decodeFloatFromToken
 import ./spans
 
+# Re-export the substrate identifiers the emitted decoder body references
+# (Result, ParseError, ok, err, initError, peTypeMismatch, etc., plus the
+# cursor/lexer token-kind enum cases). Without these the caller would need
+# to import every substrate module by hand.
+export ast, cursor, doc_build, lexer, numlit, spans
+
 # ---------------------------------------------------------------------------
 # Shared AST inspection helpers (mirror those in derive_encode)
 # ---------------------------------------------------------------------------

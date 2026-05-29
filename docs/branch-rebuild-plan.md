@@ -9,13 +9,13 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Stages A + B + audit + C + D-most complete. 31 derive_decode tests (D1-D4, D6-D8) + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve byte-exact + substrate. Branch is ~38 commits since main.
+**Current state**: Stages A + B + audit + C + D-most complete. 37 derive_decode tests (D1-D4, D6-D8, D10) + 7 round-trip identity tests (D15) + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve byte-exact + substrate. Branch is ~41 commits since main.
 
-Stage D cycles done: D1 tracer, D2 typed args, D3 kdlProp, D4 kdlChild + self-recursive (#11 closes decode side), D6 Option[T], D7 enum, D8 variant. Skipped: D5 perfect-hash (perf opt; defer).
+Stage D cycles done: D1 tracer, D2 typed args, D3 kdlProp, D4 kdlChild + self-recursive (#11 closes decode side), D6 Option[T], D7 enum, D8 variant, D10 required-field bitmap, D15 encode-decode identity property. Skipped: D5 perfect-hash (perf opt; defer).
 
-**Next action**: D10 — required-field bitmap + missing-required error. Each non-Option kdlArg/kdlProp/kdlChild gets a slot bit; macro maintains a uint64 mask; final compare against required mask emits peTypeMissingRequired when missing.
+**Remaining D cycles**: D9 kdlReserved tag validation; D11 type-mismatch error catalog refinement (mostly already in place via D2/D7 routing); D12 kdlRename (already collected at macro time); D14 embed[T] VM compatibility check; bench gate.
 
-Then: D9 kdlReserved tag validation; D11 type-mismatch error catalog refinement; D12 kdlRename (mostly free — already collected at macro time); D14 embed[T] (VM compatibility); D15 encode-decode identity property (parse the corpus into a typed struct, encode back, parse again, structural equality); bench gate.
+**Next action**: D9 — kdlReserved tag validation. When a value carries a different anno tag than the field declares, return peTypeReservedMismatch.
 
 ## Delete order
 
