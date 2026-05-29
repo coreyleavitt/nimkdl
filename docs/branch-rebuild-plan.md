@@ -9,9 +9,9 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Stage A complete + Stage B complete (B1-B7; 57 emitter tests + 20 doc_emit tests + 338/338 conformance + 243/243 byte-exact preserve). Lexer surfaces `isBareword*` as the single source of truth for emit / lex parity. Branch ahead of main by 14 commits.
+**Current state**: Stages A + B + audit + C complete. 32 derive_encode tests + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve byte-exact + substrate. Branch is ~27 commits since main.
 
-**Next action**: Start Stage C (deriveEncode codegen). Macro emits per-type `kdlEncode[T]` procs that push typed values through the established push API. Per the perf-first plan revision: each cycle emits shape-specialized code (no boilerplate generic), with kdlReserved tag bytes inlined at macro time. C1 tracer: a flat `type X = object \n  name {.kdlArg.}: string` should generate a kdlEncode that writes `x "..."\n`.
+**Next action**: Stage D — deriveDecode codegen. Macro emits per-T `kdlDecode[C: KdlCursor]` procs that pull cursor events and populate fields. The recursive structure that made deriveEncode trivial for self-recursive types (Tree closes #11 at C6) inverts cleanly: deriveDecode on the same shape just calls `kdlDecode[Self]` on each cursor child event. D1 tracer: parse `service "web"` through cursor → populate a `Service(name: "web")` via the macro-generated decoder.
 
 ## Delete order
 

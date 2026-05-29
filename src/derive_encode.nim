@@ -102,11 +102,27 @@ proc objectRecList(typeSym: NimNode): NimNode =
   doAssert objTy != nil, "deriveEncode: expected an object or ref object type"
   objTy[2]
 
+proc pragmaHead(p: NimNode): NimNode {.inline.} =
+  ## Extract a pragma's name node — `{.foo.}` is a plain ident,
+  ## `{.foo("x").}` is a Call with the ident at [0], `{.foo: "x".}` is
+  ## an ExprColonExpr with the ident at [0]. Unify them.
+  if p.kind in {nnkCall, nnkExprColonExpr}: p[0]
+  else: p
+
 proc hasPragma(pragmas: seq[NimNode], name: string): bool =
   for p in pragmas:
-    let head = if p.kind == nnkCall: p[0] else: p
-    if $head == name: return true
+    if $pragmaHead(p) == name: return true
   false
+
+proc pragmaArg(pragmas: seq[NimNode], name: string): NimNode =
+  ## Return the first argument of pragma `name`, or nil if not present
+  ## (or pragma has no argument). Used to read `kdlReserved: "ipv4"` /
+  ## `kdlRename: "template"` payloads.
+  for p in pragmas:
+    if $pragmaHead(p) == name and
+       p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2:
+      return p[1]
+  nil
 
 proc isOptionType(t: NimNode): bool {.inline.} =
   ## Detect `Option[T]` by AST shape: BracketExpr with head `Option`.
@@ -142,34 +158,36 @@ proc isEnumType(t: NimNode): bool =
   false
 
 proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
-                       fieldType: NimNode) =
+                       fieldType: NimNode, annoLit: NimNode) =
   ## Inner of the arg-push dispatch: emit the typed push for an
-  ## already-resolved value expression (used both directly and from
-  ## inside an `if isSome:` block for Option-wrapped fields).
+  ## already-resolved value expression. `annoLit` is a string literal
+  ## node ("" for "no annotation", non-empty for kdlReserved tags) —
+  ## inlined at macro time so the emitter's bareword/quoted decider
+  ## runs once per push call site, not per encode call.
   case $fieldType
   of "string":
     pushBody.add quote do:
-      `eSym`.pushArgString(`valueExpr`)
+      `eSym`.pushArgString(`valueExpr`, `annoLit`)
   of "int", "int8", "int16", "int32", "int64":
     pushBody.add quote do:
-      `eSym`.pushArgInt(int64(`valueExpr`))
+      `eSym`.pushArgInt(int64(`valueExpr`), `annoLit`)
   of "float", "float32", "float64":
     pushBody.add quote do:
-      `eSym`.pushArgFloat(float64(`valueExpr`))
+      `eSym`.pushArgFloat(float64(`valueExpr`), `annoLit`)
   of "bool":
     pushBody.add quote do:
-      `eSym`.pushArgBool(`valueExpr`)
+      `eSym`.pushArgBool(`valueExpr`, `annoLit`)
   else:
     if isEnumType(fieldType):
       pushBody.add quote do:
-        `eSym`.pushArgString($`valueExpr`)
+        `eSym`.pushArgString($`valueExpr`, `annoLit`)
     else:
       error("deriveEncode: kdlArg field type " & $fieldType &
             " not yet supported (cycles C2/C8 cover string/int/float/" &
             "bool/enum)")
 
 proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
-                 fieldName: string, fieldType: NimNode) =
+                 fieldName: string, fieldType: NimNode, annoLit: NimNode) =
   ## Append a `pushArg*` call appropriate to the field's static type.
   ## For Option[T], wrap in `if v.field.isSome:` and push the inner
   ## value; None means the field is absent and emits nothing.
@@ -178,55 +196,56 @@ proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
     let inner = innerOfOption(fieldType)
     var inner_body = newStmtList()
     let getExpr = quote do: get(`vSym`.`fieldIdent`)
-    emitArgPushDirect(inner_body, eSym, getExpr, inner)
+    emitArgPushDirect(inner_body, eSym, getExpr, inner, annoLit)
     let cond = quote do: isSome(`vSym`.`fieldIdent`)
     pushBody.add newIfStmt((cond, inner_body))
   else:
     let fullExpr = quote do: `vSym`.`fieldIdent`
-    emitArgPushDirect(pushBody, eSym, fullExpr, fieldType)
+    emitArgPushDirect(pushBody, eSym, fullExpr, fieldType, annoLit)
 
 proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
-                        fieldType: NimNode) =
+                        fieldType, annoLit: NimNode) =
   case $fieldType
   of "string":
     pushBody.add quote do:
-      `eSym`.pushPropString(`keyLit`, `valueExpr`)
+      `eSym`.pushPropString(`keyLit`, `valueExpr`, `annoLit`)
   of "int", "int8", "int16", "int32", "int64":
     pushBody.add quote do:
-      `eSym`.pushPropInt(`keyLit`, int64(`valueExpr`))
+      `eSym`.pushPropInt(`keyLit`, int64(`valueExpr`), `annoLit`)
   of "float", "float32", "float64":
     pushBody.add quote do:
-      `eSym`.pushPropFloat(`keyLit`, float64(`valueExpr`))
+      `eSym`.pushPropFloat(`keyLit`, float64(`valueExpr`), `annoLit`)
   of "bool":
     pushBody.add quote do:
-      `eSym`.pushPropBool(`keyLit`, `valueExpr`)
+      `eSym`.pushPropBool(`keyLit`, `valueExpr`, `annoLit`)
   else:
     if isEnumType(fieldType):
       pushBody.add quote do:
-        `eSym`.pushPropString(`keyLit`, $`valueExpr`)
+        `eSym`.pushPropString(`keyLit`, $`valueExpr`, `annoLit`)
     else:
       error("deriveEncode: kdlProp field type " & $fieldType &
             " not yet supported (cycles C3/C8 cover string/int/float/" &
             "bool/enum)")
 
 proc emitPropPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
-                  fieldName: string, fieldType: NimNode) =
+                  fieldName: string, wireKey: string,
+                  fieldType: NimNode, annoLit: NimNode) =
   ## Append a `pushProp*` call appropriate to the field's static type.
-  ## Key bytes are inlined at macro time as a string literal — the
-  ## emitter's bareword-vs-quoted decider runs once per push call site,
-  ## not per encode call. Option[T] wraps in `if isSome:`.
+  ## `wireKey` is the bytes used on the wire — `fieldName` by default,
+  ## or the kdlRename pragma value when present. Key bytes inline at
+  ## macro time. Option[T] wraps in `if isSome:`.
   let fieldIdent = ident(fieldName)
-  let keyLit = newStrLitNode(fieldName)
+  let keyLit = newStrLitNode(wireKey)
   if isOptionType(fieldType):
     let inner = innerOfOption(fieldType)
     var inner_body = newStmtList()
     let getExpr = quote do: get(`vSym`.`fieldIdent`)
-    emitPropPushDirect(inner_body, eSym, keyLit, getExpr, inner)
+    emitPropPushDirect(inner_body, eSym, keyLit, getExpr, inner, annoLit)
     let cond = quote do: isSome(`vSym`.`fieldIdent`)
     pushBody.add newIfStmt((cond, inner_body))
   else:
     let fullExpr = quote do: `vSym`.`fieldIdent`
-    emitPropPushDirect(pushBody, eSym, keyLit, fullExpr, fieldType)
+    emitPropPushDirect(pushBody, eSym, keyLit, fullExpr, fieldType, annoLit)
 
 macro deriveEncode*(T: typedesc): untyped =
   ## Emit `proc kdlEncode*(v: T; e: var BufferEmitter)` specialized to
@@ -250,10 +269,26 @@ macro deriveEncode*(T: typedesc): untyped =
   var childFields: seq[tuple[name: string, typ: NimNode, kind: ChildKind]]
   proc dispatchField(fieldName: string, fieldType: NimNode,
                      pragmas: seq[NimNode], targetBody: var NimNode) =
+    # Annotation: emit `(tag)` before the value when `{.kdlReserved: ...}`.
+    # Tag bytes inlined at macro time — no runtime pragma lookup.
+    let annoArg = pragmaArg(pragmas, "kdlReserved")
+    let annoLit =
+      if annoArg != nil and annoArg.kind == nnkStrLit:
+        newStrLitNode(annoArg.strVal)
+      else:
+        newStrLitNode("")
+    # Wire key: kdlRename overrides the field name (for kdlProp).
+    let renameArg = pragmaArg(pragmas, "kdlRename")
+    let wireKey =
+      if renameArg != nil and renameArg.kind == nnkStrLit:
+        renameArg.strVal
+      else:
+        fieldName
     if hasPragma(pragmas, "kdlArg"):
-      emitArgPush(targetBody, vSym, eSym, fieldName, fieldType)
+      emitArgPush(targetBody, vSym, eSym, fieldName, fieldType, annoLit)
     elif hasPragma(pragmas, "kdlProp"):
-      emitPropPush(targetBody, vSym, eSym, fieldName, fieldType)
+      emitPropPush(targetBody, vSym, eSym, fieldName, wireKey, fieldType,
+                   annoLit)
     elif hasPragma(pragmas, "kdlChild"):
       if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
         childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq))

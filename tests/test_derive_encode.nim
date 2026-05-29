@@ -397,3 +397,40 @@ suite "derive_encode — C9: variant (case object)":
     var e = newBufferEmitter()
     kdlEncode(d, e)
     check e.finish() == "drawing \"circle\" radius=1.5\n"
+
+suite "derive_encode — C10: kdlReserved + kdlRename + P8 determinism":
+
+  type Host {.kdlNode: "host".} = object
+    addr1 {.kdlArg, kdlReserved: "ipv4".}: string
+    port {.kdlProp, kdlReserved: "u16".}: int
+
+  deriveEncode(Host)
+
+  test "kdlReserved on kdlArg emits (tag) before value":
+    var h = Host(addr1: "10.0.0.1", port: 80)
+    var e = newBufferEmitter()
+    kdlEncode(h, e)
+    check e.finish() == "host (ipv4)\"10.0.0.1\" port=(u16)80\n"
+
+  type Cfg {.kdlNode: "cfg".} = object
+    tmpl {.kdlProp, kdlRename: "template".}: string
+
+  deriveEncode(Cfg)
+
+  test "kdlRename substitutes wire name":
+    var c = Cfg(tmpl: "default")
+    var e = newBufferEmitter()
+    kdlEncode(c, e)
+    check e.finish() == "cfg template=\"default\"\n"
+
+  test "P8 — encoding the same value twice produces identical bytes":
+    type Svc {.kdlNode: "svc".} = object
+      name {.kdlArg.}: string
+      port {.kdlProp.}: int
+    deriveEncode(Svc)
+    var s = Svc(name: "web", port: 80)
+    var e1 = newBufferEmitter()
+    var e2 = newBufferEmitter()
+    kdlEncode(s, e1)
+    kdlEncode(s, e2)
+    check e1.finish() == e2.finish()
