@@ -1,0 +1,99 @@
+## Stage F3-F4 — cross-category property tests.
+##
+## - **P9: Cat 2 ↔ Cat 3 agreement.** For parseable B containing
+##   T-shaped nodes, the two decode-then-emit paths produce
+##   structurally-equal KdlDocs:
+##
+##     Path A (Cat 3, untyped):
+##       B → parse → KdlDoc → emitDoc → B_a → parse → KdlDoc_a
+##
+##     Path B (Cat 2, typed via T):
+##       B → decode[T] → T → encode[T] → B_b → parse → KdlDoc_b
+##
+##     docEqual(KdlDoc_a, KdlDoc_b)
+##
+##   Catches asymmetries between the two consumers — a property test
+##   that only becomes possible on the three-categories architecture.
+##
+## - **P10: Cat 1 push consistency** (lands in F4).
+##
+## Gated by NKDL_PROPTEST=1.
+
+import std/unittest
+
+import proptest
+
+import ../src/api
+import ../src/ast
+import ../src/doc_emit
+import ../src/emitter
+import ../src/kdl_block
+import ../src/parser
+import ../src/pragmas
+
+kdl:
+  type Service {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+
+  type Item {.kdlNode: "item".} = object
+    label {.kdlArg.}: string
+
+  type Catalog {.kdlNode: "catalog".} = object
+    name {.kdlArg.}: string
+    items {.kdlChild.}: seq[Item]
+
+proc cat3RoundtripDoc(src: string): KdlDoc =
+  ## Path A: parse src → KdlDoc → emitDoc → re-parse.
+  let r = parse(src)
+  doAssert r.isOk, "cat3 path: parse(B) must succeed for P9 inputs"
+  var e = newBufferEmitter()
+  emitDoc(r.get, e)
+  let r2 = parse(e.finish())
+  doAssert r2.isOk, "cat3 path: emitDoc output must be reparseable"
+  r2.get
+
+proc cat2RoundtripDoc[T](src: string): KdlDoc =
+  ## Path B: decode[T] src → T → encode[T] → re-parse.
+  let r = decode[T](src)
+  doAssert r.isOk, "cat2 path: decode[T](B) must succeed for P9 inputs"
+  let bytes = encode(r.get)
+  let r2 = parse(bytes)
+  doAssert r2.isOk, "cat2 path: encode[T] output must be reparseable"
+  r2.get
+
+suite "P9 — Cat 2 ↔ Cat 3 agreement on T-shaped input":
+
+  test "fixed Service input agrees across paths (tracer)":
+    let src = "service \"web\" port=80"
+    let docA = cat3RoundtripDoc(src)
+    let docB = cat2RoundtripDoc[Service](src)
+    check docEqual(docA, docB)
+
+  property "arbitrary Service values agree across paths":
+    # Strategy: build a valid Service typed value, encode it via
+    # Cat 2 to get a parseable B, then assert the two paths agree.
+    # Encoding-first is the cleanest way to generate "parseable B
+    # encoding a T" without needing the F11 grammar-aware
+    # generator yet.
+    with Settings(maxExamples: 200, testId: "p9-service")
+    given name in strings(1, 32), port in integers(0, 65535)
+    let v = Service(name: name, port: port)
+    let src = encode(v)
+    let docA = cat3RoundtripDoc(src)
+    let docB = cat2RoundtripDoc[Service](src)
+    ensure docEqual(docA, docB)
+
+  property "Catalog with nested children agrees across paths":
+    # Adds the kdlChild seq dimension. If buildDoc emits children
+    # blocks differently than the typed-derive path, P9 catches it.
+    with Settings(maxExamples: 150, testId: "p9-catalog")
+    given catName in strings(1, 24),
+          itemNames in lists(strings(1, 16), 0, 8)
+    var items: seq[Item] = @[]
+    for ln in itemNames: items.add(Item(label: ln))
+    let v = Catalog(name: catName, items: items)
+    let src = encode(v)
+    let docA = cat3RoundtripDoc(src)
+    let docB = cat2RoundtripDoc[Catalog](src)
+    ensure docEqual(docA, docB)
