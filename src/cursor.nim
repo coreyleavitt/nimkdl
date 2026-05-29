@@ -17,8 +17,12 @@
 ## `bytes(c, idx)` or `tokenAt(c, idx)` for resolution.
 
 import ./ast
+import ./encode
+import ./fnv
 import ./intern
 import ./lexer
+import ./numlit
+import ./reserved
 import ./spans
 
 type
@@ -368,28 +372,282 @@ proc peek*(c: StringCursor): CursorEvent =
   var tmp = c
   result = advance(tmp)
 
-proc buildDoc*(c: var StringCursor, sourcePath = "<input>"):
+proc buildValueFromTok(tok: Token, stream: TokenStream, source: string):
+    Result[KdlValue, ParseError] {.noSideEffect.} =
+  ## Token → KdlValue. Mirrors doc_builder.buildValue line-for-line so
+  ## the cursor-fold produces semantically-equivalent values.
+  case tok.kind
+  of tkString:
+    ok[KdlValue, ParseError](
+      newStringValue(stream.stringPayloads[tok.strIdx], tok.span))
+  of tkRawString:
+    ok[KdlValue, ParseError](
+      newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span))
+  of tkKeyword:
+    let v = case tok.keyword
+      of kwTrue:   newBoolValue(true, tok.span)
+      of kwFalse:  newBoolValue(false, tok.span)
+      of kwNull:   newNullValue(tok.span)
+      of kwInf:    newFloatValue(Inf, tok.span)
+      of kwNegInf: newFloatValue(NegInf, tok.span)
+      of kwNan:    newFloatValue(NaN, tok.span)
+    ok[KdlValue, ParseError](v)
+  of tkNumber:
+    let n = stream.numberPayloads[tok.numIdx]
+    if looksLikeFloat(n):
+      let fRes = decodeFloatFromToken(n, tok.span)
+      if fRes.isErr: return err[KdlValue, ParseError](fRes.getErr)
+      ok[KdlValue, ParseError](newFloatValue(fRes.get, tok.span))
+    else:
+      let iRes = decodeIntPromoting(n, tok.span)
+      if iRes.isErr: return err[KdlValue, ParseError](iRes.getErr)
+      let d = iRes.get
+      let v = if d.fits64: newIntValue(d.intVal, tok.span)
+              else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
+      ok[KdlValue, ParseError](v)
+  of tkIdent:
+    let s = tok.span.start.offset
+    let f = tok.span.finish.offset - 1
+    ok[KdlValue, ParseError](newStringValue(source[s .. f], tok.span))
+  else:
+    err[KdlValue, ParseError](initError(peParseExpected, tok.span,
+      "unsupported value token kind"))
+
+proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
+               preserveFormat: bool = false):
     Result[KdlDoc, ParseError] {.noSideEffect.} =
-  ## Cat 3 (AST/DOM) consumer: fold cursor events into a KdlDoc using
-  ## an explicit `seq[KdlNode]` stack. Replaces the visitor-protocol
-  ## DocBuilder. The cursor is driven to ceEof (single-shot mode);
-  ## any ceError surfaces as Err.
+  ## Cat 3 consumer: fold cursor events into a KdlDoc using an explicit
+  ## `seq[KdlNode]` stack. Replaces the visitor-protocol DocBuilder.
+  ## On ceError returns Err; consumer can choose accumulating mode +
+  ## buildDocAll for multi-error reporting.
   var doc = newDoc(sourcePath)
   doc.sourceText = c.source
+  doc.preserveFormat = preserveFormat
+  var stack: seq[KdlNode] = @[]
+  var childHashes: seq[seq[Hash128]] = @[]
+  var slashdashDepth = 0
   while true:
     let ev = advance(c)
+    # Inside a slashdash bracket, all AST emission is suppressed;
+    # we just track Begin/End nesting to find the matching close.
+    if slashdashDepth > 0:
+      case ev.kind
+      of ceSlashdashBegin: inc slashdashDepth
+      of ceSlashdashEnd:   dec slashdashDepth
+      of ceError: return err[KdlDoc, ParseError](ev.err)
+      of ceEof:
+        # Unbalanced — cursor should not normally produce this.
+        doc.parseTopLevelCount = int32(doc.nodes.len)
+        return ok[KdlDoc, ParseError](doc)
+      else: discard
+      continue
     case ev.kind
     of ceNodeBegin:
-      let name = doc.interner.intern(bytes(c, ev.nodeNameTok))
-      var node = newNode(doc, "", ev.span)
-      node.name = name
-      doc.nodes.add(node)   # placeholder; replaced on NodeEnd via stack indexing
+      let nameHandle = doc.interner.intern(bytes(c, ev.nodeNameTok))
+      var typeAnno = InvalidInterned
+      if ev.nodeAnnoTok != -1:
+        typeAnno = doc.interner.intern(bytes(c, ev.nodeAnnoTok))
+      # For tagged nodes, extend span backwards to cover the `(` so
+      # the doc-level encoder walk's inter-node trivia doesn't dup
+      # the tag prefix (see commit 9ee8e38).
+      var headStart = ev.span.start
+      if ev.nodeAnnoTok != -1:
+        let lparenTok = c.stream[].tokens[ev.nodeAnnoTok - 1]
+        headStart = lparenTok.span.start
+      let headEnd = ev.span.finish
+      stack.add(KdlNode(name: nameHandle, typeAnnotation: typeAnno,
+                        entries: @[], children: @[],
+                        span: initSpan(headStart, headEnd),
+                        headLen: uint32(headEnd.offset - headStart.offset)))
+      if preserveFormat:
+        childHashes.add(@[])
+    of ceArg:
+      let tok = c.stream[].tokens[ev.argTok]
+      let vRes = buildValueFromTok(tok, c.stream[], c.source)
+      if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
+      var val = vRes.get
+      if ev.argAnnoTok != -1:
+        let annoStr = bytes(c, ev.argAnnoTok)
+        val.typeAnnotation = doc.interner.intern(annoStr)
+        let rcheck = validateReserved(annoStr, val)
+        if rcheck.isErr: return err[KdlDoc, ParseError](rcheck.getErr)
+      var entry = KdlEntry(kind: keArgument, argValue: val, span: ev.span)
+      if preserveFormat:
+        entry.parseHash = hashEntry(entry, doc.interner)
+      stack[^1].entries.add(entry)
+    of ceProp:
+      let key = doc.interner.intern(bytes(c, ev.propKeyTok))
+      let valTok = c.stream[].tokens[ev.propValueTok]
+      let vRes = buildValueFromTok(valTok, c.stream[], c.source)
+      if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
+      var val = vRes.get
+      if ev.propAnnoTok != -1:
+        let annoStr = bytes(c, ev.propAnnoTok)
+        val.typeAnnotation = doc.interner.intern(annoStr)
+        let rcheck = validateReserved(annoStr, val)
+        if rcheck.isErr: return err[KdlDoc, ParseError](rcheck.getErr)
+      # Repeated prop keys: later-wins. Drop any prior keProperty with
+      # this key before appending. Args don't dedupe.
+      var i = 0
+      while i < stack[^1].entries.len:
+        let e = stack[^1].entries[i]
+        if e.kind == keProperty and e.propName == key:
+          stack[^1].entries.delete(i)
+        else: inc i
+      var entry = KdlEntry(kind: keProperty,
+                           propName: key, propValue: val, span: ev.span)
+      if preserveFormat:
+        entry.parseHash = hashEntry(entry, doc.interner)
+      stack[^1].entries.add(entry)
+    of ceChildrenBegin, ceChildrenEnd:
+      discard  # node nesting handled by Begin/End node pairing
+    of ceNodeEnd:
+      var n = stack.pop()
+      n.span = initSpan(n.span.start, ev.span.finish)
+      if preserveFormat:
+        let ch = childHashes.pop()
+        n.parseHash = hashNodeFromChildHashes(n, doc.interner, ch)
+      n.parseEntryCount = int32(n.entries.len)
+      n.parseChildCount = int32(n.children.len)
+      if stack.len == 0:
+        doc.nodes.add(n)
+      else:
+        let h = n.parseHash
+        stack[^1].children.add(n)
+        if preserveFormat:
+          childHashes[^1].add(h)
+    of ceSlashdashBegin:
+      inc slashdashDepth
+    of ceSlashdashEnd:
+      discard  # only reachable when starting depth was 0 (mid-emission close); skip
     of ceEof:
       doc.parseTopLevelCount = int32(doc.nodes.len)
       return ok[KdlDoc, ParseError](doc)
     of ceError:
       return err[KdlDoc, ParseError](ev.err)
-    else: discard
+
+proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
+                  preserveFormat: bool = false):
+    tuple[doc: KdlDoc, errors: seq[ParseError]] {.noSideEffect.} =
+  ## Accumulating-mode variant. Cursor must be in cmAccumulating. Each
+  ## ceError is collected; the cursor recovers and emission continues.
+  ## Returned doc is partial — holds whatever nodes the recovered
+  ## parses produced.
+  var doc = newDoc(sourcePath)
+  doc.sourceText = c.source
+  doc.preserveFormat = preserveFormat
+  var stack: seq[KdlNode] = @[]
+  var childHashes: seq[seq[Hash128]] = @[]
+  var slashdashDepth = 0
+  while true:
+    let ev = advance(c)
+    if slashdashDepth > 0:
+      case ev.kind
+      of ceSlashdashBegin: inc slashdashDepth
+      of ceSlashdashEnd:   dec slashdashDepth
+      of ceError:
+        result.errors.add(ev.err)
+        # On error, drop any open slashdash brackets — recovery clears them.
+        slashdashDepth = 0
+      of ceEof: break
+      else: discard
+      continue
+    case ev.kind
+    of ceNodeBegin:
+      let nameHandle = doc.interner.intern(bytes(c, ev.nodeNameTok))
+      var typeAnno = InvalidInterned
+      if ev.nodeAnnoTok != -1:
+        typeAnno = doc.interner.intern(bytes(c, ev.nodeAnnoTok))
+      var headStart = ev.span.start
+      if ev.nodeAnnoTok != -1:
+        let lparenTok = c.stream[].tokens[ev.nodeAnnoTok - 1]
+        headStart = lparenTok.span.start
+      let headEnd = ev.span.finish
+      stack.add(KdlNode(name: nameHandle, typeAnnotation: typeAnno,
+                        entries: @[], children: @[],
+                        span: initSpan(headStart, headEnd),
+                        headLen: uint32(headEnd.offset - headStart.offset)))
+      if preserveFormat:
+        childHashes.add(@[])
+    of ceArg:
+      let tok = c.stream[].tokens[ev.argTok]
+      let vRes = buildValueFromTok(tok, c.stream[], c.source)
+      if vRes.isErr:
+        result.errors.add(vRes.getErr)
+        continue
+      var val = vRes.get
+      if ev.argAnnoTok != -1:
+        let annoStr = bytes(c, ev.argAnnoTok)
+        val.typeAnnotation = doc.interner.intern(annoStr)
+        let rcheck = validateReserved(annoStr, val)
+        if rcheck.isErr:
+          result.errors.add(rcheck.getErr)
+          continue
+      var entry = KdlEntry(kind: keArgument, argValue: val, span: ev.span)
+      if preserveFormat:
+        entry.parseHash = hashEntry(entry, doc.interner)
+      if stack.len > 0:
+        stack[^1].entries.add(entry)
+    of ceProp:
+      let key = doc.interner.intern(bytes(c, ev.propKeyTok))
+      let valTok = c.stream[].tokens[ev.propValueTok]
+      let vRes = buildValueFromTok(valTok, c.stream[], c.source)
+      if vRes.isErr:
+        result.errors.add(vRes.getErr)
+        continue
+      var val = vRes.get
+      if ev.propAnnoTok != -1:
+        let annoStr = bytes(c, ev.propAnnoTok)
+        val.typeAnnotation = doc.interner.intern(annoStr)
+        let rcheck = validateReserved(annoStr, val)
+        if rcheck.isErr:
+          result.errors.add(rcheck.getErr)
+          continue
+      if stack.len > 0:
+        var i = 0
+        while i < stack[^1].entries.len:
+          let e = stack[^1].entries[i]
+          if e.kind == keProperty and e.propName == key:
+            stack[^1].entries.delete(i)
+          else: inc i
+        var entry = KdlEntry(kind: keProperty,
+                             propName: key, propValue: val, span: ev.span)
+        if preserveFormat:
+          entry.parseHash = hashEntry(entry, doc.interner)
+        stack[^1].entries.add(entry)
+    of ceChildrenBegin, ceChildrenEnd: discard
+    of ceNodeEnd:
+      if stack.len == 0: continue   # recovery dropped the open frame
+      var n = stack.pop()
+      n.span = initSpan(n.span.start, ev.span.finish)
+      if preserveFormat:
+        let ch = childHashes.pop()
+        n.parseHash = hashNodeFromChildHashes(n, doc.interner, ch)
+      n.parseEntryCount = int32(n.entries.len)
+      n.parseChildCount = int32(n.children.len)
+      if stack.len == 0:
+        doc.nodes.add(n)
+      else:
+        let h = n.parseHash
+        stack[^1].children.add(n)
+        if preserveFormat:
+          childHashes[^1].add(h)
+    of ceSlashdashBegin: inc slashdashDepth
+    of ceSlashdashEnd: discard
+    of ceEof:
+      doc.parseTopLevelCount = int32(doc.nodes.len)
+      break
+    of ceError:
+      result.errors.add(ev.err)
+      # Drop any open stack frames the recovery skipped past.
+      while stack.len > 0:
+        var n = stack.pop()
+        if preserveFormat: discard childHashes.pop()
+        if stack.len == 0:
+          doc.nodes.add(n)
+        else:
+          stack[^1].children.add(n)
+  result.doc = doc
 
 type
   KdlCursor* = concept c, var mc
