@@ -4,7 +4,9 @@
 
 import std/unittest
 
+import ../src/ast
 import ../src/emitter
+import ../src/intern
 
 suite "emitter — A1: tracer":
 
@@ -258,3 +260,76 @@ suite "emitter — A8: typed value primitives (string/float/bool/null)":
     e.pushPropNull("fallback")
     e.pushNodeEnd()
     check e.finish() == "cfg name=\"alpha\" enabled=#true scale=2.5 fallback=#null\n"
+
+suite "emitter — A9: KdlValue convenience overload":
+
+  test "pushArg dispatches kvInt":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    e.pushNodeBegin("n")
+    e.pushArg(newIntValue(42), interner)
+    e.pushNodeEnd()
+    check e.finish() == "n 42\n"
+
+  test "pushArg dispatches kvString":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    e.pushNodeBegin("n")
+    e.pushArg(newStringValue("hi"), interner)
+    e.pushNodeEnd()
+    check e.finish() == "n \"hi\"\n"
+
+  test "pushArg dispatches kvFloat":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    e.pushNodeBegin("n")
+    e.pushArg(newFloatValue(1.5), interner)
+    e.pushNodeEnd()
+    check e.finish() == "n 1.5\n"
+
+  test "pushArg dispatches kvBool":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    e.pushNodeBegin("n")
+    e.pushArg(newBoolValue(true), interner)
+    e.pushNodeEnd()
+    check e.finish() == "n #true\n"
+
+  test "pushArg dispatches kvNull":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    e.pushNodeBegin("n")
+    e.pushArg(newNullValue(), interner)
+    e.pushNodeEnd()
+    check e.finish() == "n #null\n"
+
+  test "pushArg dispatches kvBigInt":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    e.pushNodeBegin("n")
+    # uint128 representation of 2^64 = 18446744073709551616
+    e.pushArg(newBigIntValue(hi = 1, lo = 0, negative = false), interner)
+    e.pushNodeEnd()
+    check e.finish() == "n 18446744073709551616\n"
+
+  test "pushArg resolves typeAnnotation via interner":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    var v = newIntValue(42)
+    let tag = interner.intern("u8")
+    v.typeAnnotation = tag
+    e.pushNodeBegin("n")
+    e.pushArg(v, interner)
+    e.pushNodeEnd()
+    check e.finish() == "n (u8)42\n"
+
+  test "pushProp dispatches and resolves anno":
+    var e = newBufferEmitter()
+    var interner = initInterner()
+    var v = newStringValue("/etc")
+    let tag = interner.intern("url")
+    v.typeAnnotation = tag
+    e.pushNodeBegin("c")
+    e.pushProp("path", v, interner)
+    e.pushNodeEnd()
+    check e.finish() == "c path=(url)\"/etc\"\n"

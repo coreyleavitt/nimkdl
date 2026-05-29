@@ -1,5 +1,8 @@
 import std/[math, strutils]
 
+import ./ast
+import ./intern
+
 ## emitter — symmetric OUT-side inverse of `KdlCursor`.
 ##
 ## A KdlEmitter accepts push events (NodeBegin / Arg / Prop /
@@ -232,6 +235,42 @@ func appendBool(e: var BufferEmitter, v: bool) {.inline.} =
 func appendNull(e: var BufferEmitter) {.inline.} =
   e.appendBytes("#null")
 
+func divMod128by10(hi, lo: var uint64): uint64 =
+  ## In-place `(hi:lo) := (hi:lo) div 10`; returns the remainder 0..9.
+  ## Schoolbook long division split into 32-bit chunks to keep each
+  ## intermediate within uint64. Ported verbatim from the pre-rebuild
+  ## encode.nim — the algorithm is bit-for-bit-identical.
+  let qHi = hi div 10
+  let rHi = hi mod 10
+  let loHi32 = lo shr 32
+  let loLo32 = lo and 0xFFFFFFFF'u64
+  let part1 = (rHi shl 32) or loHi32
+  let qLoHi = part1 div 10
+  let r1 = part1 mod 10
+  let part2 = (r1 shl 32) or loLo32
+  let qLoLo = part2 div 10
+  let r2 = part2 mod 10
+  hi = qHi
+  lo = (qLoHi shl 32) or qLoLo
+  r2
+
+func appendBigInt(e: var BufferEmitter, hi, lo: uint64, negative: bool) =
+  ## Render a 128-bit unsigned magnitude (plus sign) as decimal.
+  if hi == 0 and lo == 0:
+    e.appendByte('0')
+    return
+  var h = hi
+  var l = lo
+  var digits: array[40, char]  # max 39 digits for 2^128 - 1
+  var n = 0
+  while not (h == 0 and l == 0):
+    let r = divMod128by10(h, l)
+    digits[n] = char(ord('0') + int(r))
+    inc n
+  if negative: e.appendByte('-')
+  for i in countdown(n - 1, 0):
+    e.appendByte(digits[i])
+
 # ---------------------------------------------------------------------------
 # Typed-value arg pushes (string / float / bool / null)
 # ---------------------------------------------------------------------------
@@ -304,3 +343,40 @@ func pushPropNull*(e: var BufferEmitter, key: openArray[char],
                    anno: openArray[char] = "") =
   e.appendPropPrefix(key, anno)
   e.appendNull()
+
+# ---------------------------------------------------------------------------
+# KdlValue convenience dispatcher (Cat 3 docEmit consumers)
+# ---------------------------------------------------------------------------
+#
+# Codegen (Cat 2) goes straight to pushArgInt / pushArgString / etc.
+# docEmit holds KdlValue in hand and wants one entry point; these
+# dispatchers resolve the value-kind variant and the interned
+# typeAnnotation, then forward to the matching typed primitive. The
+# interner lookup currently allocates a string (intern.nim:lookup).
+# That's the AST convenience tax — the codegen path pays nothing
+# because it never constructs a KdlValue.
+
+func resolveAnno(interner: Interner, t: InternedStr): string {.inline.} =
+  if t == InvalidInterned: "" else: interner.lookup(t)
+
+func dispatchValue(e: var BufferEmitter, v: KdlValue) {.inline.} =
+  case v.kind
+  of kvString: e.appendString(v.strVal)
+  of kvInt:    e.appendBytes($v.intVal)
+  of kvBigInt: e.appendBigInt(v.bigHi, v.bigLo, v.bigNegative)
+  of kvFloat:  e.appendFloat(v.floatVal)
+  of kvBool:   e.appendBool(v.boolVal)
+  of kvNull:   e.appendNull()
+
+func pushArg*(e: var BufferEmitter, v: KdlValue, interner: Interner) =
+  ## Append an arg whose value + anno are carried in the KdlValue.
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendAnno(resolveAnno(interner, v.typeAnnotation))
+  e.dispatchValue(v)
+
+func pushProp*(e: var BufferEmitter, key: openArray[char], v: KdlValue,
+               interner: Interner) =
+  ## Append a `key=v` property; same anno-resolution rules as pushArg.
+  e.appendPropPrefix(key, resolveAnno(interner, v.typeAnnotation))
+  e.dispatchValue(v)
