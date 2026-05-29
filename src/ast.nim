@@ -34,6 +34,7 @@ export options.Option, options.isSome, options.isNone, options.get,
 import ./fnv
 import ./intern
 import ./spans
+import ./spec_literals  # KdlKeywordLiterals — debug reprValue mirrors wire bytes
 
 export fnv.Hash128, fnv.`==`
 
@@ -383,8 +384,10 @@ proc reprValue(v: KdlValue, doc: KdlDoc): string =
   of kvBigInt: annotated & "<bigint hi=" & $v.bigHi & " lo=" & $v.bigLo &
                (if v.bigNegative: " neg>" else: ">")
   of kvFloat:  annotated & $v.floatVal
-  of kvBool:   annotated & (if v.boolVal: "#true" else: "#false")
-  of kvNull:   annotated & "#null"
+  of kvBool:   annotated &
+               (if v.boolVal: KdlKeywordLiterals[klTrue]
+                else: KdlKeywordLiterals[klFalse])
+  of kvNull:   annotated & KdlKeywordLiterals[klNull]
 
 proc reprEntry(e: KdlEntry, doc: KdlDoc): string =
   case e.kind

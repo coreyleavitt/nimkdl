@@ -3,6 +3,7 @@ import std/[math, strutils]
 import ./ast
 import ./intern
 import ./lexer  # isBareword + isDisallowedControl — emitter is the dual of lexer recognition
+import ./spec_literals  # KdlKeywordLiterals + KdlSlashdash — wire bytes single source of truth
 
 ## emitter — symmetric OUT-side inverse of `KdlCursor`.
 ##
@@ -133,7 +134,7 @@ func appendAnno(e: var BufferEmitter, anno: openArray[char]) {.inline.} =
 
 func consumeSlashdash(e: var BufferEmitter) {.inline.} =
   if e.slashdashPending:
-    e.appendBytes("/-")
+    e.appendBytes(KdlSlashdash)
     e.slashdashPending = false
 
 func pushNodeBegin*(e: var BufferEmitter, name: openArray[char],
@@ -263,20 +264,18 @@ func appendFloat(e: var BufferEmitter, v: float64) =
   ## finite case. The Nim default formatter inserts a fractional `.0`
   ## for whole-valued floats (so `2.0` not `2`), which is exactly the
   ## spec's typed-float disambiguation rule.
-  if v.classify == fcNan:
-    e.appendBytes("#nan")
-  elif v.classify == fcInf:
-    e.appendBytes("#inf")
-  elif v.classify == fcNegInf:
-    e.appendBytes("#-inf")
-  else:
-    e.appendBytes($v)
+  case v.classify
+  of fcNan:    e.appendBytes(KdlKeywordLiterals[klNan])
+  of fcInf:    e.appendBytes(KdlKeywordLiterals[klInf])
+  of fcNegInf: e.appendBytes(KdlKeywordLiterals[klNegInf])
+  else:        e.appendBytes($v)
 
 func appendBool(e: var BufferEmitter, v: bool) {.inline.} =
-  if v: e.appendBytes("#true") else: e.appendBytes("#false")
+  if v: e.appendBytes(KdlKeywordLiterals[klTrue])
+  else: e.appendBytes(KdlKeywordLiterals[klFalse])
 
 func appendNull(e: var BufferEmitter) {.inline.} =
-  e.appendBytes("#null")
+  e.appendBytes(KdlKeywordLiterals[klNull])
 
 func divMod128by10(hi, lo: var uint64): uint64 =
   ## In-place `(hi:lo) := (hi:lo) div 10`; returns the remainder 0..9.

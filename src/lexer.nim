@@ -34,6 +34,7 @@ import std/[strutils, unicode, bitops]
 
 import ./spans
 import ./intern
+import ./spec_literals  # KdlKeyword + KdlKeywordLiterals — wire bytes
 
 const
   MaxRawStringHashes* = 255
@@ -109,6 +110,11 @@ type
 
   KeywordKind* = enum
     kwTrue, kwFalse, kwNull, kwInf, kwNegInf, kwNan
+    ## Mirrors `spec_literals.KdlKeyword` in declaration order so a
+    ## `KeywordKind` value can index `KdlKeywordLiterals`. A static
+    ## block after the type section enforces the contract — break the
+    ## parity and the build fails immediately, before any wire-byte
+    ## drift can reach the lexer ↔ emitter round-trip.
 
   NumberPayload* = object
     ## Heavy data for a tkNumber token. Stored once per token in the
@@ -165,6 +171,21 @@ type
     pos: Position
     stream: TokenStream      ## accumulating tokens + side tables
     wsPending: bool
+
+# Compile-time contract: lexer.KeywordKind and spec_literals.KdlKeyword
+# enumerate the same set in the same order. Indexing
+# `KdlKeywordLiterals[<KeywordKind value>]` cast through this assert is
+# safe; without the assert a silent reordering could send `kwTrue` to
+# `klFalse`'s string. Build breaks the instant parity drifts.
+static:
+  doAssert int(kwTrue)   == int(klTrue)
+  doAssert int(kwFalse)  == int(klFalse)
+  doAssert int(kwNull)   == int(klNull)
+  doAssert int(kwInf)    == int(klInf)
+  doAssert int(kwNegInf) == int(klNegInf)
+  doAssert int(kwNan)    == int(klNan)
+  doAssert int(high(KeywordKind)) == int(high(KdlKeyword)),
+    "KeywordKind and KdlKeyword must enumerate the same set"
 
 # ---------------------------------------------------------------------------
 # Char classifiers
