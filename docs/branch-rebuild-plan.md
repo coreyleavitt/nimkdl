@@ -9,7 +9,7 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 56 commits since main.
+**Current state**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 47 commits since main.
 
 Suite: 46 derive_decode + 4 embed + 9 round-trip + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve + substrate GREEN.
 
@@ -179,7 +179,7 @@ After G4: merge branch to main (or rename branch → main if cleaner).
 
 Update this line at the end of every session.
 
-**Last session ended after**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 56 commits since main; 338/338 conformance + 243/243 preserve + 46 derive_decode + 32 derive_encode + 4 embed + 9 round-trip + 20 doc_emit + 57 emitter + substrate GREEN. embed[T] works at compile time including self-recursive Tree at depth 3. Bench: 14.98 μs decode / 12.07 μs encode per 100-Service.
+**Last session ended after**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 47 commits since main; 338/338 conformance + 243/243 preserve + 46 derive_decode + 32 derive_encode + 4 embed + 9 round-trip + 20 doc_emit + 57 emitter + substrate GREEN. embed[T] works at compile time including self-recursive Tree at depth 3. Bench: 14.98 μs decode / 12.07 μs encode per 100-Service.
 
 **Next concrete action**: pick one of:
 
