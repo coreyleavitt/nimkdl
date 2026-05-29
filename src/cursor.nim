@@ -68,7 +68,17 @@ type
   CursorState = enum
     csTopLevel          ## between nodes (top-level or in a children block); expect node head, RBrace, or EOF
     csInNodeEntries     ## inside a node; expect entry, `{`, terminator, RBrace, or EOF
-    csAfterChildren     ## a `}` just closed a children block; next event is NodeEnd for the parent
+
+  NodeFrame = object
+    seenRealChildren: bool
+      ## At-most-one-real-children-block guard. Set when a non-
+      ## slashdashed `{...}` block was consumed; rejects subsequent
+      ## real children blocks (slashdashed are still allowed).
+    seenAnyChildren: bool
+      ## No-entries-after-any-children guard. Set when ANY children
+      ## block (real OR slashdashed) was consumed; rejects subsequent
+      ## entries. Per KDL v2 spec, both children kinds block more
+      ## entries from following.
 
   CursorMode* = enum
     cmSingle         ## first ceError halts the stream (subsequent advance() returns ceEof)
@@ -92,6 +102,8 @@ type
     depth*: int       ## children-block nesting depth (0 = top-level)
     pendingEnds*: seq[CursorEvent]      ## queued SlashdashEnd / similar deferred emissions
     slashdashStack*: seq[PendingSlashdash]  ## open slashdash brackets awaiting close
+    nodeFrames: seq[NodeFrame]          ## one per open node (between NodeBegin/NodeEnd)
+    childrenIsSlashdashed: seq[bool]    ## per open children block: was it slashdash-prefixed?
     mode*: CursorMode
     halted*: bool      ## set after a ceError in single-shot mode; subsequent advance() returns ceEof
 
@@ -120,6 +132,31 @@ proc tryConsumeAnno(c: var StringCursor): int =
   c.tokIdx += 3
   tagIdx
 
+proc currentEntryIsSlashdashed(c: StringCursor): bool {.inline.} =
+  c.slashdashStack.len > 0 and c.slashdashStack[^1].kind == sdEntry
+
+proc inSlashdashedChildren(c: StringCursor): bool {.inline.} =
+  ## True if the next `{` we're about to consume is the slashdashed
+  ## unit (sdChildren on stack at the current depth). Used at
+  ## tkLBrace dispatch to allow children even after a real one.
+  c.slashdashStack.len > 0 and
+    c.slashdashStack[^1].kind == sdChildren and
+    c.slashdashStack[^1].anchorDepth == c.depth
+
+proc rejectAfterChildren(c: var StringCursor, span: Span): CursorEvent =
+  let pe = initError(peParseUnexpected, span,
+                     "entries are not permitted after a children block")
+  case c.mode
+  of cmSingle: c.halted = true
+  of cmAccumulating: inc c.tokIdx
+  CursorEvent(kind: ceError, span: span, err: pe)
+
+proc currentNodeSawRealChildren(c: StringCursor): bool {.inline.} =
+  c.nodeFrames.len > 0 and c.nodeFrames[^1].seenRealChildren
+
+proc currentNodeSawAnyChildren(c: StringCursor): bool {.inline.} =
+  c.nodeFrames.len > 0 and c.nodeFrames[^1].seenAnyChildren
+
 proc needsWsBefore(c: StringCursor): bool {.inline.} =
   ## True if the current token starts an entry whose leading token is
   ## not preceded by whitespace AND we're not currently inside an
@@ -143,7 +180,7 @@ proc emitMalformedAnnoError(c: var StringCursor, span: Span): CursorEvent =
   ## Construct a synthetic ceError for a malformed `(tag)` annotation.
   ## Single-shot mode halts; accumulating mode recovers by stepping
   ## past the stray `(` so subsequent advance() can re-sync.
-  let pe = initError(peParseUnexpected, span,
+  let pe = initError(peParseExpected, span,
                      "malformed type annotation: expected (ident)")
   inc c.tokIdx
   case c.mode
@@ -169,11 +206,11 @@ template bytesEq*(c: StringCursor, tokIdx: int, s: string): bool =
   let n = int(t.span.length)
   n == s.len and equalMem(unsafeAddr c.source[o], unsafeAddr s[0], n)
 
-proc peekSlashdashKind(c: StringCursor): SlashdashKind =
-  ## Determine which kind of slashdash this is based on what follows the `/-`.
-  ## Caller has confirmed c.tok is tkSlashDash.
-  let next = c.stream[].tokens[c.tokIdx + 1]
-  case next.kind
+proc peekSlashdashKindAt(c: StringCursor, atIdx: int): SlashdashKind =
+  ## Determine the slashdash kind given the cursor's state and the
+  ## token at `atIdx` (the resolved target after newline skipping).
+  if atIdx >= c.stream[].tokens.len: return sdEntry
+  case c.stream[].tokens[atIdx].kind
   of tkLBrace: sdChildren
   of tkLParen, tkIdent, tkNumber, tkString, tkRawString, tkKeyword:
     if c.state == csTopLevel: sdNode
@@ -225,10 +262,23 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         return CursorEvent(kind: ceError, span: t.span, err: pe)
       return CursorEvent(kind: ceEof, span: t.span)
     of tkSlashDash:
-      let kind = peekSlashdashKind(c)
+      let sdSpan = t.span
       inc c.tokIdx
+      # Skip past newlines between /- and its target.
+      while c.tokIdx < c.stream[].tokens.len and
+            c.stream[].tokens[c.tokIdx].kind == tkNewline:
+        inc c.tokIdx
+      if c.tokIdx >= c.stream[].tokens.len or
+         c.stream[].tokens[c.tokIdx].kind in {tkEof, tkSemicolon, tkRBrace}:
+        let pe = initError(peParseExpected, sdSpan,
+                           "slashdash has no target")
+        case c.mode
+        of cmSingle: c.halted = true
+        of cmAccumulating: discard
+        return CursorEvent(kind: ceError, span: sdSpan, err: pe)
+      let kind = peekSlashdashKindAt(c, c.tokIdx)
       c.slashdashStack.add(PendingSlashdash(kind: kind, anchorDepth: c.depth))
-      return CursorEvent(kind: ceSlashdashBegin, span: t.span)
+      return CursorEvent(kind: ceSlashdashBegin, span: sdSpan)
     of tkLParen:
       let annoIdx = tryConsumeAnno(c)
       if annoIdx == -1:
@@ -255,6 +305,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       inc c.tokIdx
       c.state = csInNodeEntries
       c.argIdx = 0
+      c.nodeFrames.add(NodeFrame(seenRealChildren: false))
       return CursorEvent(kind: ceNodeBegin, span: nameTok.span,
                          nodeNameTok: nameIdx, nodeAnnoTok: annoIdx)
     of tkString, tkRawString:
@@ -277,40 +328,59 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       inc c.tokIdx
       c.state = csInNodeEntries
       c.argIdx = 0
+      c.nodeFrames.add(NodeFrame(seenRealChildren: false))
       return CursorEvent(kind: ceNodeBegin, span: t.span,
                          nodeNameTok: nameIdx, nodeAnnoTok: -1)
     of tkRBrace:
-      # Close of a children block. depth=0 here would be a stray brace
-      # (error case — to be wired in Cycle 15+).
+      # Close of a children block. Determine whether the closing block
+      # was slashdash-prefixed before popping depth — that drives both
+      # at-most-one-real-children (only real ones set seenRealChildren)
+      # and no-entries-after-any-children (any closure sets seenAnyChildren).
       inc c.tokIdx
+      let wasSlashdashed =
+        if c.childrenIsSlashdashed.len > 0: c.childrenIsSlashdashed.pop()
+        else: false
       dec c.depth
-      c.state = csAfterChildren
+      if c.nodeFrames.len > 0:
+        c.nodeFrames[^1].seenAnyChildren = true
+        if not wasSlashdashed:
+          c.nodeFrames[^1].seenRealChildren = true
+      c.state = csInNodeEntries
       return CursorEvent(kind: ceChildrenEnd, span: t.span)
     of tkIdent:
       let nameIdx = c.tokIdx
       inc c.tokIdx
       c.state = csInNodeEntries
       c.argIdx = 0
+      c.nodeFrames.add(NodeFrame(seenRealChildren: false))
       return CursorEvent(kind: ceNodeBegin, span: t.span,
                          nodeNameTok: nameIdx, nodeAnnoTok: -1)
     else:
-      return CursorEvent(kind: ceEof, span: t.span)
+      let pe = initError(peParseUnexpected, t.span,
+                         "unexpected token at node boundary")
+      case c.mode
+      of cmSingle: c.halted = true
+      of cmAccumulating: inc c.tokIdx
+      return CursorEvent(kind: ceError, span: t.span, err: pe)
   of csInNodeEntries:
     let t = c.tok
     case t.kind
-    of tkEof:
+    of tkEof, tkNewline, tkSemicolon, tkRBrace:
+      # NodeEnd span ends just BEFORE the terminator (matches visitor
+      # protocol's semantics — the node's span covers content only,
+      # not the trailing newline/semi/EOF/brace).
+      let endSpan = pointSpan(t.span.start)
+      if t.kind in {tkNewline, tkSemicolon}:
+        inc c.tokIdx
       c.state = csTopLevel
-      return CursorEvent(kind: ceNodeEnd, span: t.span)
-    of tkNewline, tkSemicolon:
-      inc c.tokIdx
-      c.state = csTopLevel
-      return CursorEvent(kind: ceNodeEnd, span: t.span)
-    of tkRBrace:
-      # End-of-children terminates the current node implicitly without
-      # consuming the brace; outer csTopLevel will emit ChildrenEnd next.
-      c.state = csTopLevel
-      return CursorEvent(kind: ceNodeEnd, span: t.span)
+      if c.nodeFrames.len > 0: discard c.nodeFrames.pop()
+      return CursorEvent(kind: ceNodeEnd, span: endSpan)
     of tkLBrace:
+      # Reject second real children block; slashdashed children blocks
+      # are still allowed (they're noise, not structural).
+      let isSlashdashed = inSlashdashedChildren(c)
+      if not isSlashdashed and currentNodeSawRealChildren(c):
+        return rejectAfterChildren(c, t.span)
       if c.depth + 1 > MaxParserDepth:
         let pe = initError(peParseDepthExceeded, t.span,
                            "nesting depth exceeded MaxParserDepth")
@@ -320,16 +390,32 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         return CursorEvent(kind: ceError, span: t.span, err: pe)
       inc c.tokIdx
       inc c.depth
+      c.childrenIsSlashdashed.add(isSlashdashed)
       c.state = csTopLevel
       return CursorEvent(kind: ceChildrenBegin, span: t.span)
     of tkSlashDash:
-      let kind = peekSlashdashKind(c)
+      let sdSpan = t.span
       inc c.tokIdx
+      while c.tokIdx < c.stream[].tokens.len and
+            c.stream[].tokens[c.tokIdx].kind == tkNewline:
+        inc c.tokIdx
+      # /- requires a target. EOF / semicolon / rbrace = no target = error.
+      if c.tokIdx >= c.stream[].tokens.len or
+         c.stream[].tokens[c.tokIdx].kind in {tkEof, tkSemicolon, tkRBrace}:
+        let pe = initError(peParseExpected, sdSpan,
+                           "slashdash has no target")
+        case c.mode
+        of cmSingle: c.halted = true
+        of cmAccumulating: discard
+        return CursorEvent(kind: ceError, span: sdSpan, err: pe)
+      let kind = peekSlashdashKindAt(c, c.tokIdx)
       c.slashdashStack.add(PendingSlashdash(kind: kind, anchorDepth: c.depth))
-      return CursorEvent(kind: ceSlashdashBegin, span: t.span)
+      return CursorEvent(kind: ceSlashdashBegin, span: sdSpan)
     of tkLParen:
       if needsWsBefore(c):
         return emitAdjacencyError(c, t.span)
+      if currentNodeSawAnyChildren(c) and not currentEntryIsSlashdashed(c):
+        return rejectAfterChildren(c, t.span)
       # Arg with type annotation: (tag) value
       let annoIdx = tryConsumeAnno(c)
       if annoIdx == -1:
@@ -346,6 +432,8 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
     of tkNumber, tkKeyword:
       if needsWsBefore(c):
         return emitAdjacencyError(c, t.span)
+      if currentNodeSawAnyChildren(c) and not currentEntryIsSlashdashed(c):
+        return rejectAfterChildren(c, t.span)
       let valIdx = c.tokIdx
       let myArgIdx = c.argIdx
       inc c.argIdx
@@ -357,6 +445,8 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       # `=`, else arg value. Prop-key form does bidi check.
       if needsWsBefore(c):
         return emitAdjacencyError(c, t.span)
+      if currentNodeSawAnyChildren(c) and not currentEntryIsSlashdashed(c):
+        return rejectAfterChildren(c, t.span)
       let nextKind = c.stream[].tokens[c.tokIdx + 1].kind
       if nextKind == tkEquals:
         # Bidi check on prop-key payload.
@@ -377,7 +467,22 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         let keyIdx = c.tokIdx
         var valIdx = c.tokIdx + 2
         var annoIdx = -1
+        if valIdx >= c.stream[].tokens.len or
+           c.stream[].tokens[valIdx].kind in {tkEof, tkNewline, tkSemicolon, tkRBrace}:
+          let pe = initError(peParseExpected, t.span,
+                             "property is missing a value")
+          case c.mode
+          of cmSingle: c.halted = true
+          of cmAccumulating: inc c.tokIdx
+          return CursorEvent(kind: ceError, span: t.span, err: pe)
         if c.stream[].tokens[valIdx].kind == tkLParen:
+          if valIdx + 3 >= c.stream[].tokens.len:
+            let pe = initError(peParseExpected, t.span,
+                               "property value has malformed annotation")
+            case c.mode
+            of cmSingle: c.halted = true
+            of cmAccumulating: inc c.tokIdx
+            return CursorEvent(kind: ceError, span: t.span, err: pe)
           annoIdx = valIdx + 1
           valIdx += 3
         c.tokIdx = valIdx + 1
@@ -394,13 +499,30 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
     of tkIdent:
       if needsWsBefore(c):
         return emitAdjacencyError(c, t.span)
+      if currentNodeSawAnyChildren(c) and not currentEntryIsSlashdashed(c):
+        return rejectAfterChildren(c, t.span)
       let nextKind = c.stream[].tokens[c.tokIdx + 1].kind
       if nextKind == tkEquals:
         let keyIdx = c.tokIdx
         var valIdx = c.tokIdx + 2
         var annoIdx = -1
         # Prop value may carry an annotation: key = (tag) value
+        if valIdx >= c.stream[].tokens.len or
+           c.stream[].tokens[valIdx].kind in {tkEof, tkNewline, tkSemicolon, tkRBrace}:
+          let pe = initError(peParseExpected, t.span,
+                             "property is missing a value")
+          case c.mode
+          of cmSingle: c.halted = true
+          of cmAccumulating: inc c.tokIdx
+          return CursorEvent(kind: ceError, span: t.span, err: pe)
         if c.stream[].tokens[valIdx].kind == tkLParen:
+          if valIdx + 3 >= c.stream[].tokens.len:
+            let pe = initError(peParseExpected, t.span,
+                               "property value has malformed annotation")
+            case c.mode
+            of cmSingle: c.halted = true
+            of cmAccumulating: inc c.tokIdx
+            return CursorEvent(kind: ceError, span: t.span, err: pe)
           annoIdx = valIdx + 1
           valIdx += 3   # past `(`, tag, `)`
         c.tokIdx = valIdx + 1
@@ -415,24 +537,12 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         return CursorEvent(kind: ceArg, span: t.span,
                            argIdx: myArgIdx, argTok: valIdx, argAnnoTok: -1)
     else:
-      return CursorEvent(kind: ceEof, span: t.span)
-  of csAfterChildren:
-    # ChildrenEnd was emitted. KDL v2: children must be the LAST
-    # component of a node. If the next token is a terminator, emit
-    # parent's NodeEnd implicitly. Otherwise the source has illegal
-    # post-children content (e.g., `foo { x } b=2`) — emit ceError.
-    let nk = c.tok.kind
-    if nk in {tkNewline, tkSemicolon, tkEof, tkRBrace}:
-      c.state = csTopLevel
-      return CursorEvent(kind: ceNodeEnd, span: c.tok.span)
-    let pe = initError(peParseUnexpected, c.tok.span,
-                       "entries are not permitted after a children block")
-    case c.mode
-    of cmSingle: c.halted = true
-    of cmAccumulating:
-      c.state = csTopLevel
-      inc c.tokIdx
-    return CursorEvent(kind: ceError, span: c.tok.span, err: pe)
+      let pe = initError(peParseUnexpected, t.span,
+                         "unexpected token in node entries")
+      case c.mode
+      of cmSingle: c.halted = true
+      of cmAccumulating: inc c.tokIdx
+      return CursorEvent(kind: ceError, span: t.span, err: pe)
 
 proc advance*(c: var StringCursor): CursorEvent =
   ## Public entry point: drains queued events first, then generates the
@@ -510,6 +620,19 @@ proc peek*(c: StringCursor): CursorEvent =
   var tmp = c
   result = advance(tmp)
 
+proc tokenAsString(tok: Token, stream: TokenStream, source: string): string =
+  ## Resolve a token's logical text content. For tkIdent, returns the
+  ## bareword bytes from source. For tkString / tkRawString, returns
+  ## the unescaped payload from the lexer's side tables. For other
+  ## kinds, returns the source bytes (rarely used).
+  case tok.kind
+  of tkString:    stream.stringPayloads[tok.strIdx]
+  of tkRawString: stream.rawStringPayloads[tok.rawIdx]
+  else:
+    let s = int(tok.span.offset)
+    let f = int(tok.span.endOffset) - 1
+    source[s .. f]
+
 proc buildValueFromTok(tok: Token, stream: TokenStream, source: string):
     Result[KdlValue, ParseError] {.noSideEffect.} =
   ## Token → KdlValue. Mirrors doc_builder.buildValue line-for-line so
@@ -581,10 +704,10 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
       continue
     case ev.kind
     of ceNodeBegin:
-      let nameHandle = doc.interner.intern(bytes(c, ev.nodeNameTok))
+      let nameHandle = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeNameTok], c.stream[], c.source))
       var typeAnno = InvalidInterned
       if ev.nodeAnnoTok != -1:
-        typeAnno = doc.interner.intern(bytes(c, ev.nodeAnnoTok))
+        typeAnno = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
       # For tagged nodes, extend span backwards to cover the `(` so
       # the doc-level encoder walk's inter-node trivia doesn't dup
       # the tag prefix (see commit 9ee8e38).
@@ -605,44 +728,55 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
       if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
       var val = vRes.get
       if ev.argAnnoTok != -1:
-        let annoStr = bytes(c, ev.argAnnoTok)
+        let annoStr = tokenAsString(c.stream[].tokens[ev.argAnnoTok], c.stream[], c.source)
         val.typeAnnotation = doc.interner.intern(annoStr)
         let rcheck = validateReserved(annoStr, val)
         if rcheck.isErr: return err[KdlDoc, ParseError](rcheck.getErr)
-      var entry = KdlEntry(kind: keArgument, argValue: val, span: ev.span)
+      # Entry span covers the full entry: `(` of annotation through
+      # value token finish. Matches visitor protocol's entrySpan.
+      var entryStart = tok.span.start
+      if ev.argAnnoTok != -1:
+        entryStart = c.stream[].tokens[ev.argAnnoTok - 1].span.start
+      let entrySpan = initSpan(entryStart, tok.span.finish)
+      var entry = KdlEntry(kind: keArgument, argValue: val, span: entrySpan)
       if preserveFormat:
         entry.parseHash = hashEntry(entry, doc.interner)
-      stack[^1].entries.add(entry)
+      if stack.len > 0:
+        stack[^1].entries.add(entry)
     of ceProp:
-      let key = doc.interner.intern(bytes(c, ev.propKeyTok))
+      let key = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source))
+      let keyTok = c.stream[].tokens[ev.propKeyTok]
       let valTok = c.stream[].tokens[ev.propValueTok]
       let vRes = buildValueFromTok(valTok, c.stream[], c.source)
       if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
       var val = vRes.get
       if ev.propAnnoTok != -1:
-        let annoStr = bytes(c, ev.propAnnoTok)
+        let annoStr = tokenAsString(c.stream[].tokens[ev.propAnnoTok], c.stream[], c.source)
         val.typeAnnotation = doc.interner.intern(annoStr)
         let rcheck = validateReserved(annoStr, val)
         if rcheck.isErr: return err[KdlDoc, ParseError](rcheck.getErr)
-      # Repeated prop keys: later-wins. Drop any prior keProperty with
-      # this key before appending. Args don't dedupe.
+      # Repeated prop keys: later-wins.
       var i = 0
       while i < stack[^1].entries.len:
         let e = stack[^1].entries[i]
         if e.kind == keProperty and e.propName == key:
           stack[^1].entries.delete(i)
         else: inc i
+      # Entry span covers key start to value finish.
+      let entrySpan = initSpan(keyTok.span.start, valTok.span.finish)
       var entry = KdlEntry(kind: keProperty,
-                           propName: key, propValue: val, span: ev.span)
+                           propName: key, propValue: val, span: entrySpan)
       if preserveFormat:
         entry.parseHash = hashEntry(entry, doc.interner)
-      stack[^1].entries.add(entry)
+      if stack.len > 0:
+        stack[^1].entries.add(entry)
     of ceChildrenBegin, ceChildrenEnd:
       discard  # node nesting handled by Begin/End node pairing
     of ceNodeEnd:
+      if stack.len == 0: continue  # stray NodeEnd from cursor recovery
       var n = stack.pop()
       n.span = initSpan(n.span.start, ev.span.finish)
-      if preserveFormat:
+      if preserveFormat and childHashes.len > 0:
         let ch = childHashes.pop()
         n.parseHash = hashNodeFromChildHashes(n, doc.interner, ch)
       n.parseEntryCount = int32(n.entries.len)
@@ -692,10 +826,10 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
       continue
     case ev.kind
     of ceNodeBegin:
-      let nameHandle = doc.interner.intern(bytes(c, ev.nodeNameTok))
+      let nameHandle = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeNameTok], c.stream[], c.source))
       var typeAnno = InvalidInterned
       if ev.nodeAnnoTok != -1:
-        typeAnno = doc.interner.intern(bytes(c, ev.nodeAnnoTok))
+        typeAnno = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
       var headStart = ev.span.start
       if ev.nodeAnnoTok != -1:
         let lparenTok = c.stream[].tokens[ev.nodeAnnoTok - 1]
@@ -715,19 +849,24 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
         continue
       var val = vRes.get
       if ev.argAnnoTok != -1:
-        let annoStr = bytes(c, ev.argAnnoTok)
+        let annoStr = tokenAsString(c.stream[].tokens[ev.argAnnoTok], c.stream[], c.source)
         val.typeAnnotation = doc.interner.intern(annoStr)
         let rcheck = validateReserved(annoStr, val)
         if rcheck.isErr:
           result.errors.add(rcheck.getErr)
           continue
-      var entry = KdlEntry(kind: keArgument, argValue: val, span: ev.span)
+      var entryStart = tok.span.start
+      if ev.argAnnoTok != -1:
+        entryStart = c.stream[].tokens[ev.argAnnoTok - 1].span.start
+      let entrySpan = initSpan(entryStart, tok.span.finish)
+      var entry = KdlEntry(kind: keArgument, argValue: val, span: entrySpan)
       if preserveFormat:
         entry.parseHash = hashEntry(entry, doc.interner)
       if stack.len > 0:
         stack[^1].entries.add(entry)
     of ceProp:
-      let key = doc.interner.intern(bytes(c, ev.propKeyTok))
+      let key = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source))
+      let keyTok = c.stream[].tokens[ev.propKeyTok]
       let valTok = c.stream[].tokens[ev.propValueTok]
       let vRes = buildValueFromTok(valTok, c.stream[], c.source)
       if vRes.isErr:
@@ -735,7 +874,7 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
         continue
       var val = vRes.get
       if ev.propAnnoTok != -1:
-        let annoStr = bytes(c, ev.propAnnoTok)
+        let annoStr = tokenAsString(c.stream[].tokens[ev.propAnnoTok], c.stream[], c.source)
         val.typeAnnotation = doc.interner.intern(annoStr)
         let rcheck = validateReserved(annoStr, val)
         if rcheck.isErr:
@@ -748,8 +887,9 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
           if e.kind == keProperty and e.propName == key:
             stack[^1].entries.delete(i)
           else: inc i
+        let entrySpan = initSpan(keyTok.span.start, valTok.span.finish)
         var entry = KdlEntry(kind: keProperty,
-                             propName: key, propValue: val, span: ev.span)
+                             propName: key, propValue: val, span: entrySpan)
         if preserveFormat:
           entry.parseHash = hashEntry(entry, doc.interner)
         stack[^1].entries.add(entry)
@@ -777,14 +917,10 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
       break
     of ceError:
       result.errors.add(ev.err)
-      # Drop any open stack frames the recovery skipped past.
-      while stack.len > 0:
-        var n = stack.pop()
-        if preserveFormat: discard childHashes.pop()
-        if stack.len == 0:
-          doc.nodes.add(n)
-        else:
-          stack[^1].children.add(n)
+      # Don't pop stack frames — the cursor's recovery decides what
+      # event to emit next. If it emits a NodeEnd, we'll pop then.
+      # Premature popping would close ancestor nodes that may still
+      # have valid siblings to come.
   result.doc = doc
 
 type

@@ -26,7 +26,10 @@
 ## `embed[T]` (#529) work without escape hatches.
 
 import ./ast
+import ./cursor
 import ./doc_builder
+import ./intern
+import ./lexer
 import ./spans
 import ./typed_parser
 
@@ -53,10 +56,10 @@ proc parse*(source: string, sourcePath = "<input>",
   ## per-node and per-entry parseHash fields needed by
   ## `encode(doc, emPreserve)` for byte-lossless round-trip. Opt-in
   ## because hashing is ~18% of parse cost.
-  var b = newDocBuilder(source, sourcePath, preserveFormat)
-  let r = parseDocumentWith(source, b, sourcePath)
-  if r.isErr: return err[KdlDoc, ParseError](r.getErr)
-  ok[KdlDoc, ParseError](b.finish())
+  var interner = initInterner()
+  var stream = lex(source, interner)
+  var c = initStringCursor(addr stream, source)
+  buildDoc(c, sourcePath, preserveFormat)
 
 proc parseAll*(source: string, sourcePath = "<input>",
                preserveFormat: bool = false):
@@ -70,6 +73,7 @@ proc parseAll*(source: string, sourcePath = "<input>",
   ## Caller contract:
   ##   - If `errors.len == 0`, the doc is a valid, complete parse.
   ##   - If `errors.len > 0`, the doc holds whichever nodes survived.
-  var b = newDocBuilder(source, sourcePath, preserveFormat)
-  discard parseDocumentWith(source, b, sourcePath, addr result.errors)
-  result.doc = b.finish()
+  var interner = initInterner()
+  var stream = lex(source, interner)
+  var c = initStringCursor(addr stream, source, mode = cmAccumulating)
+  buildDocAll(c, sourcePath, preserveFormat)
