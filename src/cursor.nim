@@ -25,6 +25,15 @@ import ./numlit
 import ./reserved
 import ./spans
 
+const
+  MaxParserDepth* = 256
+    ## Maximum `{ children }` nesting depth. Exceeding this would
+    ## trip Nim's call-stack limit on debug builds (and is a
+    ## supply-chain attack vector — adversarial KDL with thousands
+    ## of nested braces could DoS a service that does dep-tree walks).
+    ## Matches typed_parser.MaxParserDepthValue exactly until Phase 5
+    ## deletes that copy.
+
 type
   CursorEventKind* = enum
     ceNodeBegin
@@ -95,18 +104,40 @@ template tok(c: StringCursor): Token =
   c.stream[].tokens[c.tokIdx]
 
 proc tryConsumeAnno(c: var StringCursor): int =
-  ## If `tok` is `(` followed by `tag )`, parse + return the tag's
-  ## token index. Otherwise return -1 and leave tokIdx untouched.
-  ## Caller decides whether to emit ceError or recover.
+  ## If `tok` is `(` followed by an ident/string/raw-string then `)`,
+  ## parse + return the tag's token index. Otherwise return -1 and
+  ## leave tokIdx untouched. Caller decides whether to emit ceError
+  ## or recover. KDL v2 forbids numbers/keywords as tags.
   if c.tok.kind != tkLParen:
     return -1
   let n = c.stream[].tokens.len
   if c.tokIdx + 2 >= n: return -1
+  let tagKind = c.stream[].tokens[c.tokIdx + 1].kind
+  if tagKind notin {tkIdent, tkString, tkRawString}: return -1
   let closeKind = c.stream[].tokens[c.tokIdx + 2].kind
   if closeKind != tkRParen: return -1
   let tagIdx = c.tokIdx + 1
   c.tokIdx += 3
   tagIdx
+
+proc needsWsBefore(c: StringCursor): bool {.inline.} =
+  ## True if the current token starts an entry whose leading token is
+  ## not preceded by whitespace AND we're not currently inside an
+  ## entry-slashdash (which lets the slashdashed content abut the `/-`).
+  if c.tok.precededByWs: return false
+  if c.slashdashStack.len > 0 and c.slashdashStack[^1].kind == sdEntry:
+    return false
+  true
+
+proc emitAdjacencyError(c: var StringCursor, span: Span): CursorEvent =
+  let pe = initError(peParseExpected, span,
+                     "whitespace required before this entry")
+  case c.mode
+  of cmSingle: c.halted = true
+  of cmAccumulating:
+    # Skip the bad entry's leading token so we don't loop on it.
+    inc c.tokIdx
+  CursorEvent(kind: ceError, span: span, err: pe)
 
 proc emitMalformedAnnoError(c: var StringCursor, span: Span): CursorEvent =
   ## Construct a synthetic ceError for a malformed `(tag)` annotation.
@@ -187,6 +218,11 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
     let t = c.tok
     case t.kind
     of tkEof:
+      if c.depth > 0:
+        let pe = initError(peParseExpected, t.span,
+                           "unclosed children block at end of input")
+        c.halted = true
+        return CursorEvent(kind: ceError, span: t.span, err: pe)
       return CursorEvent(kind: ceEof, span: t.span)
     of tkSlashDash:
       let kind = peekSlashdashKind(c)
@@ -198,14 +234,51 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       if annoIdx == -1:
         return emitMalformedAnnoError(c, t.span)
       let nameTok = c.tok
-      if nameTok.kind != tkIdent:
+      if nameTok.kind notin {tkIdent, tkString, tkRawString}:
         return emitMalformedAnnoError(c, t.span)
+      # Bidi check for quoted/raw names.
+      if nameTok.kind == tkString:
+        let p = c.stream[].stringPayloads[nameTok.strIdx]
+        if containsBidiControl(p):
+          let pe = initError(peLexInvalidIdentifier, nameTok.span,
+                             "bidi control codepoint in node name")
+          c.halted = true
+          return CursorEvent(kind: ceError, span: nameTok.span, err: pe)
+      elif nameTok.kind == tkRawString:
+        let p = c.stream[].rawStringPayloads[nameTok.rawIdx]
+        if containsBidiControl(p):
+          let pe = initError(peLexInvalidIdentifier, nameTok.span,
+                             "bidi control codepoint in node name")
+          c.halted = true
+          return CursorEvent(kind: ceError, span: nameTok.span, err: pe)
       let nameIdx = c.tokIdx
       inc c.tokIdx
       c.state = csInNodeEntries
       c.argIdx = 0
       return CursorEvent(kind: ceNodeBegin, span: nameTok.span,
                          nodeNameTok: nameIdx, nodeAnnoTok: annoIdx)
+    of tkString, tkRawString:
+      # Quoted/raw-string node name (no type annotation prefix).
+      if t.kind == tkString:
+        let p = c.stream[].stringPayloads[t.strIdx]
+        if containsBidiControl(p):
+          let pe = initError(peLexInvalidIdentifier, t.span,
+                             "bidi control codepoint in node name")
+          c.halted = true
+          return CursorEvent(kind: ceError, span: t.span, err: pe)
+      else:
+        let p = c.stream[].rawStringPayloads[t.rawIdx]
+        if containsBidiControl(p):
+          let pe = initError(peLexInvalidIdentifier, t.span,
+                             "bidi control codepoint in node name")
+          c.halted = true
+          return CursorEvent(kind: ceError, span: t.span, err: pe)
+      let nameIdx = c.tokIdx
+      inc c.tokIdx
+      c.state = csInNodeEntries
+      c.argIdx = 0
+      return CursorEvent(kind: ceNodeBegin, span: t.span,
+                         nodeNameTok: nameIdx, nodeAnnoTok: -1)
     of tkRBrace:
       # Close of a children block. depth=0 here would be a stray brace
       # (error case — to be wired in Cycle 15+).
@@ -238,6 +311,13 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       c.state = csTopLevel
       return CursorEvent(kind: ceNodeEnd, span: t.span)
     of tkLBrace:
+      if c.depth + 1 > MaxParserDepth:
+        let pe = initError(peParseDepthExceeded, t.span,
+                           "nesting depth exceeded MaxParserDepth")
+        case c.mode
+        of cmSingle: c.halted = true
+        of cmAccumulating: discard
+        return CursorEvent(kind: ceError, span: t.span, err: pe)
       inc c.tokIdx
       inc c.depth
       c.state = csTopLevel
@@ -248,6 +328,8 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       c.slashdashStack.add(PendingSlashdash(kind: kind, anchorDepth: c.depth))
       return CursorEvent(kind: ceSlashdashBegin, span: t.span)
     of tkLParen:
+      if needsWsBefore(c):
+        return emitAdjacencyError(c, t.span)
       # Arg with type annotation: (tag) value
       let annoIdx = tryConsumeAnno(c)
       if annoIdx == -1:
@@ -261,14 +343,57 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       inc c.tokIdx
       return CursorEvent(kind: ceArg, span: valSpan,
                          argIdx: myArgIdx, argTok: valIdx, argAnnoTok: annoIdx)
-    of tkNumber, tkString, tkRawString, tkKeyword:
+    of tkNumber, tkKeyword:
+      if needsWsBefore(c):
+        return emitAdjacencyError(c, t.span)
       let valIdx = c.tokIdx
       let myArgIdx = c.argIdx
       inc c.argIdx
       inc c.tokIdx
       return CursorEvent(kind: ceArg, span: t.span,
                          argIdx: myArgIdx, argTok: valIdx, argAnnoTok: -1)
+    of tkString, tkRawString:
+      # Quoted/raw-string in entry position: prop key if followed by
+      # `=`, else arg value. Prop-key form does bidi check.
+      if needsWsBefore(c):
+        return emitAdjacencyError(c, t.span)
+      let nextKind = c.stream[].tokens[c.tokIdx + 1].kind
+      if nextKind == tkEquals:
+        # Bidi check on prop-key payload.
+        if t.kind == tkString:
+          let p = c.stream[].stringPayloads[t.strIdx]
+          if containsBidiControl(p):
+            let pe = initError(peLexInvalidIdentifier, t.span,
+                               "bidi control codepoint in property key")
+            c.halted = true
+            return CursorEvent(kind: ceError, span: t.span, err: pe)
+        else:
+          let p = c.stream[].rawStringPayloads[t.rawIdx]
+          if containsBidiControl(p):
+            let pe = initError(peLexInvalidIdentifier, t.span,
+                               "bidi control codepoint in property key")
+            c.halted = true
+            return CursorEvent(kind: ceError, span: t.span, err: pe)
+        let keyIdx = c.tokIdx
+        var valIdx = c.tokIdx + 2
+        var annoIdx = -1
+        if c.stream[].tokens[valIdx].kind == tkLParen:
+          annoIdx = valIdx + 1
+          valIdx += 3
+        c.tokIdx = valIdx + 1
+        return CursorEvent(kind: ceProp, span: t.span,
+                           propKeyTok: keyIdx, propValueTok: valIdx,
+                           propAnnoTok: annoIdx)
+      else:
+        let valIdx = c.tokIdx
+        let myArgIdx = c.argIdx
+        inc c.argIdx
+        inc c.tokIdx
+        return CursorEvent(kind: ceArg, span: t.span,
+                           argIdx: myArgIdx, argTok: valIdx, argAnnoTok: -1)
     of tkIdent:
+      if needsWsBefore(c):
+        return emitAdjacencyError(c, t.span)
       let nextKind = c.stream[].tokens[c.tokIdx + 1].kind
       if nextKind == tkEquals:
         let keyIdx = c.tokIdx
@@ -292,9 +417,22 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
     else:
       return CursorEvent(kind: ceEof, span: t.span)
   of csAfterChildren:
-    # ChildrenEnd was emitted; now emit the parent's NodeEnd implicitly.
-    c.state = csTopLevel
-    return CursorEvent(kind: ceNodeEnd, span: c.tok.span)
+    # ChildrenEnd was emitted. KDL v2: children must be the LAST
+    # component of a node. If the next token is a terminator, emit
+    # parent's NodeEnd implicitly. Otherwise the source has illegal
+    # post-children content (e.g., `foo { x } b=2`) — emit ceError.
+    let nk = c.tok.kind
+    if nk in {tkNewline, tkSemicolon, tkEof, tkRBrace}:
+      c.state = csTopLevel
+      return CursorEvent(kind: ceNodeEnd, span: c.tok.span)
+    let pe = initError(peParseUnexpected, c.tok.span,
+                       "entries are not permitted after a children block")
+    case c.mode
+    of cmSingle: c.halted = true
+    of cmAccumulating:
+      c.state = csTopLevel
+      inc c.tokIdx
+    return CursorEvent(kind: ceError, span: c.tok.span, err: pe)
 
 proc advance*(c: var StringCursor): CursorEvent =
   ## Public entry point: drains queued events first, then generates the

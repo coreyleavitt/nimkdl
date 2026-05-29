@@ -13,6 +13,7 @@ import std/unittest
 import ../src/cursor
 import ../src/intern
 import ../src/lexer
+import ../src/spans
 
 ## Helper: lex `src`, store the TokenStream on the heap so the cursor's
 ## `ptr` stays valid for the duration of the test, return a cursor over it.
@@ -202,6 +203,160 @@ suite "cursor — peek":
 suite "cursor — concept satisfaction":
   test "StringCursor satisfies KdlCursor concept at compile time":
     check StringCursor is KdlCursor
+
+suite "cursor — annotation requires name":
+  test "type annotation followed by no name is an error":
+    let f = mkCursor("(u8)\n")
+    var sawError = false
+    for _ in 0 ..< 10:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+  test "annotation with number-as-tag is rejected":
+    # (123)foo — KDL v2: annotations must be ident or string, not number.
+    let f = mkCursor("(123)foo")
+    var sawError = false
+    for _ in 0 ..< 10:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+suite "cursor — adjacency rule":
+  test "entry directly abutted to node name is rejected":
+    # `foo"bar"` — no whitespace between foo and "bar".
+    let f = mkCursor("foo\"bar\"")
+    var sawError = false
+    for _ in 0 ..< 10:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+  test "entry preceded by whitespace is accepted":
+    let f = mkCursor("foo \"bar\"")
+    var nb, arg = 0
+    for _ in 0 ..< 10:
+      let ev = advance(f)
+      if ev.kind == ceNodeBegin: inc nb
+      elif ev.kind == ceArg: inc arg
+      elif ev.kind == ceEof: break
+    check nb == 1
+    check arg == 1
+
+  test "slashdashed entry bypasses adjacency check":
+    # `foo/-"bar"` — adjacent to foo but slashdash-prefixed so it's
+    # allowed; the slashdashed content can be tight against /-.
+    let f = mkCursor("foo /-\"bar\"")
+    var sawError = false
+    for _ in 0 ..< 10:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check not sawError
+
+suite "cursor — no entries after children":
+  test "entry after children block is rejected":
+    # `foo { x } b=2` — KDL v2 requires children to be the LAST
+    # component of a node. b=2 after `}` is rejected.
+    let f = mkCursor("foo { x } b=2")
+    var sawError = false
+    for _ in 0 ..< 20:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+  test "children block followed by newline terminator is OK":
+    let f = mkCursor("foo { x }\nbar")
+    var nb = 0
+    for _ in 0 ..< 20:
+      let ev = advance(f)
+      if ev.kind == ceError: break
+      if ev.kind == ceNodeBegin: inc nb
+      if ev.kind == ceEof: break
+    check nb == 3   # foo, x, bar
+
+suite "cursor — unclosed children":
+  test "unclosed children block at EOF is rejected":
+    let f = mkCursor("foo {")
+    var sawError = false
+    for _ in 0 ..< 20:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+  test "unclosed children block with content at EOF is rejected":
+    let f = mkCursor("foo { bar")
+    var sawError = false
+    for _ in 0 ..< 20:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+suite "cursor — quoted prop keys":
+  test "quoted string as prop key emits Prop":
+    let f = mkCursor("foo \"my key\"=1")
+    check advance(f).kind == ceNodeBegin
+    check advance(f).kind == ceProp
+    check advance(f).kind == ceNodeEnd
+    check advance(f).kind == ceEof
+
+  test "bidi control in quoted prop key is rejected":
+    let f = mkCursor("foo \"abc‮def\"=1")
+    var sawError = false
+    for _ in 0 ..< 10:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+suite "cursor — quoted node names":
+  test "quoted string as node name emits NodeBegin":
+    let f = mkCursor("\"my node\"")
+    let nb = advance(f)
+    check nb.kind == ceNodeBegin
+    # nodeNameTok points at the quoted-string token; bytes() returns
+    # the QUOTED form (with quotes), but the AST consumer (DocBuilder)
+    # resolves the unescaped payload via the stream's stringPayloads
+    # using the token kind. The cursor only commits to "this is the
+    # name token" — payload resolution is the consumer's concern.
+    check advance(f).kind == ceNodeEnd
+    check advance(f).kind == ceEof
+
+  test "bidi control in quoted node name is rejected":
+    # U+202E RIGHT-TO-LEFT OVERRIDE inside the string payload.
+    let f = mkCursor("\"abc‮def\"")
+    var sawError = false
+    for _ in 0 ..< 10:
+      let ev = advance(f)
+      if ev.kind == ceError: sawError = true; break
+      if ev.kind == ceEof: break
+    check sawError
+
+suite "cursor — MaxParserDepth guard":
+  test "children nesting beyond MaxParserDepth emits ceError":
+    # MaxParserDepth = 256 (typed_parser.MaxParserDepthValue). Build a
+    # source with 257 nested `{` after the top-level node head.
+    var src = "foo "
+    for _ in 0 ..< 257:
+      src.add("{ foo ")
+    let f = mkCursor(src)
+    var sawError = false
+    var sawTooDeep = false
+    for _ in 0 ..< 1000:
+      let ev = advance(f)
+      if ev.kind == ceError:
+        sawError = true
+        if ev.err.code == peParseDepthExceeded: sawTooDeep = true
+        break
+      if ev.kind == ceEof: break
+    check sawError
+    check sawTooDeep
 
 suite "cursor — checkpoint round-trip":
   # `pos()` captures cursor state; `seek()` restores it. Two-call
