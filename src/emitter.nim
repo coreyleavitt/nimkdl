@@ -1,4 +1,4 @@
-import std/strutils
+import std/[math, strutils]
 
 ## emitter — symmetric OUT-side inverse of `KdlCursor`.
 ##
@@ -191,8 +191,90 @@ func pushArgInt*(e: var BufferEmitter, v: int64,
   e.appendBytes($v)
 
 # ---------------------------------------------------------------------------
+# Typed value formatters (shared between Arg and Prop paths)
+# ---------------------------------------------------------------------------
+
+func appendString(e: var BufferEmitter, s: openArray[char]) =
+  ## Emit a KDL v2 quoted string with the minimal-required escape set:
+  ## backslash, double-quote, newline, carriage return, tab. Other
+  ## control chars and surrogates are valid runes but if they appear
+  ## raw the spec allows them through; we don't proactively escape
+  ## them. A more conservative escape policy is a follow-on if the
+  ## P12 round-trip property turns one up.
+  e.appendByte('"')
+  for c in s:
+    case c
+    of '\\': e.appendBytes("\\\\")
+    of '"':  e.appendBytes("\\\"")
+    of '\n': e.appendBytes("\\n")
+    of '\r': e.appendBytes("\\r")
+    of '\t': e.appendBytes("\\t")
+    else:    e.appendByte(c)
+  e.appendByte('"')
+
+func appendFloat(e: var BufferEmitter, v: float64) =
+  ## KDL v2 keyword path for non-finite floats; stdlib `$` for the
+  ## finite case. The Nim default formatter inserts a fractional `.0`
+  ## for whole-valued floats (so `2.0` not `2`), which is exactly the
+  ## spec's typed-float disambiguation rule.
+  if v.classify == fcNan:
+    e.appendBytes("#nan")
+  elif v.classify == fcInf:
+    e.appendBytes("#inf")
+  elif v.classify == fcNegInf:
+    e.appendBytes("#-inf")
+  else:
+    e.appendBytes($v)
+
+func appendBool(e: var BufferEmitter, v: bool) {.inline.} =
+  if v: e.appendBytes("#true") else: e.appendBytes("#false")
+
+func appendNull(e: var BufferEmitter) {.inline.} =
+  e.appendBytes("#null")
+
+# ---------------------------------------------------------------------------
+# Typed-value arg pushes (string / float / bool / null)
+# ---------------------------------------------------------------------------
+
+func pushArgString*(e: var BufferEmitter, v: openArray[char],
+                    anno: openArray[char] = "") =
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendAnno(anno)
+  e.appendString(v)
+
+func pushArgFloat*(e: var BufferEmitter, v: float64,
+                   anno: openArray[char] = "") =
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendAnno(anno)
+  e.appendFloat(v)
+
+func pushArgBool*(e: var BufferEmitter, v: bool,
+                  anno: openArray[char] = "") =
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendAnno(anno)
+  e.appendBool(v)
+
+func pushArgNull*(e: var BufferEmitter, anno: openArray[char] = "") =
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendAnno(anno)
+  e.appendNull()
+
+# ---------------------------------------------------------------------------
 # Typed-value property pushes (codegen zero-overhead path)
 # ---------------------------------------------------------------------------
+
+func appendPropPrefix(e: var BufferEmitter, key: openArray[char],
+                      anno: openArray[char]) {.inline.} =
+  ## Shared lead-in for all pushProp* methods: ` key=(anno)`.
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendBytes(key)
+  e.appendByte('=')
+  e.appendAnno(anno)
 
 func pushPropInt*(e: var BufferEmitter, key: openArray[char], v: int64,
                   anno: openArray[char] = "") =
@@ -200,9 +282,25 @@ func pushPropInt*(e: var BufferEmitter, key: openArray[char], v: int64,
   ## emitted as a bareword; quoted-form fallback for non-bareword-safe
   ## keys lands when a real use case surfaces. Empty `anno` means no
   ## value annotation.
-  e.appendByte(' ')
-  e.consumeSlashdash()
-  e.appendBytes(key)
-  e.appendByte('=')
-  e.appendAnno(anno)
+  e.appendPropPrefix(key, anno)
   e.appendBytes($v)
+
+func pushPropString*(e: var BufferEmitter, key: openArray[char],
+                     v: openArray[char], anno: openArray[char] = "") =
+  e.appendPropPrefix(key, anno)
+  e.appendString(v)
+
+func pushPropFloat*(e: var BufferEmitter, key: openArray[char], v: float64,
+                    anno: openArray[char] = "") =
+  e.appendPropPrefix(key, anno)
+  e.appendFloat(v)
+
+func pushPropBool*(e: var BufferEmitter, key: openArray[char], v: bool,
+                   anno: openArray[char] = "") =
+  e.appendPropPrefix(key, anno)
+  e.appendBool(v)
+
+func pushPropNull*(e: var BufferEmitter, key: openArray[char],
+                   anno: openArray[char] = "") =
+  e.appendPropPrefix(key, anno)
+  e.appendNull()

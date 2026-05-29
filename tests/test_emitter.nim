@@ -182,3 +182,79 @@ suite "emitter — A7: slashdash brackets":
     e.pushChildrenEnd()
     e.pushNodeEnd()
     check e.finish() == "p {\n    /-c\n}\n"
+
+suite "emitter — A8: typed value primitives (string/float/bool/null)":
+
+  test "pushArgString emits quoted value":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("greeting")
+    e.pushArgString("hello")
+    e.pushNodeEnd()
+    check e.finish() == "greeting \"hello\"\n"
+
+  test "pushArgString escapes backslash and double-quote":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("msg")
+    e.pushArgString("she said \"hi\\bye\"")
+    e.pushNodeEnd()
+    check e.finish() == "msg \"she said \\\"hi\\\\bye\\\"\"\n"
+
+  test "pushArgString escapes newline and tab":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("m")
+    e.pushArgString("a\nb\tc")
+    e.pushNodeEnd()
+    check e.finish() == "m \"a\\nb\\tc\"\n"
+
+  test "pushArgFloat emits decimal form for finite values":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("ratio")
+    e.pushArgFloat(1.5)
+    e.pushNodeEnd()
+    check e.finish() == "ratio 1.5\n"
+
+  test "pushArgFloat emits #inf for positive infinity":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("limit")
+    e.pushArgFloat(Inf)
+    e.pushNodeEnd()
+    check e.finish() == "limit #inf\n"
+
+  test "pushArgFloat emits #-inf for negative infinity":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("limit")
+    e.pushArgFloat(NegInf)
+    e.pushNodeEnd()
+    check e.finish() == "limit #-inf\n"
+
+  test "pushArgFloat emits #nan for NaN":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("bad")
+    e.pushArgFloat(NaN)
+    e.pushNodeEnd()
+    check e.finish() == "bad #nan\n"
+
+  test "pushArgBool emits #true / #false":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("flags")
+    e.pushArgBool(true)
+    e.pushArgBool(false)
+    e.pushNodeEnd()
+    check e.finish() == "flags #true #false\n"
+
+  test "pushArgNull emits #null":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("absent")
+    e.pushArgNull()
+    e.pushNodeEnd()
+    check e.finish() == "absent #null\n"
+
+  test "props with typed primitives":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("cfg")
+    e.pushPropString("name", "alpha")
+    e.pushPropBool("enabled", true)
+    e.pushPropFloat("scale", 2.5)
+    e.pushPropNull("fallback")
+    e.pushNodeEnd()
+    check e.finish() == "cfg name=\"alpha\" enabled=#true scale=2.5 fallback=#null\n"
