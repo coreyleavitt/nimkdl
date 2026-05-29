@@ -101,3 +101,50 @@ suite "derive_decode — D2: multi-field typed args":
     var p: Pt
     let r = kdlDecode(p, f.cursor)
     check r.isErr
+
+suite "derive_decode — D3: kdlProp via bytesEq dispatch":
+
+  type Sv {.kdlNode: "sv".} = object
+    host {.kdlProp.}: string
+    port {.kdlProp.}: int
+    enabled {.kdlProp.}: bool
+
+  deriveDecode(Sv)
+
+  test "three typed props populate":
+    let f = mkCursor("sv host=\"a.b\" port=443 enabled=#true")
+    var s: Sv
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.host == "a.b"
+    check s.port == 443
+    check s.enabled == true
+
+  test "props in any order":
+    let f = mkCursor("sv enabled=#false port=80 host=\"x\"")
+    var s: Sv
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.host == "x"
+    check s.port == 80
+    check s.enabled == false
+
+  test "unknown prop returns error":
+    let f = mkCursor("sv unknown=1")
+    var s: Sv
+    let r = kdlDecode(s, f.cursor)
+    check r.isErr
+
+  type Mixed {.kdlNode: "mixed".} = object
+    name {.kdlArg.}: string
+    count {.kdlProp.}: int
+
+  deriveDecode(Mixed)
+
+  test "kdlArg + kdlProp combined":
+    let f = mkCursor("mixed \"first\" count=3")
+    var m: Mixed
+    let r = kdlDecode(m, f.cursor)
+    check r.isOk
+    check m.name == "first"
+    check m.count == 3

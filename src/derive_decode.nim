@@ -103,6 +103,73 @@ proc objectRecList(typeSym: NimNode): NimNode =
 # Macro
 # ---------------------------------------------------------------------------
 
+proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
+                     fieldType: NimNode, cSym: NimNode): NimNode =
+  ## Emit the typed decode of a token at `tokIndexExpr` into
+  ## `targetIdent`. Used by both arg-positional dispatch and
+  ## prop-by-key dispatch — single source of truth for token-to-typed
+  ## conversion.
+  case $fieldType
+  of "string":
+    return quote do:
+      let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
+      case tok.kind
+      of tkString, tkRawString, tkIdent:
+        `targetIdent` = tokenAsString(tok, `cSym`.stream[], `cSym`.source)
+      else:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span, "expected string value"))
+  of "int", "int8", "int16", "int32", "int64":
+    let typeNode = fieldType
+    return quote do:
+      let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
+      if tok.kind != tkNumber:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span, "expected integer value"))
+      let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
+      let decoded = decodeIntFromToken(nPayload, tok.span)
+      if decoded.isErr:
+        return err[void, ParseError](decoded.getErr)
+      `targetIdent` = `typeNode`(decoded.get)
+  of "float", "float32", "float64":
+    let typeNode = fieldType
+    return quote do:
+      let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
+      case tok.kind
+      of tkNumber:
+        let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
+        let decoded = decodeFloatFromToken(nPayload, tok.span)
+        if decoded.isErr:
+          return err[void, ParseError](decoded.getErr)
+        `targetIdent` = `typeNode`(decoded.get)
+      of tkKeyword:
+        case tok.keyword
+        of kwInf:    `targetIdent` = `typeNode`(Inf)
+        of kwNegInf: `targetIdent` = `typeNode`(NegInf)
+        of kwNan:    `targetIdent` = `typeNode`(NaN)
+        else:
+          return err[void, ParseError](
+            initError(peTypeMismatch, tok.span, "expected float value"))
+      else:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span, "expected float value"))
+  of "bool":
+    return quote do:
+      let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
+      if tok.kind != tkKeyword:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span, "expected bool value"))
+      case tok.keyword
+      of kwTrue:  `targetIdent` = true
+      of kwFalse: `targetIdent` = false
+      else:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span, "expected bool value"))
+  else:
+    error("deriveDecode: field type " & $fieldType &
+          " not yet supported (D1-D3 cover string/int/float/bool)")
+    return newEmptyNode()
+
 macro deriveDecode*(T: typedesc): untyped =
   ## Emit `proc kdlDecode(v: var T; c: var StringCursor): Result[void, ParseError]`
   ## specialized to T's field shape. Pulls cursor events, dispatches
@@ -115,97 +182,79 @@ macro deriveDecode*(T: typedesc): untyped =
   let evSym2 = ident("ev2")
   let argIdxSym = ident("argIdx")
 
-  # Collect kdlArg fields (positional, in order). D1 supports kdlArg
-  # string only — subsequent cycles widen.
+  # Collect kdlArg + kdlProp fields by pragma role.
   var argFields: seq[tuple[name: string, typ: NimNode]]
+  var propFields: seq[tuple[name: string, typ: NimNode, wireKey: string]]
   let recList = objectRecList(typeSym)
   for (fieldName, fieldType, pragmas) in regularFields(recList):
     if hasPragma(pragmas, "kdlArg"):
       argFields.add((name: fieldName, typ: fieldType))
+    elif hasPragma(pragmas, "kdlProp"):
+      let renameArg = pragmaArg(pragmas, "kdlRename")
+      let wireKey =
+        if renameArg != nil and renameArg.kind == nnkStrLit:
+          renameArg.strVal
+        else: fieldName
+      propFields.add((name: fieldName, typ: fieldType, wireKey: wireKey))
 
-  # Build the per-arg dispatch: `case argIdx of 0: v.<f0> = ... 1: ... else: error`
+  # Build the per-arg dispatch.
   var argCase = newTree(nnkCaseStmt, argIdxSym)
   for i, (fName, fType) in argFields:
     let fIdent = ident(fName)
     let idxLit = newIntLitNode(i)
-    var branchBody: NimNode
-    case $fType
-    of "string":
-      branchBody = quote do:
-        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
-        case tok.kind
-        of tkString, tkRawString, tkIdent:
-          `vSym`.`fIdent` = tokenAsString(tok, `cSym`.stream[], `cSym`.source)
-        else:
-          return err[void, ParseError](
-            initError(peTypeMismatch, tok.span,
-                      "expected string value"))
-    of "int", "int8", "int16", "int32", "int64":
-      # We widen the destination assignment to fit; numlit returns
-      # int64 and the case narrows back at the field type.
-      let fTypeNode = fType
-      branchBody = quote do:
-        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
-        if tok.kind != tkNumber:
-          return err[void, ParseError](
-            initError(peTypeMismatch, tok.span,
-                      "expected integer value"))
-        let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
-        let decoded = decodeIntFromToken(nPayload, tok.span)
-        if decoded.isErr:
-          return err[void, ParseError](decoded.getErr)
-        `vSym`.`fIdent` = `fTypeNode`(decoded.get)
-    of "float", "float32", "float64":
-      let fTypeNode = fType
-      branchBody = quote do:
-        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
-        case tok.kind
-        of tkNumber:
-          let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
-          let decoded = decodeFloatFromToken(nPayload, tok.span)
-          if decoded.isErr:
-            return err[void, ParseError](decoded.getErr)
-          `vSym`.`fIdent` = `fTypeNode`(decoded.get)
-        of tkKeyword:
-          case tok.keyword
-          of kwInf:    `vSym`.`fIdent` = `fTypeNode`(Inf)
-          of kwNegInf: `vSym`.`fIdent` = `fTypeNode`(NegInf)
-          of kwNan:    `vSym`.`fIdent` = `fTypeNode`(NaN)
-          else:
-            return err[void, ParseError](
-              initError(peTypeMismatch, tok.span,
-                        "expected float value"))
-        else:
-          return err[void, ParseError](
-            initError(peTypeMismatch, tok.span,
-                      "expected float value"))
-    of "bool":
-      branchBody = quote do:
-        let tok = `cSym`.stream[].tokens[`evSym2`.argTok]
-        if tok.kind != tkKeyword:
-          return err[void, ParseError](
-            initError(peTypeMismatch, tok.span,
-                      "expected bool value"))
-        case tok.keyword
-        of kwTrue:  `vSym`.`fIdent` = true
-        of kwFalse: `vSym`.`fIdent` = false
-        else:
-          return err[void, ParseError](
-            initError(peTypeMismatch, tok.span,
-                      "expected bool value"))
-    else:
-      error("deriveDecode: kdlArg field type " & $fType &
-            " not yet supported (cycles D1/D2 cover string/int/float/bool)")
+    let tokIndexExpr = quote do: `evSym2`.argTok
+    let target = quote do: `vSym`.`fIdent`
+    let branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
     argCase.add(newTree(nnkOfBranch, idxLit, branchBody))
-  # else branch: too many positional args
   argCase.add(newTree(nnkElse,
     quote do:
       return err[void, ParseError](
         initError(peParseUnexpected, `evSym2`.span,
                   "unexpected extra positional argument"))))
 
+  # Build the per-prop dispatch: bytesEq if-elif chain.
+  # bytesEq's `unsafeAddr s[0]` needs an addressable location; we lift
+  # each prop key literal to a `let` at proc-entry scope so the
+  # comparisons see a real address. The lets live in `propKeyLets`
+  # and are spliced into the proc body before the event loop.
+  var propKeyLets = newStmtList()
+  var propKeySyms: seq[NimNode]
+  for (_, _, wireKey) in propFields:
+    let sym = genSym(nskLet, "expectedPropKey")
+    let lit = newStrLitNode(wireKey)
+    propKeyLets.add(quote do:
+      let `sym` = `lit`)
+    propKeySyms.add(sym)
+  var propDispatch = newStmtList()
+  if propFields.len > 0:
+    var rootIf: NimNode = nil
+    for i, (fName, fType, _) in propFields:
+      let fIdent = ident(fName)
+      let keySym = propKeySyms[i]
+      let tokIndexExpr = quote do: `evSym2`.propValueTok
+      let target = quote do: `vSym`.`fIdent`
+      let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+      let branchCond = quote do: bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`)
+      let branchBody = decodeBody
+      if rootIf.isNil:
+        rootIf = newNimNode(nnkIfStmt)
+        rootIf.add(newNimNode(nnkElifBranch).add(branchCond).add(branchBody))
+      else:
+        rootIf.add(newNimNode(nnkElifBranch).add(branchCond).add(branchBody))
+    rootIf.add(newNimNode(nnkElse).add(quote do:
+      return err[void, ParseError](
+        initError(peParseUnexpected, `evSym2`.span,
+                  "unknown property"))))
+    propDispatch.add(rootIf)
+  else:
+    propDispatch.add(quote do:
+      return err[void, ParseError](
+        initError(peParseUnexpected, `evSym2`.span,
+                  "unexpected property")))
+
   let body = quote do:
     block:
+      `propKeyLets`
       let `evSym` = advance(`cSym`)
       if `evSym`.kind == ceError:
         return err[void, ParseError](`evSym`.err)
@@ -225,6 +274,8 @@ macro deriveDecode*(T: typedesc): untyped =
         of ceArg:
           `argCase`
           inc `argIdxSym`
+        of ceProp:
+          `propDispatch`
         of ceNodeEnd:
           break
         of ceError:
