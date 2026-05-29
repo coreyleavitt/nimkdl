@@ -465,6 +465,12 @@ func isBareword*(s: openArray[char]): bool =
   if isReservedBareword(s): return false
   if (s[0] == '-' or s[0] == '+') and s.len >= 2 and s[1] in '0'..'9':
     return false
+  # `.<digit>` is a forbidden number-literal prefix that the lexer
+  # rejects with peLexInvalidNumber. The lex/emit mirror would
+  # otherwise let an emitter output something the cursor refuses to
+  # accept. Caught by P12 (`.6rcx` as a prop key).
+  if s[0] == '.' and s.len >= 2 and s[1] in '0'..'9':
+    return false
   # Fast path: pure ASCII bytes.
   var asciiOnly = true
   for i in 0 ..< s.len:

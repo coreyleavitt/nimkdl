@@ -461,3 +461,24 @@ suite "lexer: realistic KDL fragments":
     let ctx = tokenizeCtx(src)
     let t = ctx.stream.tokens
     check t.kinds == @[tkLParen, tkIdent, tkRParen, tkNumber]
+
+suite "isBareword — emit/lex mirror invariants":
+  ## isBareword is the single source of truth for the bareword/quoted
+  ## decision at emit time. Every "yes" answer it gives must be a
+  ## string the lexer would re-accept as a bareword. Counterexamples
+  ## discovered by P12 get pinned here.
+
+  test "leading-dot-then-digit rejected (P12 counterexample .6rcx)":
+    # The lexer rejects `.6...` with peLexInvalidNumber ("number
+    # literals need an integer part before the '.'"). isBareword
+    # used to allow it because '.' is a valid ident-start in
+    # isolation. Mirror the lexer's rule here so the emitter
+    # never outputs a key/name that the cursor will refuse.
+    check not isBareword(".6")
+    check not isBareword(".6rcx")
+    check not isBareword(".0")
+    # `.` alone is still a fine bareword (the lexer accepts it as ident).
+    check isBareword(".")
+    # `.x` (non-digit after dot) is still a fine bareword.
+    check isBareword(".x")
+    check isBareword(".abc")

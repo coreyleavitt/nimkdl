@@ -16,8 +16,26 @@ import std/unittest
 import proptest
 
 import ../src/api
+import ../src/cursor
+import ../src/emitter
+import ../src/intern
 import ../src/kdl_block
+import ../src/lexer
 import ../src/pragmas
+
+proc parseAllEventKinds(src: string): seq[CursorEventKind] =
+  ## Drive a cursor over `src` to EOF, return the event-kind sequence.
+  ## A ceError appearing means the bytes are unparseable — what P12
+  ## must prevent.
+  var interner = initInterner()
+  var sref: ref TokenStream
+  new(sref)
+  sref[] = lex(src, interner)
+  var c = initStringCursor(addr sref[], src)
+  while true:
+    let ev = advance(c)
+    result.add(ev.kind)
+    if ev.kind == ceEof: break
 
 kdl:
   type Service {.kdlNode: "service".} = object
@@ -60,3 +78,68 @@ suite "P11 — deriveDecode never crashes on arbitrary bytes":
     given src in strings(0, 200)
     let pair = decodeAll[seq[Service]](src)
     ensure pair.value.len >= 0  # no exception escaped the recovery loop
+
+suite "P12 — emitter never produces unparseable bytes":
+
+  property "bare node with arbitrary string arg round-trips through cursor":
+    # Strings are the highest-risk arg type — escaping rules cover
+    # backslash, quotes, control codes, and the bareword vs quoted
+    # boundary. If pushArgString gets any escape wrong, the cursor
+    # rejects the output.
+    with Settings(maxExamples: 300, testId: "p12-arg-string")
+    given s in strings(0, 100)
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgString(s)
+    e.pushNodeEnd()
+    let events = parseAllEventKinds(e.finish())
+    ensure ceError notin events
+
+  property "arbitrary int arg round-trips through cursor":
+    with Settings(maxExamples: 200, testId: "p12-arg-int")
+    given n in integers(low(int64), high(int64))
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgInt(n)
+    e.pushNodeEnd()
+    let events = parseAllEventKinds(e.finish())
+    ensure ceError notin events
+
+  property "arbitrary float arg round-trips through cursor":
+    # Includes ±Inf and NaN. KDL has `#inf` / `#-inf` / `#nan`
+    # keyword forms; pushArgFloat must route them correctly.
+    with Settings(maxExamples: 200, testId: "p12-arg-float")
+    given f in floats()
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgFloat(f)
+    e.pushNodeEnd()
+    let events = parseAllEventKinds(e.finish())
+    ensure ceError notin events
+
+  property "arbitrary string prop key + string value round-trip":
+    # Property keys go through the same bareword-vs-quoted decision
+    # as node names. Symmetrically risky.
+    with Settings(maxExamples: 300, testId: "p12-prop-string-string")
+    given key in strings(1, 32), val in strings(0, 64)
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushPropString(key, val)
+    e.pushNodeEnd()
+    let events = parseAllEventKinds(e.finish())
+    ensure ceError notin events
+
+  property "mixed args (int / string / bool / null) round-trip":
+    with Settings(maxExamples: 200, testId: "p12-mixed-args")
+    given i in integers(-1_000_000, 1_000_000),
+          s in strings(0, 32),
+          b in booleans()
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgInt(i)
+    e.pushArgString(s)
+    e.pushArgBool(b)
+    e.pushArgNull()
+    e.pushNodeEnd()
+    let events = parseAllEventKinds(e.finish())
+    ensure ceError notin events
