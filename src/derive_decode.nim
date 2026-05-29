@@ -676,10 +676,35 @@ macro deriveDecode*(T: typedesc): untyped =
     newIdentDefs(vSym, nnkVarTy.newTree(typeSym)),
     newIdentDefs(cSym, nnkVarTy.newTree(ident("StringCursor")))
   )
-  # NOTE: noSideEffect / VM-compat (D14) is a known gap. parse() runs
-  # cleanly in NimVM but kdlDecode-emitted bodies trip an internal
-  # `TFullReg.kind = rkNodeAddr` type-register error somewhere in the
-  # advance/tokenAsString/decodeIntFromToken transitive chain. Needs
-  # systematic isolation — too involved for a single TDD cycle and
-  # doesn't block runtime use. `embed[T]` for compile-time decode is
-  # deferred until that investigation completes.
+  # noSideEffect lets the macro-emitted proc run in NimVM at compile
+  # time. `embed[T](staticSrc)` uses this to materialize a `const T`
+  # baked into the binary with zero runtime parse cost. The VM-fallback
+  # in `cursor.bytesEq` (via `when nimvm`) is what made this possible —
+  # without it, the C `equalMem` and `unsafeAddr` trip the VM's
+  # rkNodeAddr type-register error.
+  result.pragma = newTree(nnkPragma, ident("noSideEffect"))
+
+# ---------------------------------------------------------------------------
+# embed[T] — compile-time decode wrapper
+# ---------------------------------------------------------------------------
+
+import ./intern
+export intern
+
+proc embed*[T](src: static[string]): T =
+  ## Compile-time decode of a static KDL source string into `T`. The
+  ## entire pipeline (lex → cursor → kdlDecode) runs in NimVM, so
+  ## `const cfg = embed[Service](...)` produces a constant value baked
+  ## into the binary with zero runtime parse cost.
+  ##
+  ## Requires `deriveDecode(T)` already invoked in scope. `mixin`
+  ## defers name resolution to the instantiation site so the user's
+  ## emitted kdlDecode is found.
+  mixin kdlDecode
+  var interner = initInterner()
+  var stream = lex(src, interner)
+  var c = initStringCursor(addr stream, src)
+  var v: T
+  let r = kdlDecode(v, c)
+  doAssert r.isOk, "embed[T]: " & r.getErr.hint
+  v

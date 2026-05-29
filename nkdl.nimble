@@ -39,6 +39,7 @@ task test, "Run unit tests":
   exec cmd & " tests/test_derive_encode.nim"
   exec cmd & " tests/test_derive_decode.nim"
   exec cmd & " tests/test_roundtrip.nim"
+  exec cmd & " tests/test_embed.nim"
   # Property tests via proptest. Opt-in via NKDL_PROPTEST=1 so the
   # default `nimble test` (incl. CI) stays self-contained — proptest
   # is currently a local-path dep resolved through milpa and not yet

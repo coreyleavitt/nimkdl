@@ -196,12 +196,27 @@ proc bytes*(c: StringCursor, tokIdx: int): string =
   result = c.source[int(t.span.offset) ..< int(t.span.endOffset)]
 
 template bytesEq*(c: StringCursor, tokIdx: int, s: string): bool =
-  ## Zero-copy compare of the token payload against a literal. The
-  ## per-instantiation `cmp` proc resolves to `==` on byte ranges.
+  ## Zero-copy compare of the token payload against a literal.
+  ## Runtime path uses `equalMem` (C memcmp). `nimvm` branch falls
+  ## back to a byte-by-byte loop because `equalMem` and `unsafeAddr`
+  ## are not implemented in NimVM — without this fallback,
+  ## compile-time decoders (`embed[T]`, `static:` blocks) trip an
+  ## internal `TFullReg.kind = rkNodeAddr` error.
   let t = c.stream[].tokens[tokIdx]
   let o = int(t.span.offset)
   let n = int(t.span.length)
-  n == s.len and equalMem(unsafeAddr c.source[o], unsafeAddr s[0], n)
+  when nimvm:
+    if n != s.len:
+      false
+    else:
+      var ok = true
+      for i in 0 ..< n:
+        if c.source[o + i] != s[i]:
+          ok = false
+          break
+      ok
+  else:
+    n == s.len and equalMem(unsafeAddr c.source[o], unsafeAddr s[0], n)
 
 proc peekSlashdashKindAt(c: StringCursor, atIdx: int): SlashdashKind =
   ## Determine the slashdash kind given the cursor's state and the
