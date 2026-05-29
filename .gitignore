@@ -43,3 +43,4 @@ benchmarks/encode_from
 benchmarks/comparisons/last-run.txt
 benchmarks/comparisons/last-mem.txt
 benchmarks/comparisons/last-corpus.txt
+benchmarks/typed_roundtrip
