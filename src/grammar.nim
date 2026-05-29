@@ -58,7 +58,7 @@
 import std/[strutils, tables]
 
 import ./ast
-import ./encode  # hashNodeFromChildHashes
+import ./hashing  # hashNodeFromChildHashes
 import ./fnv     # Hash128
 import ./intern
 import ./lexer

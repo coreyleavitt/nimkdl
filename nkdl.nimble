@@ -18,6 +18,8 @@ task test, "Run unit tests":
   ## limit before our MaxParserDepth bound trips. Release builds don't
   ## have this limit at all.
   const cmd = "nim c -r --hints:off -d:nimCallDepthLimit=20000"
+  # Substrate that survives the clean-core rebuild. Encode / typed-derive
+  # tests rejoin after Stages B-E land.
   exec cmd & " tests/test_smoke.nim"
   exec cmd & " tests/test_spans.nim"
   exec cmd & " tests/test_intern.nim"
@@ -26,30 +28,9 @@ task test, "Run unit tests":
   exec cmd & " tests/test_parser.nim"
   exec cmd & " tests/test_reserved_keywords.nim"
   exec cmd & " tests/test_reserved_types.nim"
-  exec cmd & " tests/test_kdl_reserved_pragma.nim"
   exec cmd & " tests/test_accessors.nim"
-  exec cmd & " tests/test_derive_encode.nim"
-  exec cmd & " tests/test_encode_typed.nim"
-  exec cmd & " tests/test_builder.nim"
-  exec cmd & " tests/test_multi_error.nim"
-  exec cmd & " tests/test_preserve.nim"
-  exec cmd & " tests/test_preserve_format_optin.nim"
-  exec cmd & " tests/test_typed_parser.nim"
-  exec cmd & " tests/test_typed_parser_vm.nim"
-  exec cmd & " tests/test_doc_builder.nim"
-  exec cmd & " tests/test_doc_builder_conformance.nim"
-  exec cmd & " tests/test_option_and_node_tags.nim"
-  exec cmd & " tests/test_encode.nim"
   exec cmd & " tests/test_grammar.nim"
-  exec cmd & " tests/test_conformance.nim"
-  exec cmd & " tests/test_codegen.nim"
-  exec cmd & " tests/test_decode_all.nim"
-  exec cmd & " tests/test_embed.nim"
   exec cmd & " tests/test_path.nim"
-  exec cmd & " tests/test_variant.nim"
-  exec cmd & " tests/test_h2_compiletime.nim"
-  exec cmd & " tests/test_public_api.nim"
-  exec cmd & " tests/test_readme_examples.nim"
   exec cmd & " tests/test_cursor.nim"
   exec cmd & " tests/test_build_doc.nim"
   # Property tests via proptest. Opt-in via NKDL_PROPTEST=1 so the
@@ -60,13 +41,9 @@ task test, "Run unit tests":
   #
   # Local dev: `milpa fetch` then `NKDL_PROPTEST=1 nimble test`.
   if existsEnv("NKDL_PROPTEST"):
-    exec cmd & " tests/test_preserve_properties.nim"
-    exec cmd & " tests/test_typed_decode_properties.nim"
-    exec cmd & " tests/test_cursor_properties.nim"
+    discard  # P1-P12 property suites land in Stages A-F of the rebuild
   else:
-    echo "[skip] tests/test_preserve_properties.nim — set NKDL_PROPTEST=1 + run `milpa fetch` to enable"
-    echo "[skip] tests/test_typed_decode_properties.nim — set NKDL_PROPTEST=1 + run `milpa fetch` to enable"
-    echo "[skip] tests/test_cursor_properties.nim — set NKDL_PROPTEST=1 + run `milpa fetch` to enable"
+    echo "[skip] property suites — being rebuilt as P1-P12 in Stages A-F"
 
 task perfGuard, "Verify no KdlNode deep-copy regression":
   ## Compile-time check that the parser hot paths don't introduce

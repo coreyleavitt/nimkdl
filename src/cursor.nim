@@ -17,8 +17,8 @@
 ## `bytes(c, idx)` or `tokenAt(c, idx)` for resolution.
 
 import ./ast
-import ./encode
 import ./fnv
+import ./hashing
 import ./intern
 import ./lexer
 import ./numlit

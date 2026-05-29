@@ -4,7 +4,7 @@
 import std/[strutils, unittest]
 
 import ../src/ast
-import ../src/encode
+# encode import removed in the clean-core delete commit (rebuilt in Stage B)
 import ../src/intern
 import ../src/spans
 
@@ -252,16 +252,7 @@ suite "migrateValue: cross-doc transfer":
     migrateValue(srcDoc, dstDoc, v)
     check v.typeAnnotation == oldHandle  # unchanged
 
-  test "after migrateValue, the value works correctly when inserted into dstDoc":
-    var srcDoc = newDoc()
-    var dstDoc = newDoc()
-    discard dstDoc.interner.intern("filler")
-    var v = newStringValue("1.2.3.4")
-    v.setTypeAnnotation(srcDoc, "ipv4")
-    migrateValue(srcDoc, dstDoc, v)
-    var n = dstDoc.newNode("host")
-    n.entries.add(newArgument(v))
-    dstDoc.add(n)
-    let text = encode(dstDoc)
-    check "(ipv4)" in text  # the tag rendered correctly via dstDoc's interner
-    check "1.2.3.4" in text
+  # NOTE: the post-migrateValue encode round-trip is deferred until the
+  # new KdlEmitter / docEmit lands in Stage A/B of the clean-core rebuild.
+  # The migration mechanics themselves are still exercised by the test
+  # immediately above; only the encode-side assertion moved.

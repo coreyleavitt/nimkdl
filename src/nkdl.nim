@@ -67,10 +67,8 @@ import ./spans
 import ./intern
 import ./ast
 import ./parser
-import ./encode
 import ./grammar
 import ./pragmas
-import ./codegen
 import ./path
 # Note: ./lexer and ./typed_parser are NOT imported here on purpose.
 # Lexer keeps Token / TokenKind / Lexer / lex out of the `import nkdl`
@@ -99,8 +97,9 @@ export ast
 # Parser — only the public entry point (parse, MaxParserDepth).
 export parser
 
-# Encoder — full surface (EncodeMode enum + encode proc).
-export encode
+# Encoder — temporarily absent during the clean-core rebuild. The new
+# KdlEmitter primitive + docEmit lands in Stage A/B; encode[T] etc.
+# return in Stage C/E.
 
 # Grammar — public surface includes referenceInterpret (the differential-
 # testing oracle) plus the combinators that let users build their own
@@ -109,14 +108,9 @@ export encode
 export grammar
 
 # Pragmas — kdlNode / kdlArg / kdlProp / kdlChild / kdlSkip / kdlRename /
-# kdlReserved marker templates. Hosted independently so they survive the
-# legacy-visitor cull while the new Stage C/D codegen is being built.
+# kdlReserved marker templates. The new Stage C/D codegen will consume
+# these via `getCustomPragmaVal`.
 export pragmas
-
-# Codegen — the headline surface. Pragmas, `kdl:` block macro, decode[T],
-# decodeAll[T], embed[T], encode[T], kdlDecodeValue overloads (needed
-# by user-defined enum types).
-export codegen
 
 # Path DSL — full public surface.
 export path
