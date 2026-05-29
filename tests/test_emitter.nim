@@ -499,3 +499,68 @@ suite "emitter — A11: P12 round-trip (cursor accepts everything emitter emits)
     for k in events:
       if k == ceNodeBegin: inc nbCt
     check nbCt == 3
+
+suite "emitter — B7: bareword-vs-quoted ident decider":
+
+  test "node name starting with digit gets quoted":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("0node")
+    e.pushNodeEnd()
+    check e.finish() == "\"0node\"\n"
+
+  test "empty node name gets quoted":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("")
+    e.pushArgInt(42)
+    e.pushNodeEnd()
+    check e.finish() == "\"\" 42\n"
+
+  test "node name with reserved keyword gets quoted":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("true")
+    e.pushNodeEnd()
+    check e.finish() == "\"true\"\n"
+
+  test "annotation containing slash gets quoted":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("node", anno = "type/")
+    e.pushNodeEnd()
+    check e.finish() == "(\"type/\")node\n"
+
+  test "empty annotation gets quoted":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("node", anno = "")
+    e.pushNodeEnd()
+    # Empty anno is sentinel "no annotation" — but if someone wants to
+    # *explicitly* emit ("") they need a distinct mechanism. Document
+    # current behavior: empty `anno` parameter means absent annotation,
+    # NOT empty-string-bareword.
+    check e.finish() == "node\n"
+
+  test "prop key starting with sign+digit gets quoted":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushPropInt("-1key", 1)
+    e.pushNodeEnd()
+    check e.finish() == "n \"-1key\"=1\n"
+
+  test "string with backspace + form-feed gets escaped":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgString("a\x08b\x0cc")
+    e.pushNodeEnd()
+    check e.finish() == "n \"a\\bb\\fc\"\n"
+
+  test "string with NUL byte gets \\u{0} escaped":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgString("a\x00b")
+    e.pushNodeEnd()
+    check e.finish() == "n \"a\\u{0}b\"\n"
+
+  test "string with DEL (0x7f) gets escaped":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgString("a\x7fb")
+    e.pushNodeEnd()
+    check e.finish() == "n \"a\\u{7f}b\"\n"

@@ -9,9 +9,9 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Stage A complete (A1-A11; 48 emitter tests passing; full suite GREEN). BufferEmitter primitive lives in `src/emitter.nim`. KdlEmitter concept + validateKdlEmitter template established. P12 round-trip property exercised via 11 table-driven cases — cursor accepts everything BufferEmitter emits.
+**Current state**: Stage A complete + Stage B complete (B1-B7; 57 emitter tests + 20 doc_emit tests + 338/338 conformance + 243/243 byte-exact preserve). Lexer surfaces `isBareword*` as the single source of truth for emit / lex parity. Branch ahead of main by 14 commits.
 
-**Next action**: Start Stage B (docEmit). First cycle B1: walk a single-bare-node KdlDoc, push events into BufferEmitter, expect canonical `"foo\n"` bytes. The emitter API is ready (typed primitives + KdlValue dispatcher); docEmit just orchestrates the walk.
+**Next action**: Start Stage C (deriveEncode codegen). Macro emits per-type `kdlEncode[T]` procs that push typed values through the established push API. Per the perf-first plan revision: each cycle emits shape-specialized code (no boilerplate generic), with kdlReserved tag bytes inlined at macro time. C1 tracer: a flat `type X = object \n  name {.kdlArg.}: string` should generate a kdlEncode that writes `x "..."\n`.
 
 ## Delete order
 
@@ -169,6 +169,6 @@ After G4: merge branch to main (or rename branch → main if cleaner).
 
 Update this line at the end of every session.
 
-**Last session ended after**: Stage A complete. Branch has 8 commits since main; 48 emitter tests + the surviving cursor/buildDoc/parser/grammar substrate all GREEN.
+**Last session ended after**: Stages A + B complete. Branch has 14 commits since main; 338/338 conformance + 243/243 preserve byte-exact + all emitter/doc_emit suites GREEN.
 
-**Next concrete action**: Stage B1 — docEmit tracer. Create `src/doc_emit.nim` (single proc `emitDoc(doc: KdlDoc, e: var BufferEmitter)`) and a test that emits a one-bare-node doc through it and verifies the output equals `"foo\n"`. After B6 the 338-fixture conformance corpus comes back.
+**Next concrete action**: Stage C1 — deriveEncode tracer. Create `src/encode_codegen.nim` (or similar — verify location during Step-1 audit) and a macro `kdlEncode(T)` that emits a `proc kdlEncode[E: KdlEmitter](v: T; e: var E)` specialized to `T`'s shape. Tracer test: a `type X {.kdlNode: "x".} = object \n  name {.kdlArg.}: string` plus a value should round-trip to `x "value"\n` bytes via the codegen-emitted proc.

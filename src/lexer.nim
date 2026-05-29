@@ -424,6 +424,53 @@ func containsBidiControl*(s: openArray[char]): bool =
     inc i
   false
 
+func isBareword*(s: openArray[char]): bool =
+  ## True iff `s` is a valid KDL v2 bare identifier — emittable
+  ## verbatim in a node-name / prop-key / type-tag position without
+  ## quoting. Composes the same per-codepoint predicates the lexer
+  ## uses to *recognize* barewords. Single source of truth: when the
+  ## spec evolves, both lexer (consume) and emitter (produce) see the
+  ## change through this predicate.
+  ##
+  ## Returns false for:
+  ##   - empty string (must be `""`)
+  ##   - reserved keyword (`true` / `false` / `null` / `inf` / `-inf` / `nan`)
+  ##   - leading digit (would tokenize as number)
+  ##   - leading `+`/`-` followed by digit (would tokenize as signed number)
+  ##   - any character that doesn't satisfy `isIdentCont` (ASCII path)
+  ##     or `isIdentCodepoint` (any codepoint path)
+  ##   - bidi control codepoints (per `containsBidiControl`)
+  if s.len == 0: return false
+  if isReservedBareword(s): return false
+  if (s[0] == '-' or s[0] == '+') and s.len >= 2 and s[1] in '0'..'9':
+    return false
+  # Fast path: pure ASCII bytes.
+  var asciiOnly = true
+  for i in 0 ..< s.len:
+    if s[i].uint8 >= 0x80'u8:
+      asciiOnly = false
+      break
+  if asciiOnly:
+    if not isIdentStart(s[0]): return false
+    for i in 1 ..< s.len:
+      if not isIdentCont(s[i]): return false
+    return true
+  # Slow path: copy to string for decodeUtf8At; bareword inputs are
+  # short so the alloc is bounded.
+  let asStr = $(@s)
+  let (firstCp, firstW) = decodeUtf8At(asStr, 0)
+  if firstW == 0: return false
+  if not isIdentCodepoint(firstCp): return false
+  if firstCp < 0x80 and not isIdentStart(char(firstCp)): return false
+  var i = firstW
+  while i < asStr.len:
+    let (cp, w) = decodeUtf8At(asStr, i)
+    if w == 0: return false
+    if not isIdentCodepoint(cp): return false
+    i += w
+  if containsBidiControl(s): return false
+  true
+
 func isHexDigit(ch: char): bool {.inline.} =
   case ch
   of '0'..'9', 'a'..'f', 'A'..'F': true

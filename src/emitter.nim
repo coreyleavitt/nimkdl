@@ -2,6 +2,7 @@ import std/[math, strutils]
 
 import ./ast
 import ./intern
+import ./lexer  # isBareword + isDisallowedControl — emitter is the dual of lexer recognition
 
 ## emitter — symmetric OUT-side inverse of `KdlCursor`.
 ##
@@ -106,17 +107,28 @@ func appendIndent(e: var BufferEmitter) {.inline.} =
     for _ in 0 ..< e.depth:
       e.appendBytes(IndentUnit)
 
+func appendQuotedString(e: var BufferEmitter, s: openArray[char])
+func appendIdent(e: var BufferEmitter, name: openArray[char]) {.inline.} =
+  ## Emit `name` in whichever form the KDL v2 grammar requires: bare
+  ## if `lexer.isBareword(name)` accepts it, quoted form otherwise.
+  ## Single source of truth — both sides of the parse/emit duality
+  ## consult `lexer.isBareword`. When the spec evolves, both update
+  ## through that one predicate.
+  if isBareword(name):
+    e.appendBytes(name)
+  else:
+    e.appendQuotedString(name)
+
 func appendAnno(e: var BufferEmitter, anno: openArray[char]) {.inline.} =
   ## Emit `(anno)` when anno is non-empty. Empty `anno` is the "no
   ## annotation" sentinel; literal `()` is illegal KDL so the sentinel
-  ## is unambiguous. Anno bytes go through as bareword — KDL reserved
-  ## tags (`u8`, `i64`, `ipv4`, `url`, etc.) are bareword-safe by
-  ## construction. Quoted-form annotation is a follow-on once a real
-  ## use case surfaces; the spec permits it but no realistic anno
-  ## requires it.
+  ## is unambiguous. The tag content rides through `appendIdent` —
+  ## bareword if the bytes pass `lexer.isBareword`, quoted otherwise.
+  ## An explicit empty-string tag `("")` is NOT expressible via the
+  ## sentinel; consumers needing it should bypass this helper.
   if anno.len > 0:
     e.appendByte('(')
-    e.appendBytes(anno)
+    e.appendIdent(anno)
     e.appendByte(')')
 
 func consumeSlashdash(e: var BufferEmitter) {.inline.} =
@@ -130,10 +142,15 @@ func pushNodeBegin*(e: var BufferEmitter, name: openArray[char],
   ## attach entries; pushChildrenBegin / pushChildrenEnd nest a child
   ## block; pushNodeEnd terminates. Caller is responsible for protocol
   ## balance. Empty `anno` means no annotation.
+  ##
+  ## `name` is routed through `appendIdent` — if `lexer.isBareword`
+  ## rejects the byte sequence (empty, leading digit, reserved
+  ## keyword, special char, control codepoint, etc.) the wire form
+  ## uses quoted-string syntax instead.
   e.appendIndent()
   e.consumeSlashdash()
   e.appendAnno(anno)
-  e.appendBytes(name)
+  e.appendIdent(name)
 
 func pushNodeEnd*(e: var BufferEmitter) =
   ## Terminate the current node. Canonical mode emits a single newline
@@ -197,13 +214,28 @@ func pushArgInt*(e: var BufferEmitter, v: int64,
 # Typed value formatters (shared between Arg and Prop paths)
 # ---------------------------------------------------------------------------
 
-func appendString(e: var BufferEmitter, s: openArray[char]) =
-  ## Emit a KDL v2 quoted string with the minimal-required escape set:
-  ## backslash, double-quote, newline, carriage return, tab. Other
-  ## control chars and surrogates are valid runes but if they appear
-  ## raw the spec allows them through; we don't proactively escape
-  ## them. A more conservative escape policy is a follow-on if the
-  ## P12 round-trip property turns one up.
+const HexDigits = "0123456789abcdef"
+
+func appendU16Escape(e: var BufferEmitter, b: char) {.inline.} =
+  ## Emit `\u{HH}` for a control byte. Lowercase hex matches the
+  ## kdl-org corpus's canonical form.
+  e.appendBytes("\\u{")
+  let u = uint8(b)
+  if u < 0x10:
+    e.appendByte(HexDigits[int(u)])
+  else:
+    e.appendByte(HexDigits[int(u shr 4)])
+    e.appendByte(HexDigits[int(u and 0x0f)])
+  e.appendByte('}')
+
+func appendQuotedString(e: var BufferEmitter, s: openArray[char]) =
+  ## Emit `"..."` form. Escape policy is the dual of the lexer's
+  ## acceptance rules:
+  ##   - Backslash and double-quote always require `\\` / `\"`
+  ##   - Common whitespace gets the named escape: \n \r \t \b \f
+  ##   - Other control bytes (per `lexer.isDisallowedControl`) need
+  ##     `\u{XX}` since the lexer rejects them literally
+  ##   - Everything else passes through verbatim
   e.appendByte('"')
   for c in s:
     case c
@@ -212,8 +244,19 @@ func appendString(e: var BufferEmitter, s: openArray[char]) =
     of '\n': e.appendBytes("\\n")
     of '\r': e.appendBytes("\\r")
     of '\t': e.appendBytes("\\t")
-    else:    e.appendByte(c)
+    of '\x08': e.appendBytes("\\b")  # backspace
+    of '\x0c': e.appendBytes("\\f")  # form feed
+    else:
+      if isDisallowedControl(c):
+        e.appendU16Escape(c)
+      else:
+        e.appendByte(c)
   e.appendByte('"')
+
+func appendString(e: var BufferEmitter, s: openArray[char]) =
+  ## Public name preserved for the typed-value pushArgString /
+  ## pushPropString paths. Identical to appendQuotedString.
+  e.appendQuotedString(s)
 
 func appendFloat(e: var BufferEmitter, v: float64) =
   ## KDL v2 keyword path for non-finite floats; stdlib `$` for the
@@ -308,10 +351,11 @@ func pushArgNull*(e: var BufferEmitter, anno: openArray[char] = "") =
 
 func appendPropPrefix(e: var BufferEmitter, key: openArray[char],
                       anno: openArray[char]) {.inline.} =
-  ## Shared lead-in for all pushProp* methods: ` key=(anno)`.
+  ## Shared lead-in for all pushProp* methods: ` key=(anno)`. The key
+  ## rides through `appendIdent` (bareword-or-quoted decision).
   e.appendByte(' ')
   e.consumeSlashdash()
-  e.appendBytes(key)
+  e.appendIdent(key)
   e.appendByte('=')
   e.appendAnno(anno)
 
@@ -356,8 +400,18 @@ func pushPropNull*(e: var BufferEmitter, key: openArray[char],
 # That's the AST convenience tax — the codegen path pays nothing
 # because it never constructs a KdlValue.
 
-func resolveAnno(interner: Interner, t: InternedStr): string {.inline.} =
-  if t == InvalidInterned: "" else: interner.lookup(t)
+func appendInternedAnno(e: var BufferEmitter, interner: Interner,
+                        t: InternedStr) {.inline.} =
+  ## Emit `(tag)` from an InternedStr handle, distinguishing absent
+  ## (InvalidInterned → no annotation) from explicit empty
+  ## (interned-handle-to-empty-string → `("")` form). The string-based
+  ## `appendAnno` can't make this distinction because empty-string is
+  ## the absent sentinel there; the AST-walking paths consult the
+  ## InternedStr handle directly to preserve the semantic difference.
+  if t != InvalidInterned:
+    e.appendByte('(')
+    e.appendIdent(interner.lookup(t))
+    e.appendByte(')')
 
 func dispatchValue(e: var BufferEmitter, v: KdlValue) {.inline.} =
   case v.kind
@@ -370,16 +424,37 @@ func dispatchValue(e: var BufferEmitter, v: KdlValue) {.inline.} =
 
 func pushArg*(e: var BufferEmitter, v: KdlValue, interner: Interner) =
   ## Append an arg whose value + anno are carried in the KdlValue.
+  ## Routes annotation through the InternedStr-aware path so an
+  ## explicit empty `("")` annotation survives byte-exactly.
   e.appendByte(' ')
   e.consumeSlashdash()
-  e.appendAnno(resolveAnno(interner, v.typeAnnotation))
+  e.appendInternedAnno(interner, v.typeAnnotation)
   e.dispatchValue(v)
 
 func pushProp*(e: var BufferEmitter, key: openArray[char], v: KdlValue,
                interner: Interner) =
-  ## Append a `key=v` property; same anno-resolution rules as pushArg.
-  e.appendPropPrefix(key, resolveAnno(interner, v.typeAnnotation))
+  ## Append a `key=v` property; AST-aware annotation handling.
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendIdent(key)
+  e.appendByte('=')
+  e.appendInternedAnno(interner, v.typeAnnotation)
   e.dispatchValue(v)
+
+# ---------------------------------------------------------------------------
+# AST-aware node-begin overload (for docEmit / parsed-tree consumers)
+# ---------------------------------------------------------------------------
+
+proc pushNodeBegin*(e: var BufferEmitter, name: openArray[char],
+                    interner: Interner, annoTok: InternedStr) =
+  ## AST-aware variant: takes the node's annotation as an InternedStr
+  ## handle so the absent-vs-explicit-empty distinction round-trips.
+  ## docEmit uses this; codegen uses the openArray[char] overload
+  ## (synthesized callers don't need the distinction).
+  e.appendIndent()
+  e.consumeSlashdash()
+  e.appendInternedAnno(interner, annoTok)
+  e.appendIdent(name)
 
 # ---------------------------------------------------------------------------
 # KdlEmitter concept — symmetric inverse of KdlCursor

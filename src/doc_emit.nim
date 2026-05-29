@@ -26,11 +26,12 @@ import ./emitter
 import ./intern
 import ./spans
 
-proc emitEntry[E: KdlEmitter](entry: KdlEntry, doc: KdlDoc, e: var E) =
+proc emitEntry(entry: KdlEntry, doc: KdlDoc, e: var BufferEmitter) =
   ## Forward an entry's value through the emitter via the KdlValue
   ## dispatcher (resolves the value's typeAnnotation against the
   ## doc's interner). Args go through pushArg; props prepend the
-  ## interned key.
+  ## interned key. Concrete BufferEmitter because the KdlValue
+  ## dispatcher overloads live on it, not on the KdlEmitter concept.
   case entry.kind
   of keArgument:
     e.pushArg(entry.argValue, doc.interner)
@@ -38,11 +39,12 @@ proc emitEntry[E: KdlEmitter](entry: KdlEntry, doc: KdlDoc, e: var E) =
     e.pushProp(doc.interner.lookup(entry.propName), entry.propValue,
                doc.interner)
 
-proc emitNode[E: KdlEmitter](n: KdlNode, doc: KdlDoc, e: var E) =
-  let anno =
-    if n.typeAnnotation == InvalidInterned: ""
-    else: doc.interner.lookup(n.typeAnnotation)
-  e.pushNodeBegin(doc.interner.lookup(n.name), anno)
+proc emitNode(n: KdlNode, doc: KdlDoc, e: var BufferEmitter) =
+  ## AST-aware emit. Uses the InternedStr-handle pushNodeBegin
+  ## overload so explicit empty-string annotations `("")` are
+  ## preserved byte-exactly (the string-based pushNodeBegin can't
+  ## distinguish that from "no annotation").
+  e.pushNodeBegin(doc.interner.lookup(n.name), doc.interner, n.typeAnnotation)
   for entry in n.entries:
     emitEntry(entry, doc, e)
   if n.children.len > 0:
@@ -52,10 +54,18 @@ proc emitNode[E: KdlEmitter](n: KdlNode, doc: KdlDoc, e: var E) =
     e.pushChildrenEnd()
   e.pushNodeEnd()
 
-proc emitDoc*[E: KdlEmitter](doc: KdlDoc, e: var E) =
+proc emitDoc*(doc: KdlDoc, e: var BufferEmitter) =
   ## Emit `doc` through `e` in canonical mode. Walks top-level nodes
   ## in source order; each node pushes Begin → entries → children →
   ## End. The preserve-mode counterpart is `emitDocPreserve` below.
+  ##
+  ## Concrete BufferEmitter signature because the AST-aware push
+  ## overloads (KdlValue dispatcher, InternedStr annotation) live on
+  ## BufferEmitter rather than the KdlEmitter concept. A generic-on-
+  ## KdlEmitter docEmit would require adding all the AST-aware paths
+  ## to the concept; that pollutes impls that don't need them. The
+  ## generic / streaming-event consumer pattern lives one level up
+  ## (Cat 1 OUT, hand-written by users).
   for n in doc.nodes:
     emitNode(n, doc, e)
 
