@@ -74,30 +74,36 @@ suite "P3 — cursor safety on arbitrary bytes":
 # P1 — cursor ↔ emitter event round-trip
 # ---------------------------------------------------------------------------
 
-proc tokToGenArg(tok: Token, stream: TokenStream, source: string): GenEvent =
+proc tokToGenArg(tok: Token, anno: string,
+                 stream: TokenStream, source: string): GenEvent =
   ## Decode a cursor-arg token back into the GenEvent payload shape.
+  ## `anno` is the resolved annotation bytes (empty string == none).
   case tok.kind
   of tkString, tkRawString:
-    GenEvent(kind: geArgString, argStr: tokenAsString(tok, stream, source))
+    GenEvent(kind: geArgString,
+             argStr: tokenAsString(tok, stream, source),
+             argStrAnno: anno)
   of tkNumber:
     let payload = stream.numberPayloads[tok.numIdx]
     let asInt = decodeIntFromToken(payload, tok.span)
     if asInt.isOk:
-      GenEvent(kind: geArgInt, argInt: asInt.get)
+      GenEvent(kind: geArgInt, argInt: asInt.get, argIntAnno: anno)
     else:
       let asFloat = decodeFloatFromToken(payload, tok.span)
       doAssert asFloat.isOk, "number token decoded as neither int nor float"
-      GenEvent(kind: geArgFloat, argFloat: asFloat.get)
+      GenEvent(kind: geArgFloat, argFloat: asFloat.get, argFloatAnno: anno)
   of tkKeyword:
     case tok.keyword
-    of kwTrue:  GenEvent(kind: geArgBool, argBool: true)
-    of kwFalse: GenEvent(kind: geArgBool, argBool: false)
-    of kwNull:  GenEvent(kind: geArgNull)
-    of kwInf:   GenEvent(kind: geArgFloat, argFloat: Inf)
-    of kwNegInf: GenEvent(kind: geArgFloat, argFloat: NegInf)
-    of kwNan:   GenEvent(kind: geArgFloat, argFloat: NaN)
+    of kwTrue:  GenEvent(kind: geArgBool, argBool: true, argBoolAnno: anno)
+    of kwFalse: GenEvent(kind: geArgBool, argBool: false, argBoolAnno: anno)
+    of kwNull:  GenEvent(kind: geArgNull, argNullAnno: anno)
+    of kwInf:   GenEvent(kind: geArgFloat, argFloat: Inf, argFloatAnno: anno)
+    of kwNegInf: GenEvent(kind: geArgFloat, argFloat: NegInf, argFloatAnno: anno)
+    of kwNan:   GenEvent(kind: geArgFloat, argFloat: NaN, argFloatAnno: anno)
   of tkIdent:
-    GenEvent(kind: geArgString, argStr: tokenAsString(tok, stream, source))
+    GenEvent(kind: geArgString,
+             argStr: tokenAsString(tok, stream, source),
+             argStrAnno: anno)
   else:
     doAssert false, "unexpected arg token kind"
     GenEvent(kind: geArgNull)
@@ -110,66 +116,93 @@ proc cursorEventsToGen(src: string): seq[GenEvent] =
   new(sref)
   sref[] = lex(src, interner)
   var c = initStringCursor(addr sref[], src)
+  proc tokTextOrEmpty(idx: int): string =
+    if idx < 0: "" else: tokenAsString(sref.tokens[idx], sref[], src)
   while true:
     let ev = advance(c)
     case ev.kind
     of ceNodeBegin:
       let tok = sref.tokens[ev.nodeNameTok]
       result.add(GenEvent(kind: geNodeBegin,
-                          nodeName: tokenAsString(tok, sref[], src)))
+                          nodeName: tokenAsString(tok, sref[], src),
+                          nodeAnno: tokTextOrEmpty(ev.nodeAnnoTok)))
     of ceArg:
       let tok = sref.tokens[ev.argTok]
-      result.add(tokToGenArg(tok, sref[], src))
+      let anno = tokTextOrEmpty(ev.argAnnoTok)
+      result.add(tokToGenArg(tok, anno, sref[], src))
     of ceProp:
       let keyTok = sref.tokens[ev.propKeyTok]
       let valTok = sref.tokens[ev.propValueTok]
       let key = tokenAsString(keyTok, sref[], src)
-      let argShape = tokToGenArg(valTok, sref[], src)
+      let anno = tokTextOrEmpty(ev.propAnnoTok)
+      let argShape = tokToGenArg(valTok, anno, sref[], src)
       result.add:
         case argShape.kind
         of geArgString: GenEvent(kind: gePropString,
-                                 propStrKey: key, propStrVal: argShape.argStr)
+                                 propStrKey: key, propStrVal: argShape.argStr,
+                                 propStrAnno: anno)
         of geArgInt:    GenEvent(kind: gePropInt,
-                                 propIntKey: key, propIntVal: argShape.argInt)
+                                 propIntKey: key, propIntVal: argShape.argInt,
+                                 propIntAnno: anno)
         of geArgFloat:  GenEvent(kind: gePropFloat,
-                                 propFloatKey: key, propFloatVal: argShape.argFloat)
+                                 propFloatKey: key, propFloatVal: argShape.argFloat,
+                                 propFloatAnno: anno)
         of geArgBool:   GenEvent(kind: gePropBool,
-                                 propBoolKey: key, propBoolVal: argShape.argBool)
-        of geArgNull:   GenEvent(kind: gePropNull, propNullKey: key)
+                                 propBoolKey: key, propBoolVal: argShape.argBool,
+                                 propBoolAnno: anno)
+        of geArgNull:   GenEvent(kind: gePropNull, propNullKey: key,
+                                 propNullAnno: anno)
         else:
           doAssert false, "unexpected prop value shape"
-          GenEvent(kind: gePropNull, propNullKey: key)
-    of ceChildrenBegin: result.add(GenEvent(kind: geChildrenBegin))
-    of ceChildrenEnd:   result.add(GenEvent(kind: geChildrenEnd))
-    of ceNodeEnd:       result.add(GenEvent(kind: geNodeEnd))
+          GenEvent(kind: gePropNull, propNullKey: key, propNullAnno: anno)
+    of ceChildrenBegin:   result.add(GenEvent(kind: geChildrenBegin))
+    of ceChildrenEnd:     result.add(GenEvent(kind: geChildrenEnd))
+    of ceNodeEnd:         result.add(GenEvent(kind: geNodeEnd))
+    of ceSlashdashBegin:  result.add(GenEvent(kind: geSlashdashBegin))
+    of ceSlashdashEnd:    result.add(GenEvent(kind: geSlashdashEnd))
     of ceEof: return
     of ceError:
       doAssert false, "cursor rejected emitter output — P1 violated"
-    else: discard  # slashdash markers — covered in dedicated cycle
 
 func eventEqual(a, b: GenEvent): bool =
   ## Span-free GenEvent equality. NaN-safe (Inf equals Inf; NaN
   ## equals NaN by representation, since proptest's float strategy
   ## doesn't produce NaN by default and KDL parses `#nan` → NaN
-  ## with the same bit pattern).
+  ## with the same bit pattern). Annotations are compared bytewise.
   if a.kind != b.kind: return false
   case a.kind
-  of geNodeBegin:  a.nodeName == b.nodeName
-  of geNodeEnd, geChildrenBegin, geChildrenEnd, geArgNull: true
-  of geArgString:  a.argStr == b.argStr
-  of geArgInt:     a.argInt == b.argInt
+  of geNodeBegin:
+    a.nodeName == b.nodeName and a.nodeAnno == b.nodeAnno
+  of geNodeEnd, geChildrenBegin, geChildrenEnd,
+     geSlashdashBegin, geSlashdashEnd: true
+  of geArgNull:
+    a.argNullAnno == b.argNullAnno
+  of geArgString:
+    a.argStr == b.argStr and a.argStrAnno == b.argStrAnno
+  of geArgInt:
+    a.argInt == b.argInt and a.argIntAnno == b.argIntAnno
   of geArgFloat:
-    (a.argFloat.classify == fcNaN and b.argFloat.classify == fcNaN) or
-    a.argFloat == b.argFloat
-  of geArgBool:    a.argBool == b.argBool
-  of gePropString: a.propStrKey == b.propStrKey and a.propStrVal == b.propStrVal
-  of gePropInt:    a.propIntKey == b.propIntKey and a.propIntVal == b.propIntVal
+    ((a.argFloat.classify == fcNaN and b.argFloat.classify == fcNaN) or
+     a.argFloat == b.argFloat) and
+    a.argFloatAnno == b.argFloatAnno
+  of geArgBool:
+    a.argBool == b.argBool and a.argBoolAnno == b.argBoolAnno
+  of gePropString:
+    a.propStrKey == b.propStrKey and a.propStrVal == b.propStrVal and
+    a.propStrAnno == b.propStrAnno
+  of gePropInt:
+    a.propIntKey == b.propIntKey and a.propIntVal == b.propIntVal and
+    a.propIntAnno == b.propIntAnno
   of gePropFloat:
     a.propFloatKey == b.propFloatKey and
     ((a.propFloatVal.classify == fcNaN and b.propFloatVal.classify == fcNaN) or
-     a.propFloatVal == b.propFloatVal)
-  of gePropBool:   a.propBoolKey == b.propBoolKey and a.propBoolVal == b.propBoolVal
-  of gePropNull:   a.propNullKey == b.propNullKey
+     a.propFloatVal == b.propFloatVal) and
+    a.propFloatAnno == b.propFloatAnno
+  of gePropBool:
+    a.propBoolKey == b.propBoolKey and a.propBoolVal == b.propBoolVal and
+    a.propBoolAnno == b.propBoolAnno
+  of gePropNull:
+    a.propNullKey == b.propNullKey and a.propNullAnno == b.propNullAnno
 
 func eventSeqEqual(a, b: seq[GenEvent]): bool =
   if a.len != b.len: return false
@@ -213,6 +246,31 @@ suite "P1 — cursor ↔ emitter event round-trip (F12)":
     let observed = cursorEventsToGen(bytes)
     ensure eventSeqEqual(observed, events)
 
+  property "annotated nodes + args round-trip payload-equally":
+    # F11.5 — every node-name and every arg-value may carry a
+    # `(type)` annotation. The comparator's anno-bytes equality
+    # asserts the cursor's resolved annotation token matches what
+    # the generator emitted via the emitter's anno parameter.
+    with Settings(maxExamples: 200, testId: "p1-annotated-args")
+    given events in nodeWithAnnotatedArgsEvents()
+    var emit = newBufferEmitter()
+    for ev in events: pushGenEvent(emit, ev)
+    let bytes = emit.finish()
+    let observed = cursorEventsToGen(bytes)
+    ensure eventSeqEqual(observed, events)
+
+  property "annotated mixed entries (args + props) round-trip payload-equally":
+    # F11.5b — exercises annotations on prop values in addition to
+    # args + node names. Prop keys themselves are never annotated
+    # per KDL spec.
+    with Settings(maxExamples: 200, testId: "p1-annotated-entries")
+    given events in nodeWithAnnotatedEntriesEvents()
+    var emit = newBufferEmitter()
+    for ev in events: pushGenEvent(emit, ev)
+    let bytes = emit.finish()
+    let observed = cursorEventsToGen(bytes)
+    ensure eventSeqEqual(observed, events)
+
   property "recursive children block sequence round-trips payload-equally":
     # Bounded-depth tree of nodes with optional children blocks.
     # The most expressive shape in the substrate: every nesting
@@ -221,6 +279,46 @@ suite "P1 — cursor ↔ emitter event round-trip (F12)":
     # many draws.
     with Settings(maxExamples: 200, testId: "p1-recursive-tree")
     given events in nodeWithChildrenEvents()
+    var emit = newBufferEmitter()
+    for ev in events: pushGenEvent(emit, ev)
+    let bytes = emit.finish()
+    let observed = cursorEventsToGen(bytes)
+    ensure eventSeqEqual(observed, events)
+
+  property "slashdash at all three positions round-trips payload-equally":
+    # F11.6 full — exercises entry-position, node-position, AND
+    # children-block-position slashdash simultaneously across a
+    # depth-bounded tree. The substrate's most demanding round-trip
+    # test: every slashdash position the cursor recognizes must
+    # surface symmetrically from emitted bytes.
+    with Settings(maxExamples: 200, testId: "p1-slashdash-all")
+    given events in nodeWithSlashdashAllPositionsEvents()
+    var emit = newBufferEmitter()
+    for ev in events: pushGenEvent(emit, ev)
+    let bytes = emit.finish()
+    let observed = cursorEventsToGen(bytes)
+    ensure eventSeqEqual(observed, events)
+
+  property "slashdashed entries surface as ceSlashdashBegin/End markers":
+    # F11.6 tracer — entry-position slashdash. Each arg/prop has a
+    # ~40% chance of being wrapped in `/-`. The cursor must surface
+    # the slashdash brackets so the generator's [SlashdashBegin,
+    # entry, SlashdashEnd] sequence is recovered exactly.
+    with Settings(maxExamples: 200, testId: "p1-slashdash-entry")
+    given events in nodeWithSlashdashEntryEvents()
+    var emit = newBufferEmitter()
+    for ev in events: pushGenEvent(emit, ev)
+    let bytes = emit.finish()
+    let observed = cursorEventsToGen(bytes)
+    ensure eventSeqEqual(observed, events)
+
+  property "top-level multi-node document round-trips payload-equally":
+    # F11.7 — 0..N sibling trees at the top level. Adds the
+    # csTopLevel state-transition dimension: each NodeEnd at the
+    # top must hand off cleanly to the next NodeBegin (or to
+    # ceEof).
+    with Settings(maxExamples: 150, testId: "p1-top-level")
+    given events in topLevelEvents()
     var emit = newBufferEmitter()
     for ev in events: pushGenEvent(emit, ev)
     let bytes = emit.finish()
