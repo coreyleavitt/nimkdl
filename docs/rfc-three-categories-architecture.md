@@ -1,9 +1,16 @@
 # RFC: Three-Categories Architecture (v1)
 
-**Status**: Approved, not yet implemented. Drives the v0.x→v1 rewrite.
-**Filed**: 2026-05-28 — TBD GitHub milestone after context compaction.
+**Status**: Phases 0-2 landed (cursor + buildDoc + parse swap). Phases 3-6 superseded by a clean-core branch rebuild — see `docs/branch-rebuild-plan.md` for the operational sequencing.
+**Filed**: 2026-05-28. Revised 2026-05-29 with IN/OUT symmetry + branch-rebuild strategy.
 **Supersedes**: nkdl#8 (parametric SeqBuilder), nkdl#10 (pull-based decoder RFC), partially closes nkdl#7 + nkdl#11 by construction.
-**Status before this RFC**: nkdl is private; visitor-protocol architecture had latent depth-2+ nested-children bug surfaced by proptest property suite; user decided to redesign instead of patching.
+
+## Revision history
+
+- **2026-05-28** — Initial filing. Cursor + three-categories layering for the IN side. Phases land incrementally on main.
+- **2026-05-29** — Extended:
+  - IN/OUT symmetry: KdlEmitter primitive as the inverse of KdlCursor. All three categories ride on cursor (IN) and emitter (OUT).
+  - PBT redesign catalog (P1-P12) covering the new substrate's load-bearing invariants.
+  - Branch-rebuild strategy replaces incremental Phase 3-5. Clean substrate; legacy deleted before rebuild starts; validation gate at the end. Operational plan: `docs/branch-rebuild-plan.md`.
 
 ---
 
@@ -33,35 +40,52 @@ The root smell: state-machine logic encoded in struct fields, manually managed b
 
 ---
 
-## Target architecture: token cursor as foundation
+## Target architecture: symmetric cursor (IN) + emitter (OUT)
 
 ```
-                                         ┌──────────────┐
-                                         │ User code    │
-                                         └───┬──────┬───┘
-            ┌─────────────────────────────────┘      │
-            │                                        │
-   Cat 2: decode[T](source)              Cat 1: streaming events
-   Cat 3: parse(source) → KdlDoc                    │
-            │                                        │
-   ┌────────▼─────────┐                ┌─────────────▼──────────┐
-   │ Pull-based       │                │ Cat 1 driver           │
-   │ recursive descent│                │ (exposes events)       │
-   └────────┬─────────┘                └──────────┬─────────────┘
-            │                                    │
-            └────────────┬───────────────────────┘
-                         │
-                ┌────────▼────────┐
-                │ KdlCursor        │  ← Nim concept; multiple impls
-                │ (grammar-aware)  │     StringCursor, TokenListCursor,
-                └────────┬─────────┘     future IncrementalCursor
-                         │
-                  ┌──────▼──────┐
-                  │ Lexer        │
-                  └─────────────┘
+                     wire bytes
+                  ┌──────┴───────┐
+              [lexer]        [byte-writer]
+                  │              │
+              tokens          tokens
+                  │              │
+           ┌──────▼─────┐  ┌────▼─────────┐
+           │ KdlCursor  │  │ KdlEmitter   │   ← symmetric primitives;
+           │ (events    │  │ (events in)  │     Nim concepts; multiple impls
+           │  out)      │  │              │
+           └───┬────────┘  └────┬─────────┘
+               │                │
+               │                │
+      ┌────────┼────────┐ ┌─────┼─────────┐
+      │        │        │ │     │         │
+   buildDoc deriveDecode│ │ docEmit deriveEncode
+   (Cat 3 IN)(Cat 2 IN)│ │ (Cat3 OUT)(Cat2 OUT)
+                       │ │
+                Cat 1 IN  Cat 1 OUT
+                (events   (events
+                 exposed)  pushed by user)
 ```
 
-Three consumer modules. One shared cursor primitive. Lexer untouched.
+**Two foundation primitives, perfectly symmetric.** All three category surfaces
+ride on both:
+
+- **Cat 1**: cursor's event stream is exposed publicly (IN); emitter accepts
+  push calls from user code (OUT).
+- **Cat 2**: `deriveDecode` codegen emits recursive `decode[T]` over cursor
+  events (IN); `deriveEncode` codegen emits recursive `encode[T]` pushing
+  into emitter (OUT).
+- **Cat 3**: `buildDoc` folds cursor events into KdlDoc via explicit stack (IN);
+  `docEmit` walks KdlDoc pushing events into emitter (OUT).
+
+Same shape on both sides. The complexity is in two small substrate modules
+(cursor + emitter), shared across all three categories. Lexer and byte-writer
+are thin layers at the wire boundary.
+
+**Why symmetric?** Without an emitter, every OUT producer (deriveEncode,
+docEmit, hypothetical Cat 1 push) duplicates concerns: quoting, escaping,
+indentation, preserve-mode byte splicing. The emitter centralizes those. The
+inverse of a grammar-aware reader IS a grammar-aware writer; pretending
+otherwise leaves the design lopsided.
 
 ---
 
@@ -237,31 +261,273 @@ Use `replayFrom(savedPos)` to branch from a saved cursor position. After a sourc
 
 ---
 
-## Phasing (filing plan)
+## The emitter (KdlEmitter concept) — symmetric inverse of the cursor
 
-**Milestone: Three-Categories Architecture v1**
+The cursor produces grammar events from wire bytes. The emitter accepts grammar
+events and produces wire bytes. Both are concepts to allow multiple impls
+(default impl writes to a `string` buffer; future impls could write to a stream,
+splice into source-with-tombstones for preserve mode, or count for size-only).
 
-1. **RFC** (this document, filed as tracking issue with link to docs/rfc-three-categories-architecture.md)
-2. **Phase 0: property-test discipline pass** — replace `assumeOk(decode[T](text))` with strict `let v = decode[T](text); ensure v.isOk; let val = v.get`. Exposes all latent bugs. Validates the existing 33-property suite is meaningful.
-3. **Phase 1: cursor module** — `src/cursor.nim` defining `KdlCursor` concept, `CursorEvent`, `StringCursor` default impl. Unit tests against synthetic event sequences.
-4. **Phase 2: DocBuilder rewrite** — rewrite `src/doc_builder.nim` to ride the cursor. Validation gate: all 18 AST property tests + 668 example tests + 338-file conformance corpus pass unchanged.
-5. **Phase 3: pull-based decode codegen** — replace `deriveVisitor` with `deriveDecode`. Cat 2 typed-decode now uses cursor + direct function recursion. Validation gate: strict-mode typed-decode property suite passes (including Tree at arbitrary depth + L1→L2→L3).
-6. **Phase 4: Cat 1 productization** — rename `typed_parser.nim` → `streaming_parser.nim`, restructure as cursor consumer, document, expose supporting types in the umbrella, write `docs/streaming-cookbook.md` with 4-5 example visitors.
-7. **Phase 5: delete obsolete codegen** — remove deriveVisitor's per-T XVBuilder/XVBuilderSeq emission, `kdlBuildVisitorSeq`/`kdlBuildVisitorAllSeq` wrappers. Net code reduction: ~1200 LOC.
-8. **Phase 6: bench gate** — measure against current ~46.9μs/100-Service baseline. ±10% acceptable. Profile if outside.
+```nim
+type
+  KdlEmitter* = concept e, var me
+    push(me, CursorEvent)         ## emit a single event
+    pushNodeBegin(me, name: string, anno: Option[string], span: Span)
+    pushArg(me, val: KdlValue, anno: Option[string])
+    pushProp(me, key: string, val: KdlValue, anno: Option[string])
+    pushChildrenBegin(me)
+    pushChildrenEnd(me)
+    pushNodeEnd(me)
+    pushSlashdashBegin(me)
+    pushSlashdashEnd(me)
+    finish(me) is string          ## commit; return wire bytes
+    pos(e) is EmitterCheckpoint   ## save for branching
+    seek(me, EmitterCheckpoint)   ## restore (for speculative emit)
+```
 
-**Standalone issues (not in the milestone)**:
+The `push` overloads sit at the same grammar-event level as the cursor's
+`CursorEvent` discriminated union. Higher-level helpers (`pushArg(val, ...)`)
+take typed values, do the right quoting/escaping based on value kind. The
+emitter owns:
 
-- Extract `hashNodeFromChildHashes` from `encode.nim` to its own small module (`src/hash.nim` or similar). Decouples `grammar.nim`'s differential oracle from encode internals.
-- `path.nim` product direction: commit as a real surface, demote to `.where()` iterator helpers only, or move to `examples/`. Decide before v1.
+- **Quoting decisions** — when to bareword, when to quote, when to raw-string.
+- **Escape sequences** — `\n`, `\"`, `\u{}` rules per KDL v2.
+- **Indentation + framing** — how children blocks are visually structured.
+- **Annotation formatting** — `(tag)` placement.
+- **Preserve-mode splicing** — when a node's `parseHash` matches the original
+  source bytes, splice the original directly instead of re-emitting.
 
-**Existing issues — disposition**:
+That last bullet is the key reason for the emitter: preserve-mode byte-exact
+round-trip needs *one* implementation that all OUT producers share, not three.
 
-- **nkdl#7** (self-recursive seq[Self] compile failure): closed by Phase 3 (cursor-based codegen). Add "fixed by milestone" link when filing.
-- **nkdl#8** (parametric SeqBuilder[B]): closed as superseded. Approach was correct direction but token-cursor primitive supersedes the per-T parametric machinery.
-- **nkdl#9** (deriveEncode ref-object): keep open. Orthogonal; revisit after milestone. Becomes simpler under cursor architecture because encode is already pull-based — just relax the type check.
-- **nkdl#10** (pull-based decoder RFC): closed as superseded by this RFC.
-- **nkdl#11** (depth-2+ nested children corruption): closed by Phase 3 (state lives on the call stack, not in struct fields).
+Default impl: `BufferEmitter` writing to a `string`. The preserve variant
+takes a source-bytes + parse-hash table at init time and consults them on
+each push.
+
+## How each category rides the emitter
+
+### Cat 1 — User push events
+
+The user assembles their event stream and pushes into the emitter directly:
+
+```nim
+var e = newBufferEmitter()
+e.pushNodeBegin("config")
+e.pushArg(newStringValue("prod"))
+e.pushChildrenBegin()
+e.pushNodeBegin("server")
+e.pushProp("port", newIntValue(8080))
+e.pushNodeEnd()
+e.pushChildrenEnd()
+e.pushNodeEnd()
+let bytes = e.finish()
+```
+
+The Cat 1 OUT user-API. Useful for transform pipelines that don't want to
+build a full KdlDoc.
+
+### Cat 2 — Typed encode (codegen)
+
+`deriveEncode` macro emits one `kdlEncode` proc per user type, pushing into
+the emitter:
+
+```nim
+proc kdlEncode*[E: KdlEmitter](v: Tree, e: var E) {.noSideEffect.} =
+  e.pushNodeBegin("tree")
+  e.pushProp("label", newStringValue(v.label))
+  if v.children.len > 0:
+    e.pushChildrenBegin()
+    for child in v.children:
+      kdlEncode(child, e)           # ← direct recursion
+    e.pushChildrenEnd()
+  e.pushNodeEnd()
+```
+
+Same self-recursion model as kdlDecode — Nim's call stack handles depth.
+`embed[T]` symmetry: `kdlEncode` is `noSideEffect`, the emitter concept
+ops are `noSideEffect`, so compile-time encode-to-bytes works for any
+embedded value.
+
+### Cat 3 — Doc emit (replaces current encode(doc))
+
+`docEmit` walks a KdlDoc, pushing events into the emitter:
+
+```nim
+proc docEmit*[E: KdlEmitter](doc: KdlDoc, e: var E,
+                              mode: EmitMode = emCanonical) =
+  for n in doc.nodes:
+    nodeEmit(n, doc.interner, e, mode)
+
+proc nodeEmit*[E: KdlEmitter](n: KdlNode, interner: Interner,
+                              e: var E, mode: EmitMode) =
+  e.pushNodeBegin(interner.lookup(n.name), ...)
+  for entry in n.entries:
+    case entry.kind
+    of keArgument: e.pushArg(entry.argValue, ...)
+    of keProperty: e.pushProp(interner.lookup(entry.propName),
+                              entry.propValue, ...)
+  if n.children.len > 0:
+    e.pushChildrenBegin()
+    for child in n.children:
+      nodeEmit(child, interner, e, mode)
+    e.pushChildrenEnd()
+  e.pushNodeEnd()
+```
+
+In `emPreserve` mode, the emitter (not `nodeEmit`) checks parseHashes and
+decides whether to splice original bytes or re-emit. The single source of
+truth for preserve logic.
+
+---
+
+## Property catalog — the new PBT contracts
+
+The branch rebuild's property tests target the substrate's load-bearing
+invariants, not the user-API. Twelve properties across five suites:
+
+### Foundation (cursor + emitter)
+
+- **P1: Cursor–emitter event round-trip.** For any well-formed event sequence E
+  (from a grammar-aware generator):
+  `emit(E) → bytes → cursor → E' ≡ E (modulo span normalization)`.
+  THE foundation invariant. If P1 holds, every higher-level round-trip is
+  automatically correct.
+
+- **P2: Source → events → bytes → events idempotence.** For any parseable B:
+  `B → cursor → events → emit → B' → cursor → events' ≡ events`.
+  Canonical-form idempotence at event level.
+
+- **P3: Cursor safety under arbitrary bytes.** Random byte input never crashes,
+  always terminates in `ceEof` or `ceError`. (Already in
+  `tests/test_cursor_properties.nim`; preserved.)
+
+### Cat 3 (buildDoc + docEmit)
+
+- **P4: Doc structural round-trip.** For any parseable B:
+  `B → buildDoc → KdlDoc → docEmit → B' → buildDoc → KdlDoc'` such that
+  `docEqual(KdlDoc, KdlDoc')`.
+
+- **P5: Preserve byte-exact (no mutations).** For any parseable B:
+  `B → buildDoc(preserveFormat) → docEmit(emPreserve) → B` (byte-exact).
+
+- **P6: Preserve under arbitrary mutation sequences.** For any parseable B
+  plus any op sequence: mutated doc emits + reparses to a structurally-equal
+  doc. (Replaces stateful tests in current `test_preserve_properties.nim`.)
+
+### Cat 2 (deriveDecode + deriveEncode)
+
+- **P7: Typed-T encode–decode identity.** For arbitrary T:
+  `T → kdlEncode → bytes → kdlDecode → T'` such that `T == T'`. Strict-symmetric
+  (per the Phase 0 discipline). Re-activates L1/L2/L3 and self-recursive Tree.
+
+- **P8: Encode determinism.** Same T encodes to same bytes.
+
+### Cross-category (the symmetry tests — only possible on the new architecture)
+
+- **P9: Cat 2 ↔ Cat 3 agreement.** For parseable B containing T-shaped nodes:
+  `buildDoc(B) → encode T subtree` ≡ `decode[T](B subtree) → encode T`.
+  Catches asymmetries where Cat 2 and Cat 3 disagree on the same input.
+
+- **P10: Cat 1 push consistency.** A hand-written Cat 1 consumer that builds a
+  KdlDoc produces the same doc as `buildDoc`. (buildDoc is one specific Cat 1
+  consumer; alternates must agree.)
+
+### Safety
+
+- **P11: deriveDecode never crashes.** Arbitrary bytes input: returns Ok or
+  Err, never IndexDefect / unhandled exception / infinite loop.
+
+- **P12: Emitter never produces unparseable bytes.** For any event sequence the
+  cursor can produce: pushing those events into the emitter produces bytes
+  that the cursor accepts.
+
+### New infrastructure required
+
+The substrate-properties (P1, P2) need a **grammar-aware event-sequence
+generator** that produces sequences respecting:
+
+- Bracket balance (NodeBegin/End, ChildrenBegin/End, SlashdashBegin/End)
+- KDL semantics (at-most-one-real-children, no-entries-after-children, etc.)
+- Edge-case biasing (deep nesting, all slashdash positions, all annotation
+  positions, every value type)
+
+Estimated ~200-300 LOC. The right tool for testing a grammar-driven substrate;
+reusable for fuzz testing, future feature additions, and Cat 4 (LSP) work.
+
+---
+
+## Execution plan: branch-rebuild instead of incremental phases
+
+**Phases 0-2 landed incrementally on main.** Phases 3-6 supersede the
+original incremental sequencing — they execute as a branch rebuild because
+incremental coexistence has compounding costs (see below).
+
+### What stays on main (proven foundation)
+
+- `src/cursor.nim` — KdlCursor + StringCursor (Phase 1)
+- `src/parser.nim` — parse/parseAll already ride buildDoc (Phase 2)
+- `src/lexer.nim`, `src/intern.nim`, `src/spans.nim`, `src/ast.nim`, `src/numlit.nim`, `src/reserved.nim`, `src/fnv.nim` — wire + types, untouched
+- `tests/test_cursor.nim`, `tests/test_cursor_properties.nim`, `tests/test_build_doc.nim` — substrate tests
+
+### What gets deleted in the rebuild
+
+- `src/typed_parser.nim` — visitor protocol + parseDocumentWith
+- `src/doc_builder.nim` — visitor-based DocBuilder (buildDoc in cursor.nim replaces it)
+- `src/codegen.nim` — most of it (deriveVisitor + parseInto + decode[T] machinery; ~2000 LOC)
+- `src/encode.nim` direct-byte-writer machinery
+- `test_visitor_*`, `test_doc_builder.nim`, `test_doc_builder_conformance.nim`, `test_parametric_builders.nim`, `test_typed_parser.nim`, etc.
+- Old PBT suites (`test_preserve_properties.nim`, `test_typed_decode_properties.nim`) — replaced by new property catalog
+
+### What gets rebuilt on the branch
+
+- `src/emitter.nim` (NEW) — KdlEmitter concept + BufferEmitter impl
+- `src/encode.nim` (NEW, smaller) — `docEmit` + value-formatting helpers driving the emitter
+- `src/codegen.nim` (NEW, smaller) — `deriveDecode` + `deriveEncode` both pushing through cursor/emitter; the `kdl:` macro orchestrates
+- `tests/test_substrate_properties.nim` (NEW) — P1, P2
+- `tests/test_cat3_properties.nim` (NEW) — P4, P5, P6
+- `tests/test_cat2_properties.nim` (NEW) — P7, P8, re-activated L1/L2/L3
+- `tests/test_crosscat_properties.nim` (NEW) — P9, P10
+- `tests/test_safety_properties.nim` (NEW) — P11, P12
+
+### Why branch-rebuild instead of incremental on main
+
+Five conditions favor branch-rebuild over incremental for nkdl:
+
+1. **Pre-1.0, private, no external users.** No compat constraint.
+2. **Strong test gate.** 558+ unit + property suites + 338 conformance fixtures catch regressions immediately.
+3. **The new substrate is design-stable.** Cursor + buildDoc are complete and proven by Phases 1-2.
+4. **Legacy code is 100% parallel.** Nothing in typed_parser.nim or deriveVisitor is load-bearing for anything except itself.
+5. **Codebase is small.** ~10K LOC of src/; a focused rebuild is tractable.
+
+Incremental coexistence costs (avoided by the branch): every new piece on
+main gets subtly shaped by what legacy expects. The emitter design would be
+constrained by what `encode(doc)` currently looks like. deriveDecode would
+be constrained by `kdlBuildVisitor`'s mixin contract. Phase 5's "delete the
+legacy" big-bang would arrive late, scarier, with the new code grown into
+the legacy's shape.
+
+### Operational plan
+
+See `docs/branch-rebuild-plan.md` for the sequencing (delete order, build
+order, per-cycle validation, where to resume mid-session).
+
+### Standalone issues (not in the milestone)
+
+- Extract `hashNodeFromChildHashes` from `encode.nim` to its own small module
+  (`src/hash.nim` or similar). Decouples `grammar.nim`'s differential oracle
+  from encode internals.
+- `path.nim` product direction: commit as a real surface, demote to
+  `.where()` iterator helpers only, or move to `examples/`. Decide before v1.
+
+### Existing issues — disposition
+
+- **#7** (self-recursive seq[Self]): closed in Phase 3 by construction (call-stack recursion).
+- **#8** (parametric SeqBuilder[B]): closed as superseded.
+- **#9** (deriveEncode ref-object): subsumed into branch rebuild (deriveEncode is rewritten).
+- **#10** (pull-based decoder RFC): superseded by this RFC.
+- **#11** (depth-2+ nested children): closed in Phase 3 by construction.
+- **#16, #17, #18** (Phase 3 deriveDecode, Phase 4 Cat 1 productization, Phase 5 delete obsolete): superseded by the branch-rebuild plan; closed with link to `docs/branch-rebuild-plan.md`.
+- **#19** (Phase 6 bench gate): kept as the final validator at the end of the branch work.
 
 ---
 
