@@ -99,3 +99,86 @@ suite "emitter — A5: children block + indent":
     e.pushChildrenEnd()
     e.pushNodeEnd()
     check e.finish() == "svc 42 {\n    port 80\n}\n"
+
+suite "emitter — A6: annotations":
+
+  test "node annotation emits (tag) prefix":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("addr", anno = "ipv4")
+    e.pushNodeEnd()
+    check e.finish() == "(ipv4)addr\n"
+
+  test "arg annotation emits (tag) before value":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgInt(42, anno = "u8")
+    e.pushNodeEnd()
+    check e.finish() == "n (u8)42\n"
+
+  test "prop annotation emits (tag) before value":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("p")
+    e.pushPropInt("count", 3, anno = "u32")
+    e.pushNodeEnd()
+    check e.finish() == "p count=(u32)3\n"
+
+  test "node + arg + prop annotations combine":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("host", anno = "server")
+    e.pushArgInt(42, anno = "u8")
+    e.pushPropInt("port", 80, anno = "u16")
+    e.pushNodeEnd()
+    check e.finish() == "(server)host (u8)42 port=(u16)80\n"
+
+suite "emitter — A7: slashdash brackets":
+
+  test "slashdashed top-level node prefixes /-":
+    var e = newBufferEmitter()
+    e.pushSlashdashBegin()
+    e.pushNodeBegin("dead")
+    e.pushSlashdashEnd()
+    e.pushNodeEnd()
+    check e.finish() == "/-dead\n"
+
+  test "slashdashed entry prefixes /- mid-node":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("foo")
+    e.pushSlashdashBegin()
+    e.pushArgInt(42)
+    e.pushSlashdashEnd()
+    e.pushArgInt(99)
+    e.pushNodeEnd()
+    check e.finish() == "foo /-42 99\n"
+
+  test "slashdashed prop prefixes /- before key":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("foo")
+    e.pushSlashdashBegin()
+    e.pushPropInt("x", 1)
+    e.pushSlashdashEnd()
+    e.pushNodeEnd()
+    check e.finish() == "foo /-x=1\n"
+
+  test "slashdashed children block prefixes /- before brace":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("foo")
+    e.pushSlashdashBegin()
+    e.pushChildrenBegin()
+    e.pushNodeBegin("inner")
+    e.pushNodeEnd()
+    e.pushChildrenEnd()
+    e.pushSlashdashEnd()
+    e.pushNodeEnd()
+    check e.finish() == "foo /-{\n    inner\n}\n"
+
+  test "slashdashed nested child node":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("p")
+    e.pushChildrenBegin()
+    e.pushSlashdashBegin()
+    e.pushNodeBegin("c")
+    e.pushSlashdashEnd()
+    e.pushNodeEnd()
+    e.pushChildrenEnd()
+    e.pushNodeEnd()
+    check e.finish() == "p {\n    /-c\n}\n"

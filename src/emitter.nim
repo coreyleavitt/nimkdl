@@ -57,6 +57,12 @@ type
     ## the emitter's life.
     buf: string
     depth: int  ## Current children-nesting depth. 0 at top level.
+    slashdashPending: bool
+      ## Set by `pushSlashdashBegin`; consumed (and cleared) by the
+      ## next push that targets a node / entry / children block. The
+      ## `/-` marker is a wire-level *prefix* but logically attaches to
+      ## whatever item follows — Begin/End brackets in the API give
+      ## P1 round-trip symmetry with the cursor's event pair.
 
 func newBufferEmitter*(): BufferEmitter =
   ## Construct a fresh BufferEmitter with an empty buffer.
@@ -97,12 +103,33 @@ func appendIndent(e: var BufferEmitter) {.inline.} =
     for _ in 0 ..< e.depth:
       e.appendBytes(IndentUnit)
 
-func pushNodeBegin*(e: var BufferEmitter, name: openArray[char]) =
+func appendAnno(e: var BufferEmitter, anno: openArray[char]) {.inline.} =
+  ## Emit `(anno)` when anno is non-empty. Empty `anno` is the "no
+  ## annotation" sentinel; literal `()` is illegal KDL so the sentinel
+  ## is unambiguous. Anno bytes go through as bareword — KDL reserved
+  ## tags (`u8`, `i64`, `ipv4`, `url`, etc.) are bareword-safe by
+  ## construction. Quoted-form annotation is a follow-on once a real
+  ## use case surfaces; the spec permits it but no realistic anno
+  ## requires it.
+  if anno.len > 0:
+    e.appendByte('(')
+    e.appendBytes(anno)
+    e.appendByte(')')
+
+func consumeSlashdash(e: var BufferEmitter) {.inline.} =
+  if e.slashdashPending:
+    e.appendBytes("/-")
+    e.slashdashPending = false
+
+func pushNodeBegin*(e: var BufferEmitter, name: openArray[char],
+                    anno: openArray[char] = "") =
   ## Begin a node with the given name. Subsequent pushArg* / pushProp*
   ## attach entries; pushChildrenBegin / pushChildrenEnd nest a child
   ## block; pushNodeEnd terminates. Caller is responsible for protocol
-  ## balance.
+  ## balance. Empty `anno` means no annotation.
   e.appendIndent()
+  e.consumeSlashdash()
+  e.appendAnno(anno)
   e.appendBytes(name)
 
 func pushNodeEnd*(e: var BufferEmitter) =
@@ -112,8 +139,11 @@ func pushNodeEnd*(e: var BufferEmitter) =
 
 func pushChildrenBegin*(e: var BufferEmitter) =
   ## Open a child block on the currently-open node. Emits ` {\n` and
-  ## increments nesting depth.
-  e.appendBytes(" {\n")
+  ## increments nesting depth. If a slashdash is pending, the `/-`
+  ## marker prefixes the opening brace.
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendBytes("{\n")
   inc e.depth
 
 func pushChildrenEnd*(e: var BufferEmitter) =
@@ -125,6 +155,21 @@ func pushChildrenEnd*(e: var BufferEmitter) =
   e.appendByte('}')
 
 # ---------------------------------------------------------------------------
+# Slashdash brackets
+# ---------------------------------------------------------------------------
+
+func pushSlashdashBegin*(e: var BufferEmitter) =
+  ## Mark the next push (node / arg / prop / children block) as
+  ## slashdashed. The actual `/-` bytes are emitted by the next push.
+  ## Begin/End brackets give P1 round-trip symmetry with cursor events.
+  e.slashdashPending = true
+
+func pushSlashdashEnd*(e: var BufferEmitter) =
+  ## Marker for protocol balance — paired with pushSlashdashBegin. No
+  ## bytes emitted; the wire form has no closing slashdash token.
+  discard
+
+# ---------------------------------------------------------------------------
 # Typed-value argument pushes (codegen zero-overhead path)
 # ---------------------------------------------------------------------------
 #
@@ -133,9 +178,13 @@ func pushChildrenEnd*(e: var BufferEmitter) =
 # responsible for the leading separator (space before the value when an
 # entry is being added to an open node).
 
-func pushArgInt*(e: var BufferEmitter, v: int64) =
+func pushArgInt*(e: var BufferEmitter, v: int64,
+                 anno: openArray[char] = "") =
   ## Append a positional integer argument to the currently-open node.
+  ## Empty `anno` means no annotation.
   e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendAnno(anno)
   # Render via the stdlib int-to-string fast path. Switching to a
   ## numlit-based formatter is a Stage A follow-on if profiling shows
   ## the alloc here mattering.
@@ -145,11 +194,15 @@ func pushArgInt*(e: var BufferEmitter, v: int64) =
 # Typed-value property pushes (codegen zero-overhead path)
 # ---------------------------------------------------------------------------
 
-func pushPropInt*(e: var BufferEmitter, key: openArray[char], v: int64) =
+func pushPropInt*(e: var BufferEmitter, key: openArray[char], v: int64,
+                  anno: openArray[char] = "") =
   ## Append a `key=int` property to the currently-open node. The key is
-  ## emitted as a bareword; later cycles (A6+) gain a quoted-form
-  ## fallback for keys that aren't bareword-safe.
+  ## emitted as a bareword; quoted-form fallback for non-bareword-safe
+  ## keys lands when a real use case surfaces. Empty `anno` means no
+  ## value annotation.
   e.appendByte(' ')
+  e.consumeSlashdash()
   e.appendBytes(key)
   e.appendByte('=')
+  e.appendAnno(anno)
   e.appendBytes($v)
