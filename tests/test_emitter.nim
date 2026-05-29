@@ -333,3 +333,20 @@ suite "emitter — A9: KdlValue convenience overload":
     e.pushProp("path", v, interner)
     e.pushNodeEnd()
     check e.finish() == "c path=(url)\"/etc\"\n"
+
+suite "emitter — A10: KdlEmitter concept":
+
+  test "validateKdlEmitter succeeds on BufferEmitter":
+    # Compile-time witness: BufferEmitter satisfies the KdlEmitter
+    # protocol. If a future refactor breaks any push method's
+    # signature, this test fails to compile.
+    validateKdlEmitter(BufferEmitter)
+    check true
+
+  test "generic proc constrained to KdlEmitter accepts BufferEmitter":
+    proc emitOneBareNode[E: KdlEmitter](e: var E) =
+      e.pushNodeBegin("ok")
+      e.pushNodeEnd()
+    var e = newBufferEmitter()
+    emitOneBareNode(e)
+    check e.finish() == "ok\n"

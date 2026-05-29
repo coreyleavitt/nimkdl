@@ -380,3 +380,41 @@ func pushProp*(e: var BufferEmitter, key: openArray[char], v: KdlValue,
   ## Append a `key=v` property; same anno-resolution rules as pushArg.
   e.appendPropPrefix(key, resolveAnno(interner, v.typeAnnotation))
   e.dispatchValue(v)
+
+# ---------------------------------------------------------------------------
+# KdlEmitter concept — symmetric inverse of KdlCursor
+# ---------------------------------------------------------------------------
+
+type
+  KdlEmitter* = concept var e
+    ## The OUT-side substrate. Any type providing this surface can act
+    ## as the destination for Cat 1 / Cat 2 / Cat 3 OUT producers.
+    ## BufferEmitter is the default prod impl. Tracing / size-counting
+    ## impls land in the property-test infrastructure (A11+).
+    ##
+    ## Minimal surface — only the structural events. The typed-value
+    ## pushArg*/pushProp* variants and the KdlValue dispatchers live
+    ## outside the concept because not every impl needs every value
+    ## type (a tracing emitter that just records call patterns doesn't
+    ## need to format floats), but every impl needs the structural
+    ## bracket pair to round-trip cursor events.
+    e.pushNodeBegin("name", "")
+    e.pushNodeEnd()
+    e.pushChildrenBegin()
+    e.pushChildrenEnd()
+    e.pushSlashdashBegin()
+    e.pushSlashdashEnd()
+
+template validateKdlEmitter*(T: typedesc) =
+  ## Compile-time witness that T satisfies KdlEmitter. Nim's concept
+  ## error messages are infamously hostile; this template forces the
+  ## check at a known site so failures point at "this type doesn't
+  ## satisfy KdlEmitter" instead of at some deep generic instantiation.
+  static:
+    var sample: T
+    sample.pushNodeBegin("name", "")
+    sample.pushNodeEnd()
+    sample.pushChildrenBegin()
+    sample.pushChildrenEnd()
+    sample.pushSlashdashBegin()
+    sample.pushSlashdashEnd()
