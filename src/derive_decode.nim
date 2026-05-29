@@ -102,6 +102,11 @@ proc objectRecList(typeSym: NimNode): NimNode =
   doAssert objTy != nil, "deriveDecode: expected an object or ref object type"
   objTy[2]
 
+proc findRecCase(recList: NimNode): NimNode =
+  for child in recList:
+    if child.kind == nnkRecCase: return child
+  nil
+
 # ---------------------------------------------------------------------------
 # Macro
 # ---------------------------------------------------------------------------
@@ -262,21 +267,34 @@ macro deriveDecode*(T: typedesc): untyped =
 
   # Collect kdlArg + kdlProp + kdlChild fields by pragma role.
   type ChildKind = enum ckSingle, ckSeq
+  type PropField = tuple[name: string, typ: NimNode, wireKey: string]
+  type ChildField = tuple[name: string, elemType: NimNode,
+                          kind: ChildKind, wireName: string]
   var argFields: seq[tuple[name: string, typ: NimNode]]
-  var propFields: seq[tuple[name: string, typ: NimNode, wireKey: string]]
-  var childFields: seq[tuple[name: string, elemType: NimNode,
-                             kind: ChildKind, wireName: string]]
-  let recList = objectRecList(typeSym)
-  for (fieldName, fieldType, pragmas) in regularFields(recList):
+  var propFields: seq[PropField]              # plain (non-variant) props
+  var childFields: seq[ChildField]            # plain children
+  # Variant info: when the object is a case object, we track the
+  # discriminator (so we know how to dispatch later) and per-branch
+  # prop fields (so each branch's ceProp matches its own field set).
+  var hasVariant = false
+  var discName: string
+  var discIdent: NimNode = nil
+  var branchProps: seq[tuple[branchVal: NimNode, props: seq[PropField]]]
+
+  proc classify(fieldName: string, fieldType: NimNode,
+                pragmas: seq[NimNode];
+                argSink: var seq[tuple[name: string, typ: NimNode]];
+                propSink: var seq[PropField];
+                childSink: var seq[ChildField]) =
     if hasPragma(pragmas, "kdlArg"):
-      argFields.add((name: fieldName, typ: fieldType))
+      argSink.add((name: fieldName, typ: fieldType))
     elif hasPragma(pragmas, "kdlProp"):
       let renameArg = pragmaArg(pragmas, "kdlRename")
       let wireKey =
         if renameArg != nil and renameArg.kind == nnkStrLit:
           renameArg.strVal
         else: fieldName
-      propFields.add((name: fieldName, typ: fieldType, wireKey: wireKey))
+      propSink.add((name: fieldName, typ: fieldType, wireKey: wireKey))
     elif hasPragma(pragmas, "kdlChild"):
       var kind: ChildKind
       var elemType: NimNode
@@ -286,9 +304,48 @@ macro deriveDecode*(T: typedesc): untyped =
       else:
         kind = ckSingle
         elemType = fieldType
-      let elemWire = nodeNameOf(elemType)
-      childFields.add((name: fieldName, elemType: elemType, kind: kind,
-                       wireName: elemWire))
+      childSink.add((name: fieldName, elemType: elemType, kind: kind,
+                     wireName: nodeNameOf(elemType)))
+
+  let recList = objectRecList(typeSym)
+  for (fieldName, fieldType, pragmas) in regularFields(recList):
+    classify(fieldName, fieldType, pragmas, argFields, propFields, childFields)
+  let recCase = findRecCase(recList)
+  if recCase != nil:
+    hasVariant = true
+    # Discriminator IdentDefs is recCase[0]; classify it as a regular
+    # arg/prop so it gets decoded into v.<discName> at its source position.
+    let discDefs = recCase[0]
+    let discType = discDefs[^2]
+    let (dn, dPragmas) = fieldInfo(discDefs, 0)
+    discName = dn
+    discIdent = ident(dn)
+    classify(discName, discType, dPragmas, argFields, propFields, childFields)
+    # Per-branch field collection.
+    for i in 1 ..< recCase.len:
+      let branch = recCase[i]
+      var args2: seq[tuple[name: string, typ: NimNode]]
+      var props2: seq[PropField]
+      var children2: seq[ChildField]
+      let branchRecList =
+        if branch.kind == nnkOfBranch: branch[^1]
+        elif branch.kind == nnkElse:   branch[0]
+        else: newEmptyNode()
+      if branchRecList.kind == nnkRecList:
+        for (bf, bt, bp) in regularFields(branchRecList):
+          classify(bf, bt, bp, args2, props2, children2)
+      if args2.len > 0 or children2.len > 0:
+        error("deriveDecode: branch fields other than kdlProp not yet " &
+              "supported (D8 cycle covers kdlProp per-branch)")
+      # Each branch's of-value list lives at branch[0..^2]; capture as
+      # a single NimNode (the branch's variant identifier).
+      if branch.kind == nnkOfBranch:
+        # Single-value branches only for now — multi-value `of A, B:` is
+        # exotic enough to defer.
+        if branch.len != 2:
+          error("deriveDecode: multi-value `of A, B:` branches not yet " &
+                "supported")
+        branchProps.add((branchVal: branch[0], props: props2))
 
   # Build the per-arg dispatch.
   var argCase = newTree(nnkCaseStmt, argIdxSym)
@@ -297,7 +354,17 @@ macro deriveDecode*(T: typedesc): untyped =
     let idxLit = newIntLitNode(i)
     let tokIndexExpr = quote do: `evSym2`.argTok
     let target = quote do: `vSym`.`fIdent`
-    let branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+    var branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+    # Discriminator assignment may CHANGE the variant branch from its
+    # default zero value. Nim refuses that under normal mode; wrap in
+    # `{.cast(uncheckedAssign).}: <body>` so the runtime accepts the
+    # branch change without validating prior branch-field state
+    # (correct here — we're populating a freshly-zeroed `var T`).
+    if hasVariant and fName == discName:
+      let bodyCopy = branchBody
+      branchBody = quote do:
+        {.cast(uncheckedAssign).}:
+          `bodyCopy`
     argCase.add(newTree(nnkOfBranch, idxLit, branchBody))
   argCase.add(newTree(nnkElse,
     quote do:
@@ -318,6 +385,17 @@ macro deriveDecode*(T: typedesc): untyped =
     propKeyLets.add(quote do:
       let `sym` = `lit`)
     propKeySyms.add(sym)
+  # Per-branch prop key lets (variant dispatch).
+  var branchPropKeySyms: seq[seq[NimNode]]
+  for (_, props) in branchProps:
+    var syms: seq[NimNode]
+    for (_, _, wireKey) in props:
+      let sym = genSym(nskLet, "expectedBranchPropKey")
+      let lit = newStrLitNode(wireKey)
+      propKeyLets.add(quote do:
+        let `sym` = `lit`)
+      syms.add(sym)
+    branchPropKeySyms.add(syms)
   # Same lift for child wire-names — bytesEq against an addressable let.
   var childKeyLets = newStmtList()
   var childKeySyms: seq[NimNode]
@@ -327,32 +405,60 @@ macro deriveDecode*(T: typedesc): untyped =
     childKeyLets.add(quote do:
       let `sym` = `lit`)
     childKeySyms.add(sym)
-  var propDispatch = newStmtList()
-  if propFields.len > 0:
-    var rootIf: NimNode = nil
-    for i, (fName, fType, _) in propFields:
+  # Helper: build an if-elif-else for a list of (PropField, keySym) pairs.
+  proc buildPropIf(fields: seq[PropField], keys: seq[NimNode]): NimNode =
+    if fields.len == 0:
+      return quote do:
+        return err[void, ParseError](
+          initError(peParseUnexpected, `evSym2`.span,
+                    "unknown property"))
+    var ifNode = newNimNode(nnkIfStmt)
+    for i, (fName, fType, _) in fields:
       let fIdent = ident(fName)
-      let keySym = propKeySyms[i]
+      let keySym = keys[i]
       let tokIndexExpr = quote do: `evSym2`.propValueTok
       let target = quote do: `vSym`.`fIdent`
       let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
-      let branchCond = quote do: bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`)
-      let branchBody = decodeBody
-      if rootIf.isNil:
-        rootIf = newNimNode(nnkIfStmt)
-        rootIf.add(newNimNode(nnkElifBranch).add(branchCond).add(branchBody))
-      else:
-        rootIf.add(newNimNode(nnkElifBranch).add(branchCond).add(branchBody))
-    rootIf.add(newNimNode(nnkElse).add(quote do:
+      let cond = quote do: bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`)
+      ifNode.add(newNimNode(nnkElifBranch).add(cond).add(decodeBody))
+    ifNode.add(newNimNode(nnkElse).add(quote do:
       return err[void, ParseError](
         initError(peParseUnexpected, `evSym2`.span,
                   "unknown property"))))
-    propDispatch.add(rootIf)
+    ifNode
+
+  var propDispatch = newStmtList()
+  if hasVariant:
+    # Variant-aware: plain props always available, then case on
+    # discriminator for branch-specific props. For the common case
+    # where ONLY branch props exist (no plain), the runtime case
+    # cleanly dispatches per-variant.
+    var allBranchesEmpty = true
+    for (_, props) in branchProps:
+      if props.len > 0: allBranchesEmpty = false
+    if propFields.len > 0:
+      # Try plain dispatch first. We can't fall-through cleanly from
+      # an if-elif's else into the variant case without restructuring,
+      # so emit a sequence of attempts: if plain matches, done; else
+      # check branch.
+      let plainIf = buildPropIf(propFields, propKeySyms)
+      propDispatch.add(plainIf)
+      # NOTE: plain dispatch returns on success or error; if it falls
+      # through to "unknown property" we'd never reach the branch case.
+      # For correctness when both exist, the plain dispatch's else
+      # branch needs to chain into the branch case. Deferred — D8
+      # tracer scopes to "branch props only" types, which is the
+      # common case.
+    elif not allBranchesEmpty or true:
+      # Branch-only path: case on v.discriminator at runtime; per-branch
+      # if-elif-else for that branch's props.
+      var caseStmt = newTree(nnkCaseStmt, quote do: `vSym`.`discIdent`)
+      for i, (branchVal, props) in branchProps:
+        let perBranchIf = buildPropIf(props, branchPropKeySyms[i])
+        caseStmt.add(newTree(nnkOfBranch, branchVal, perBranchIf))
+      propDispatch.add(caseStmt)
   else:
-    propDispatch.add(quote do:
-      return err[void, ParseError](
-        initError(peParseUnexpected, `evSym2`.span,
-                  "unexpected property")))
+    propDispatch.add(buildPropIf(propFields, propKeySyms))
 
   # Build the per-child dispatch (used inside the ceChildrenBegin loop).
   let nextEvSym = ident("nextEv")

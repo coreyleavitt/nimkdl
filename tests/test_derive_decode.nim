@@ -334,3 +334,62 @@ suite "derive_decode — D7: enum fields (string-mapped + symbol-name)":
     let res = kdlDecode(j, f.cursor)
     check res.isOk
     check j.state == sOk
+
+suite "derive_decode — D8: variant (case object) discriminator dispatch":
+
+  type Effect = enum
+    efDeny = "deny"
+    efAllow = "allow"
+
+  type Action9D {.kdlNode: "action".} = object
+    case kind {.kdlArg.}: Effect
+    of efDeny:
+      reason {.kdlProp.}: string
+    of efAllow:
+      quota {.kdlProp.}: int
+
+  deriveDecode(Action9D)
+
+  test "variant — efDeny branch reads its branch-specific kdlProp":
+    let f = mkCursor("action \"deny\" reason=\"blocked\"")
+    var a: Action9D
+    let res = kdlDecode(a, f.cursor)
+    check res.isOk
+    check a.kind == efDeny
+    check a.reason == "blocked"
+
+  test "variant — efAllow branch reads its different kdlProp":
+    let f = mkCursor("action \"allow\" quota=1000")
+    var a: Action9D
+    let res = kdlDecode(a, f.cursor)
+    check res.isOk
+    check a.kind == efAllow
+    check a.quota == 1000
+
+  type Shape = enum
+    skCircle = "circle"
+    skEmpty = "empty"
+
+  type DrawingD {.kdlNode: "drawing".} = object
+    case kind {.kdlArg.}: Shape
+    of skCircle:
+      radius {.kdlProp.}: float
+    of skEmpty:
+      discard  # no fields
+
+  deriveDecode(DrawingD)
+
+  test "variant — branch with no fields decodes from bare":
+    let f = mkCursor("drawing \"empty\"")
+    var d: DrawingD
+    let res = kdlDecode(d, f.cursor)
+    check res.isOk
+    check d.kind == skEmpty
+
+  test "variant — circle branch with float prop":
+    let f = mkCursor("drawing \"circle\" radius=2.5")
+    var d: DrawingD
+    let res = kdlDecode(d, f.cursor)
+    check res.isOk
+    check d.kind == skCircle
+    check d.radius == 2.5
