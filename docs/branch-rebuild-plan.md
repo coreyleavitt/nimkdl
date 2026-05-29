@@ -9,9 +9,13 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Stages A + B + audit + C complete. 32 derive_encode tests + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve byte-exact + substrate. Branch is ~27 commits since main.
+**Current state**: Stages A + B + audit + C + D-most complete. 31 derive_decode tests (D1-D4, D6-D8) + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve byte-exact + substrate. Branch is ~38 commits since main.
 
-**Next action**: Stage D — deriveDecode codegen. Macro emits per-T `kdlDecode[C: KdlCursor]` procs that pull cursor events and populate fields. The recursive structure that made deriveEncode trivial for self-recursive types (Tree closes #11 at C6) inverts cleanly: deriveDecode on the same shape just calls `kdlDecode[Self]` on each cursor child event. D1 tracer: parse `service "web"` through cursor → populate a `Service(name: "web")` via the macro-generated decoder.
+Stage D cycles done: D1 tracer, D2 typed args, D3 kdlProp, D4 kdlChild + self-recursive (#11 closes decode side), D6 Option[T], D7 enum, D8 variant. Skipped: D5 perfect-hash (perf opt; defer).
+
+**Next action**: D10 — required-field bitmap + missing-required error. Each non-Option kdlArg/kdlProp/kdlChild gets a slot bit; macro maintains a uint64 mask; final compare against required mask emits peTypeMissingRequired when missing.
+
+Then: D9 kdlReserved tag validation; D11 type-mismatch error catalog refinement; D12 kdlRename (mostly free — already collected at macro time); D14 embed[T] (VM compatibility); D15 encode-decode identity property (parse the corpus into a typed struct, encode back, parse again, structural equality); bench gate.
 
 ## Delete order
 
