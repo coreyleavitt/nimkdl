@@ -44,3 +44,58 @@ suite "emitter — A3: typed-value pushArg":
     e.pushArgInt(3)
     e.pushNodeEnd()
     check e.finish() == "seq 1 2 3\n"
+
+suite "emitter — A4: pushProp":
+
+  test "pushPropInt emits foo x=1\\n":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("foo")
+    e.pushPropInt("x", 1)
+    e.pushNodeEnd()
+    check e.finish() == "foo x=1\n"
+
+  test "pushArg before pushProp orders entries":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("foo")
+    e.pushArgInt(42)
+    e.pushPropInt("count", 3)
+    e.pushNodeEnd()
+    check e.finish() == "foo 42 count=3\n"
+
+suite "emitter — A5: children block + indent":
+
+  test "single nested child indents 4 spaces":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("parent")
+    e.pushChildrenBegin()
+    e.pushNodeBegin("child")
+    e.pushNodeEnd()
+    e.pushChildrenEnd()
+    e.pushNodeEnd()
+    check e.finish() == "parent {\n    child\n}\n"
+
+  test "depth-2 nesting indents 8 spaces at depth 2":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("a")
+    e.pushChildrenBegin()
+    e.pushNodeBegin("b")
+    e.pushChildrenBegin()
+    e.pushNodeBegin("c")
+    e.pushNodeEnd()
+    e.pushChildrenEnd()
+    e.pushNodeEnd()
+    e.pushChildrenEnd()
+    e.pushNodeEnd()
+    check e.finish() == "a {\n    b {\n        c\n    }\n}\n"
+
+  test "children with entries on parent":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("svc")
+    e.pushArgInt(42)
+    e.pushChildrenBegin()
+    e.pushNodeBegin("port")
+    e.pushArgInt(80)
+    e.pushNodeEnd()
+    e.pushChildrenEnd()
+    e.pushNodeEnd()
+    check e.finish() == "svc 42 {\n    port 80\n}\n"

@@ -1,3 +1,5 @@
+import std/strutils
+
 ## emitter — symmetric OUT-side inverse of `KdlCursor`.
 ##
 ## A KdlEmitter accepts push events (NodeBegin / Arg / Prop /
@@ -34,12 +36,27 @@
 ##   - Inline accessors so the optimizer can fuse cursor.bytes() with
 ##     destination writes on the round-trip path
 
+const
+  IndentUnit = "    "  ## 4-space indent per nesting level (canonical).
+  MaxCachedIndentDepth = 16
+    ## Indent prefixes for depths 0..16 live in a const cache; deeper
+    ## nesting falls through to a runtime-built prefix. Trades 4×17 =
+    ## 68 bytes of rodata for one O(1) lookup per pushNodeBegin in the
+    ## hot path.
+
+const Indents: array[0 .. MaxCachedIndentDepth, string] = block:
+  var arr: array[0 .. MaxCachedIndentDepth, string]
+  for i in 0 .. MaxCachedIndentDepth:
+    arr[i] = IndentUnit.repeat(i)
+  arr
+
 type
   BufferEmitter* = object
     ## Prod impl: writes wire bytes into an internal string buffer.
     ## `finish()` returns the accumulated string and (logically) ends
     ## the emitter's life.
     buf: string
+    depth: int  ## Current children-nesting depth. 0 at top level.
 
 func newBufferEmitter*(): BufferEmitter =
   ## Construct a fresh BufferEmitter with an empty buffer.
@@ -73,17 +90,39 @@ func appendByte(e: var BufferEmitter, b: char) {.inline.} =
 # Push API — synthesized path (openArray[char])
 # ---------------------------------------------------------------------------
 
+func appendIndent(e: var BufferEmitter) {.inline.} =
+  if e.depth <= MaxCachedIndentDepth:
+    e.appendBytes(Indents[e.depth])
+  else:
+    for _ in 0 ..< e.depth:
+      e.appendBytes(IndentUnit)
+
 func pushNodeBegin*(e: var BufferEmitter, name: openArray[char]) =
   ## Begin a node with the given name. Subsequent pushArg* / pushProp*
   ## attach entries; pushChildrenBegin / pushChildrenEnd nest a child
   ## block; pushNodeEnd terminates. Caller is responsible for protocol
   ## balance.
+  e.appendIndent()
   e.appendBytes(name)
 
 func pushNodeEnd*(e: var BufferEmitter) =
   ## Terminate the current node. Canonical mode emits a single newline
   ## as the node terminator.
   e.appendByte('\n')
+
+func pushChildrenBegin*(e: var BufferEmitter) =
+  ## Open a child block on the currently-open node. Emits ` {\n` and
+  ## increments nesting depth.
+  e.appendBytes(" {\n")
+  inc e.depth
+
+func pushChildrenEnd*(e: var BufferEmitter) =
+  ## Close the current child block. Decrements depth, emits the
+  ## closing `}` at the new (outer) indent. Caller will follow with
+  ## pushNodeEnd to terminate the enclosing node.
+  dec e.depth
+  e.appendIndent()
+  e.appendByte('}')
 
 # ---------------------------------------------------------------------------
 # Typed-value argument pushes (codegen zero-overhead path)
@@ -100,4 +139,17 @@ func pushArgInt*(e: var BufferEmitter, v: int64) =
   # Render via the stdlib int-to-string fast path. Switching to a
   ## numlit-based formatter is a Stage A follow-on if profiling shows
   ## the alloc here mattering.
+  e.appendBytes($v)
+
+# ---------------------------------------------------------------------------
+# Typed-value property pushes (codegen zero-overhead path)
+# ---------------------------------------------------------------------------
+
+func pushPropInt*(e: var BufferEmitter, key: openArray[char], v: int64) =
+  ## Append a `key=int` property to the currently-open node. The key is
+  ## emitted as a bareword; later cycles (A6+) gain a quoted-form
+  ## fallback for keys that aren't bareword-safe.
+  e.appendByte(' ')
+  e.appendBytes(key)
+  e.appendByte('=')
   e.appendBytes($v)
