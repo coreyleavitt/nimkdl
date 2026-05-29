@@ -151,11 +151,59 @@ macro deriveEncode*(T: typedesc): untyped =
   var body = newStmtList()
   body.add quote do:
     `eSym`.pushNodeBegin(`wireName`)
+  # Two-pass: args and props inline within the node head; children
+  # collected for a single ChildrenBegin/End block. The block is
+  # conditionally emitted at runtime — if every kdlChild field is a
+  # runtime-empty container (seq with len 0, Option with isNone), no
+  # `{}` appears in the output. Single nested types always count as
+  # present.
+  type ChildKind = enum ckSingle, ckSeq
+  var childFields: seq[tuple[name: string, typ: NimNode, kind: ChildKind]]
   for (fieldName, fieldType, pragmas) in objectFields(typeSym):
     if hasPragma(pragmas, "kdlArg"):
       emitArgPush(body, vSym, eSym, fieldName, fieldType)
     elif hasPragma(pragmas, "kdlProp"):
       emitPropPush(body, vSym, eSym, fieldName, fieldType)
+    elif hasPragma(pragmas, "kdlChild"):
+      # Detect seq[T] by type-AST shape — BracketExpr(seq, T).
+      if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
+        childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq))
+      else:
+        childFields.add((name: fieldName, typ: fieldType, kind: ckSingle))
+  if childFields.len > 0:
+    # Build the runtime "any present" predicate. Single nested
+    # children are trivially present (true); seqs check `.len > 0`.
+    var anyPresent: NimNode = nil
+    for (childName, _, childKind) in childFields:
+      let childIdent = ident(childName)
+      let term =
+        case childKind
+        of ckSingle: newLit(true)
+        of ckSeq:    quote do: `vSym`.`childIdent`.len > 0
+      if anyPresent.isNil: anyPresent = term
+      else:                anyPresent = infix(anyPresent, "or", term)
+    # Build the children-emit body: for each child field, emit either
+    # a single recursive kdlEncode or a for-loop over the seq.
+    var childBody = newStmtList()
+    childBody.add quote do:
+      `eSym`.pushChildrenBegin()
+    for (childName, _, childKind) in childFields:
+      let childIdent = ident(childName)
+      case childKind
+      of ckSingle:
+        childBody.add quote do:
+          kdlEncode(`vSym`.`childIdent`, `eSym`)
+      of ckSeq:
+        let elemSym = genSym(nskForVar, "child")
+        childBody.add quote do:
+          for `elemSym` in `vSym`.`childIdent`:
+            kdlEncode(`elemSym`, `eSym`)
+    childBody.add quote do:
+      `eSym`.pushChildrenEnd()
+    # Wrap in the present-or-skip conditional. The compiler folds
+    # `if true: ...` to unconditional code for the all-single-nested
+    # case, so the runtime check is paid only when seqs are involved.
+    body.add newIfStmt((anyPresent, childBody))
   body.add quote do:
     `eSym`.pushNodeEnd()
   # Emitted unexported because deriveEncode may be invoked inside a
