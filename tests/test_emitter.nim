@@ -5,8 +5,34 @@
 import std/unittest
 
 import ../src/ast
+import ../src/cursor
 import ../src/emitter
 import ../src/intern
+import ../src/lexer
+import ../src/spans
+
+## Helpers for A11's P12 round-trip property.
+
+type CursorFixture = ref object
+  stream*: ref TokenStream
+  cursor*: StringCursor
+
+proc mkCursor(src: string): CursorFixture =
+  var interner = initInterner()
+  var sref: ref TokenStream
+  new(sref)
+  sref[] = lex(src, interner)
+  result = CursorFixture(stream: sref,
+                         cursor: initStringCursor(addr sref[], src))
+
+proc parseAllEventsUnchecked(src: string): seq[CursorEventKind] =
+  ## Drive a cursor over `src` to EOF, collect the event-kind sequence.
+  ## Returns ceError kinds inline so tests can assert "no error" directly.
+  let f = mkCursor(src)
+  while true:
+    let ev = advance(f.cursor)
+    result.add(ev.kind)
+    if ev.kind == ceEof: break
 
 suite "emitter — A1: tracer":
 
@@ -350,3 +376,126 @@ suite "emitter — A10: KdlEmitter concept":
     var e = newBufferEmitter()
     emitOneBareNode(e)
     check e.finish() == "ok\n"
+
+suite "emitter — A11: P12 round-trip (cursor accepts everything emitter emits)":
+
+  test "bare node round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("foo")
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+    check ceNodeBegin in events
+    check ceNodeEnd in events
+
+  test "node with typed int arg round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("n")
+    e.pushArgInt(42)
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+    check ceArg in events
+
+  test "node with typed string arg round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("g")
+    e.pushArgString("hi there")
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+    check ceArg in events
+
+  test "node with prop round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("c")
+    e.pushPropInt("x", 7)
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+    check ceProp in events
+
+  test "node with float / bool / null args round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("v")
+    e.pushArgFloat(1.5)
+    e.pushArgBool(true)
+    e.pushArgBool(false)
+    e.pushArgNull()
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+
+  test "children block round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("p")
+    e.pushChildrenBegin()
+    e.pushNodeBegin("c")
+    e.pushArgInt(1)
+    e.pushNodeEnd()
+    e.pushChildrenEnd()
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+    check ceChildrenBegin in events
+    check ceChildrenEnd in events
+
+  test "depth-3 nesting round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("a"); e.pushChildrenBegin()
+    e.pushNodeBegin("b"); e.pushChildrenBegin()
+    e.pushNodeBegin("c"); e.pushChildrenBegin()
+    e.pushNodeBegin("d"); e.pushNodeEnd()
+    e.pushChildrenEnd(); e.pushNodeEnd()
+    e.pushChildrenEnd(); e.pushNodeEnd()
+    e.pushChildrenEnd(); e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+    # Three children begin/end pairs
+    var beginCt, endCt = 0
+    for k in events:
+      if k == ceChildrenBegin: inc beginCt
+      elif k == ceChildrenEnd: inc endCt
+    check beginCt == 3
+    check endCt == 3
+
+  test "annotations on node/arg/prop round-trip":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("host", anno = "server")
+    e.pushArgInt(8, anno = "u8")
+    e.pushPropInt("port", 80, anno = "u16")
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+
+  test "slashdashed entry round-trips":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("f")
+    e.pushSlashdashBegin()
+    e.pushArgInt(42)
+    e.pushSlashdashEnd()
+    e.pushArgInt(99)
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+
+  test "slashdashed top-level node round-trips":
+    var e = newBufferEmitter()
+    e.pushSlashdashBegin()
+    e.pushNodeBegin("dead")
+    e.pushSlashdashEnd()
+    e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+
+  test "multiple top-level nodes round-trip":
+    var e = newBufferEmitter()
+    e.pushNodeBegin("a"); e.pushNodeEnd()
+    e.pushNodeBegin("b"); e.pushNodeEnd()
+    e.pushNodeBegin("c"); e.pushNodeEnd()
+    let events = parseAllEventsUnchecked(e.finish())
+    check ceError notin events
+    var nbCt = 0
+    for k in events:
+      if k == ceNodeBegin: inc nbCt
+    check nbCt == 3

@@ -9,9 +9,9 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Branch `phase3-clean-core` created (2026-05-29). Plan doc revised with perf-first codegen framing + overloaded push API. Preflight commit (extract pragmas, drop stale parser.nim imports) pending.
+**Current state**: Stage A complete (A1-A11; 48 emitter tests passing; full suite GREEN). BufferEmitter primitive lives in `src/emitter.nim`. KdlEmitter concept + validateKdlEmitter template established. P12 round-trip property exercised via 11 table-driven cases — cursor accepts everything BufferEmitter emits.
 
-**Next action**: Preflight commit (extract pragmas → src/pragmas.nim, drop doc_builder/typed_parser imports from parser.nim). Then the big delete. Then Stage A1 (BufferEmitter tracer).
+**Next action**: Start Stage B (docEmit). First cycle B1: walk a single-bare-node KdlDoc, push events into BufferEmitter, expect canonical `"foo\n"` bytes. The emitter API is ready (typed primitives + KdlValue dispatcher); docEmit just orchestrates the walk.
 
 ## Delete order
 
@@ -169,6 +169,6 @@ After G4: merge branch to main (or rename branch → main if cleaner).
 
 Update this line at the end of every session.
 
-**Last session ended after**: Branch created + plan doc revised with perf-first codegen framing.
+**Last session ended after**: Stage A complete. Branch has 8 commits since main; 48 emitter tests + the surviving cursor/buildDoc/parser/grammar substrate all GREEN.
 
-**Next concrete action**: Preflight commit (pragmas extraction + parser.nim import cleanup) → delete commit → Stage A1 BufferEmitter tracer.
+**Next concrete action**: Stage B1 — docEmit tracer. Create `src/doc_emit.nim` (single proc `emitDoc(doc: KdlDoc, e: var BufferEmitter)`) and a test that emits a one-bare-node doc through it and verifies the output equals `"foo\n"`. After B6 the 338-fixture conformance corpus comes back.
