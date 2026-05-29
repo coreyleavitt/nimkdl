@@ -620,7 +620,7 @@ proc peek*(c: StringCursor): CursorEvent =
   var tmp = c
   result = advance(tmp)
 
-proc tokenAsString(tok: Token, stream: TokenStream, source: string): string =
+proc tokenAsString*(tok: Token, stream: TokenStream, source: string): string =
   ## Resolve a token's logical text content. For tkIdent, returns the
   ## bareword bytes from source. For tkString / tkRawString, returns
   ## the unescaped payload from the lexer's side tables. For other

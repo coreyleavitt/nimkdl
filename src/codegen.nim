@@ -54,6 +54,7 @@ import ./ast
 import ./encode as kdlEncode  # AST-level encoder; aliased to avoid clash
 import ./intern
 import ./parser
+import ./pragmas
 import ./reserved
 import ./spans
 
@@ -64,31 +65,11 @@ import ./spans
 # would have to chase the transitive imports themselves. The block
 # macro is the sole public surface; the imports it implies are part
 # of that surface.
-export ast, parser, reserved, spans, intern
+export ast, parser, pragmas, reserved, spans, intern
 
-# ---------------------------------------------------------------------------
-# Pragmas (just marker templates — no behavior)
-# ---------------------------------------------------------------------------
-
-template kdlNode*(name: string) {.pragma.}
-  ## Type-level: explicit KDL node name. Defaults to type-name lowercased.
-  ## See ``kdl`` for the all-in-one pragma that also emits the derives.
-template kdlArg*() {.pragma.}
-  ## Field-level: serialize/parse as a positional argument.
-template kdlProp*() {.pragma.}
-  ## Field-level: serialize/parse as a property (key=value).
-template kdlChild*() {.pragma.}
-  ## Field-level: serialize/parse as a child node (default for objects + seq).
-template kdlSkip*() {.pragma.}
-  ## Field-level: do not parse — keep Nim's default.
-template kdlRename*(name: string) {.pragma.}
-  ## Field-level: KDL name differs from Nim field name.
-template kdlReserved*(tag: string) {.pragma.}
-  ## Field-level: assert the source KDL value carries this reserved-type
-  ## annotation (e.g. `{.kdlReserved: "ipv4".}`). At decode time, a
-  ## value lacking the declared tag — or carrying a different one —
-  ## produces `peTypeReservedMismatch`. Layer-1 parse-time validation
-  ## (see src/reserved.nim) still applies to the tag's content.
+# Pragmas (kdlNode / kdlArg / kdlProp / kdlChild / kdlSkip / kdlRename /
+# kdlReserved) live in src/pragmas.nim. This file's `kdl:` macro consumes
+# them via `getCustomPragmaVal`; it relies on the re-export below.
 
 # Note: the `default` pragma is `std/macros.default` for object defaults
 # in Nim 2.x — we read field defaults via getTypeImpl rather than a custom

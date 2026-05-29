@@ -27,16 +27,14 @@
 
 import ./ast
 import ./cursor
-import ./doc_builder
 import ./intern
 import ./lexer
 import ./spans
-import ./typed_parser
 
 const
-  MaxParserDepth* = typed_parser.MaxParserDepthValue
-    ## Maximum recursion depth through `{ children }` blocks. Defined
-    ## here for export; the actual guard lives in `typed_parser.nim`.
+  MaxParserDepth* = cursor.MaxParserDepth
+    ## Maximum recursion depth through `{ children }` blocks. The guard
+    ## itself lives in `cursor.nim` (`buildDoc` enforces it).
 
 func estimateDocNodes*(tokenCount: int): int {.inline.} =
   ## Heuristic for pre-allocating doc-level seqs. Each top-level node

@@ -69,6 +69,7 @@ import ./ast
 import ./parser
 import ./encode
 import ./grammar
+import ./pragmas
 import ./codegen
 import ./path
 # Note: ./lexer and ./typed_parser are NOT imported here on purpose.
@@ -106,6 +107,11 @@ export encode
 # Grammar values. InterpState / ParseNode / interpRule stay accessible
 # via `import nkdl/grammar` for tests but aren't curated public API.
 export grammar
+
+# Pragmas — kdlNode / kdlArg / kdlProp / kdlChild / kdlSkip / kdlRename /
+# kdlReserved marker templates. Hosted independently so they survive the
+# legacy-visitor cull while the new Stage C/D codegen is being built.
+export pragmas
 
 # Codegen — the headline surface. Pragmas, `kdl:` block macro, decode[T],
 # decodeAll[T], embed[T], encode[T], kdlDecodeValue overloads (needed
