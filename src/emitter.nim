@@ -78,6 +78,13 @@ func finish*(e: var BufferEmitter): string =
   ## Return the accumulated bytes. Subsequent pushes are undefined.
   result = e.buf
 
+func lastByteOrZero*(e: BufferEmitter): char {.inline.} =
+  ## Last byte appended so far, or `\0` for an empty buffer. Lets
+  ## the preserve-walk decide whether an explicit separator (`\n`)
+  ## is required between two top-level emissions without breaking
+  ## the buffer's encapsulation.
+  if e.buf.len == 0: '\0' else: e.buf[^1]
+
 # ---------------------------------------------------------------------------
 # Byte-writing primitives (perf-first)
 # ---------------------------------------------------------------------------

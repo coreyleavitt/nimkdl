@@ -17,6 +17,9 @@ import std/unittest
 
 import proptest
 
+import std/options
+
+import ./proptest_helpers  # identifiers strategy
 import ../src/api
 import ../src/ast
 import ../src/doc_emit
@@ -90,6 +93,161 @@ suite "P5 — preserve byte-exact":
     var e = newBufferEmitter()
     emitDocPreserve(r.get, e)
     ensure e.finish() == src
+
+suite "P6 — preserve under mutation":
+
+  template assertMutationRoundtrips(d: var KdlDoc): untyped =
+    var emitX = newBufferEmitter()
+    emitDocPreserve(d, emitX)
+    let bytesX = emitX.finish()
+    let rX = parse(bytesX, preserveFormat = true)
+    check rX.isOk
+    check docEqual(d, rX.get)
+
+  test "tracer: setArg mutation round-trips structurally":
+    # Parse a fixed Service-shaped B, mutate one arg, emit-preserve,
+    # reparse. The mutated doc and the reparsed-from-preserve-output
+    # doc must be structurally equal.
+    let src = "service \"web\" port=80"
+    var d1 = parse(src, preserveFormat = true).get
+    check setArg(d1.nodes[0], d1, 0, newStringValue("api"))
+    assertMutationRoundtrips(d1)
+
+  test "addArg then removeArg round-trip":
+    let src = "service \"web\" port=80"
+    var d = parse(src, preserveFormat = true).get
+    addArg(d.nodes[0], d, newIntValue(42))
+    assertMutationRoundtrips(d)
+    check removeArg(d.nodes[0], d, 1)  # remove the just-added arg
+    assertMutationRoundtrips(d)
+
+  test "setProp + removeProp round-trip":
+    let src = "service \"web\" port=80"
+    var d = parse(src, preserveFormat = true).get
+    setProp(d.nodes[0], d, "host", newStringValue("localhost"))
+    assertMutationRoundtrips(d)
+    setProp(d.nodes[0], d, "port", newIntValue(443))  # replace existing
+    assertMutationRoundtrips(d)
+    check removeProp(d.nodes[0], d, "host")
+    assertMutationRoundtrips(d)
+
+  test "setName round-trip":
+    let src = "service \"web\""
+    var d = parse(src, preserveFormat = true).get
+    setName(d.nodes[0], d, "endpoint")
+    assertMutationRoundtrips(d)
+
+  test "addChild + removeChild round-trip":
+    let src = "catalog \"a\" {\n  item \"x\"\n}"
+    var d = parse(src, preserveFormat = true).get
+    var newChild = newNode(d, "item")
+    addArg(newChild, d, newStringValue("y"))
+    addChild(d.nodes[0], d, newChild)
+    assertMutationRoundtrips(d)
+    check removeChild(d.nodes[0], d, "item") > 0
+    assertMutationRoundtrips(d)
+
+  test "top-level insert + add round-trip":
+    let src = "service \"web\""
+    var d = parse(src, preserveFormat = true).get
+    var n1 = newNode(d, "service")
+    addArg(n1, d, newStringValue("api"))
+    add(d, n1)
+    assertMutationRoundtrips(d)
+    var n2 = newNode(d, "service")
+    addArg(n2, d, newStringValue("admin"))
+    insert(d, 0, n2)
+    assertMutationRoundtrips(d)
+
+  # ------------------------------------------------------------------
+  # P6 forAll — randomized mutation sequences
+  # ------------------------------------------------------------------
+
+  type
+    MutOpKind = enum
+      moSetArg, moAddArg, moRemoveArg, moSetProp, moRemoveProp,
+      moSetName, moAddTopNode, moInsertTopNode
+    MutOp = object
+      nodeIdx: int      # which top-level node to target (modulo nodes.len)
+      argIdx: int       # for setArg / removeArg
+      propKey: string   # for setProp / removeProp
+      newName: string   # for setName / new node names
+      value: int        # generic numeric payload
+      kind: MutOpKind
+
+  proc applyMut(d: var KdlDoc, op: MutOp) =
+    # Reject when the target index is out of range; the property
+    # holds vacuously on no-op coordinates.
+    case op.kind
+    of moSetArg:
+      if d.nodes.len == 0: return
+      let i = op.nodeIdx mod d.nodes.len
+      discard setArg(d.nodes[i], d, op.argIdx, newIntValue(op.value.int64))
+    of moAddArg:
+      if d.nodes.len == 0: return
+      let i = op.nodeIdx mod d.nodes.len
+      addArg(d.nodes[i], d, newIntValue(op.value.int64))
+    of moRemoveArg:
+      if d.nodes.len == 0: return
+      let i = op.nodeIdx mod d.nodes.len
+      discard removeArg(d.nodes[i], d, op.argIdx)
+    of moSetProp:
+      if d.nodes.len == 0 or op.propKey.len == 0: return
+      let i = op.nodeIdx mod d.nodes.len
+      setProp(d.nodes[i], d, op.propKey, newIntValue(op.value.int64))
+    of moRemoveProp:
+      if d.nodes.len == 0 or op.propKey.len == 0: return
+      let i = op.nodeIdx mod d.nodes.len
+      discard removeProp(d.nodes[i], d, op.propKey)
+    of moSetName:
+      if d.nodes.len == 0 or op.newName.len == 0: return
+      let i = op.nodeIdx mod d.nodes.len
+      setName(d.nodes[i], d, op.newName)
+    of moAddTopNode:
+      if op.newName.len == 0: return
+      var n = newNode(d, op.newName)
+      addArg(n, d, newIntValue(op.value.int64))
+      add(d, n)
+    of moInsertTopNode:
+      if op.newName.len == 0: return
+      var n = newNode(d, op.newName)
+      addArg(n, d, newIntValue(op.value.int64))
+      let pos = if d.nodes.len == 0: 0 else: op.nodeIdx mod (d.nodes.len + 1)
+      insert(d, pos, n)
+
+  proc mutOps(): Strategy[seq[MutOp]] =
+    let nodeIdxStrat = integers(0, 10)
+    let argIdxStrat = integers(0, 4)
+    let propKeyStrat = identifiers(1, 6)
+    let nameStrat = identifiers(1, 8)
+    let valStrat = integers(-1000, 1000)
+    let kindStrat = enums[MutOpKind]()
+    lists(newStrategy[MutOp](proc(src: var DataSource): MutOp =
+      MutOp(
+        kind: kindStrat.run(src),
+        nodeIdx: int(nodeIdxStrat.run(src)),
+        argIdx: int(argIdxStrat.run(src)),
+        propKey: propKeyStrat.run(src),
+        newName: nameStrat.run(src),
+        value: int(valStrat.run(src)))), 0, 10)
+
+  property "mutation sequence preserves emit-reparse round-trip":
+    # Start from a fixed parsed service doc, apply a randomized
+    # sequence of public-API mutations, then assert preserve-mode
+    # emission + reparse yields a structurally-equal doc. Catches
+    # any combination of mutations that breaks the canonical-or-
+    # preserved separator invariant between top-level nodes.
+    with Settings(maxExamples: 200, testId: "p6-mut-sequence")
+    given ops in mutOps()
+    let src = "service \"web\" port=80"
+    var d = parse(src, preserveFormat = true).get
+    for op in ops: applyMut(d, op)
+    var emitX = newBufferEmitter()
+    emitDocPreserve(d, emitX)
+    let bytesX = emitX.finish()
+    let rX = parse(bytesX, preserveFormat = true)
+    ensure rX.isOk
+    ensure docEqual(d, rX.get)
 
 suite "P4 — Cat 3 doc structural round-trip (continued)":
 

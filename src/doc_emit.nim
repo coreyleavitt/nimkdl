@@ -120,6 +120,16 @@ proc emitDocPreserve*(doc: KdlDoc, e: var BufferEmitter) =
     emitDoc(doc, e)
     return
   var cursor = 0
+  template ensureNodeSeparator() =
+    # Top-level node-separation invariant: between any two emitted
+    # top-level nodes there must be a node terminator (`\n` or `;`).
+    # A preserved source ending without a trailing newline followed
+    # by an appended dirty node would otherwise concatenate them and
+    # produce bytes the parser refuses ("whitespace required before
+    # entry"). Caught by P6 — mutation round-trip property.
+    let last = e.lastByteOrZero
+    if last != '\0' and last != '\n' and last != ';':
+      e.pushPreservedBytes("\n")
   for n in doc.nodes:
     if subtreeIsClean(n) and validSpanInto(n.span, doc.sourceText):
       # Inter-node trivia: whitespace / comments / terminator between
@@ -127,6 +137,13 @@ proc emitDocPreserve*(doc: KdlDoc, e: var BufferEmitter) =
       if cursor < n.span.offset:
         e.pushPreservedBytes(doc.sourceText.toOpenArray(
           cursor, n.span.offset - 1))
+      else:
+        # No source trivia available between previous emission and this
+        # node (the previous emission already consumed up through this
+        # node's offset). The separator invariant still applies — e.g.
+        # an appended dirty node followed by another node would
+        # otherwise butt up against it.
+        ensureNodeSeparator()
       e.pushPreservedBytes(doc.sourceText.toOpenArray(
         n.span.offset, n.span.endOffset - 1))
       cursor = n.span.endOffset
@@ -141,6 +158,11 @@ proc emitDocPreserve*(doc: KdlDoc, e: var BufferEmitter) =
           e.pushPreservedBytes(doc.sourceText.toOpenArray(
             cursor, n.span.offset - 1))
           cursor = n.span.offset
+      # Always enforce the separator invariant before emitting a
+      # dirty top-level node. Covers the append-after-no-newline
+      # case (caught by P6) and the insert-between-spans case where
+      # the preceding span ended without a terminator.
+      ensureNodeSeparator()
       emitNode(n, doc, e)
       # If we know where the dirty node ended in source, skip past it
       # so we don't double-emit. Otherwise leave cursor as-is.
