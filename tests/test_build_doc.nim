@@ -11,6 +11,7 @@ import std/unittest
 
 import ../src/ast
 import ../src/cursor
+import ../src/doc_build
 import ../src/intern
 import ../src/lexer
 import ../src/spans

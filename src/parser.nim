@@ -27,6 +27,7 @@
 
 import ./ast
 import ./cursor
+import ./doc_build
 import ./intern
 import ./lexer
 import ./spans

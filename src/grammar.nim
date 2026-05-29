@@ -788,7 +788,7 @@ proc buildNode(node: ParseNode, doc: var KdlDoc, stream: TokenStream,
   for i, c in result.children: childHashes[i] = c.parseHash
   result.parseHash = hashNodeFromChildHashes(result, doc.interner, childHashes)
 
-proc buildDoc(root: ParseNode, doc: var KdlDoc, stream: TokenStream,
+proc buildDocFromParseTree(root: ParseNode, doc: var KdlDoc, stream: TokenStream,
               errs: var seq[ParseError]) =
   ## Walk the `document` rule match. Grammar:
   ##   document := star(newline) star(seq(opt(slashdash), node, star(newline)))
@@ -890,7 +890,7 @@ proc referenceInterpret*(source: string, sourcePath = "<input>"):
     return err[KdlDoc, ParseError](
       initError(peParseUnexpected, span, "trailing tokens after document"))
   var buildErrs: seq[ParseError] = @[]
-  buildDoc(res.get, doc, tokens, buildErrs)
+  buildDocFromParseTree(res.get, doc, tokens, buildErrs)
   if buildErrs.len > 0:
     return err[KdlDoc, ParseError](buildErrs[0])
   let semCheck = checkNoReservedKeywords(doc.nodes, doc)
