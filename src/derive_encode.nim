@@ -90,54 +90,90 @@ proc hasPragma(pragmas: seq[NimNode], name: string): bool =
     if $head == name: return true
   false
 
-proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
-                 fieldName: string, fieldType: NimNode) =
-  ## Append a `pushArg*` call appropriate to the field's static type.
-  ## Direct typed dispatch — no KdlValue allocation, no runtime kvKind
-  ## branch. The case-on-type-name is resolved entirely at macro
-  ## expansion; the emitted code is one inline push call.
-  let fieldIdent = ident(fieldName)
+proc isOptionType(t: NimNode): bool {.inline.} =
+  ## Detect `Option[T]` by AST shape: BracketExpr with head `Option`.
+  t.kind == nnkBracketExpr and $t[0] == "Option"
+
+proc innerOfOption(t: NimNode): NimNode {.inline.} =
+  ## Extract the inner T of `Option[T]`.
+  t[1]
+
+proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
+                       fieldType: NimNode) =
+  ## Inner of the arg-push dispatch: emit the typed push for an
+  ## already-resolved value expression (used both directly and from
+  ## inside an `if isSome:` block for Option-wrapped fields).
   case $fieldType
   of "string":
     pushBody.add quote do:
-      `eSym`.pushArgString(`vSym`.`fieldIdent`)
+      `eSym`.pushArgString(`valueExpr`)
   of "int", "int8", "int16", "int32", "int64":
     pushBody.add quote do:
-      `eSym`.pushArgInt(int64(`vSym`.`fieldIdent`))
+      `eSym`.pushArgInt(int64(`valueExpr`))
   of "float", "float32", "float64":
     pushBody.add quote do:
-      `eSym`.pushArgFloat(float64(`vSym`.`fieldIdent`))
+      `eSym`.pushArgFloat(float64(`valueExpr`))
   of "bool":
     pushBody.add quote do:
-      `eSym`.pushArgBool(`vSym`.`fieldIdent`)
+      `eSym`.pushArgBool(`valueExpr`)
   else:
     error("deriveEncode: kdlArg field type " & $fieldType &
           " not yet supported (cycle C2 covers string/int/float/bool)")
+
+proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
+                 fieldName: string, fieldType: NimNode) =
+  ## Append a `pushArg*` call appropriate to the field's static type.
+  ## For Option[T], wrap in `if v.field.isSome:` and push the inner
+  ## value; None means the field is absent and emits nothing.
+  let fieldIdent = ident(fieldName)
+  if isOptionType(fieldType):
+    let inner = innerOfOption(fieldType)
+    var inner_body = newStmtList()
+    let getExpr = quote do: get(`vSym`.`fieldIdent`)
+    emitArgPushDirect(inner_body, eSym, getExpr, inner)
+    let cond = quote do: isSome(`vSym`.`fieldIdent`)
+    pushBody.add newIfStmt((cond, inner_body))
+  else:
+    let fullExpr = quote do: `vSym`.`fieldIdent`
+    emitArgPushDirect(pushBody, eSym, fullExpr, fieldType)
+
+proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
+                        fieldType: NimNode) =
+  case $fieldType
+  of "string":
+    pushBody.add quote do:
+      `eSym`.pushPropString(`keyLit`, `valueExpr`)
+  of "int", "int8", "int16", "int32", "int64":
+    pushBody.add quote do:
+      `eSym`.pushPropInt(`keyLit`, int64(`valueExpr`))
+  of "float", "float32", "float64":
+    pushBody.add quote do:
+      `eSym`.pushPropFloat(`keyLit`, float64(`valueExpr`))
+  of "bool":
+    pushBody.add quote do:
+      `eSym`.pushPropBool(`keyLit`, `valueExpr`)
+  else:
+    error("deriveEncode: kdlProp field type " & $fieldType &
+          " not yet supported (cycle C3 covers string/int/float/bool)")
 
 proc emitPropPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
                   fieldName: string, fieldType: NimNode) =
   ## Append a `pushProp*` call appropriate to the field's static type.
   ## Key bytes are inlined at macro time as a string literal — the
   ## emitter's bareword-vs-quoted decider runs once per push call site,
-  ## not per encode call.
+  ## not per encode call. Option[T] wraps in `if isSome:`.
   let fieldIdent = ident(fieldName)
   let keyLit = newStrLitNode(fieldName)
-  case $fieldType
-  of "string":
-    pushBody.add quote do:
-      `eSym`.pushPropString(`keyLit`, `vSym`.`fieldIdent`)
-  of "int", "int8", "int16", "int32", "int64":
-    pushBody.add quote do:
-      `eSym`.pushPropInt(`keyLit`, int64(`vSym`.`fieldIdent`))
-  of "float", "float32", "float64":
-    pushBody.add quote do:
-      `eSym`.pushPropFloat(`keyLit`, float64(`vSym`.`fieldIdent`))
-  of "bool":
-    pushBody.add quote do:
-      `eSym`.pushPropBool(`keyLit`, `vSym`.`fieldIdent`)
+  if isOptionType(fieldType):
+    let inner = innerOfOption(fieldType)
+    var inner_body = newStmtList()
+    let getExpr = quote do: get(`vSym`.`fieldIdent`)
+    emitPropPushDirect(inner_body, eSym, keyLit, getExpr, inner)
+    let cond = quote do: isSome(`vSym`.`fieldIdent`)
+    pushBody.add newIfStmt((cond, inner_body))
   else:
-    error("deriveEncode: kdlProp field type " & $fieldType &
-          " not yet supported (cycle C3 covers string/int/float/bool)")
+    let fullExpr = quote do: `vSym`.`fieldIdent`
+    emitPropPushDirect(pushBody, eSym, keyLit, fullExpr, fieldType)
 
 macro deriveEncode*(T: typedesc): untyped =
   ## Emit `proc kdlEncode*(v: T; e: var BufferEmitter)` specialized to
@@ -157,7 +193,7 @@ macro deriveEncode*(T: typedesc): untyped =
   # runtime-empty container (seq with len 0, Option with isNone), no
   # `{}` appears in the output. Single nested types always count as
   # present.
-  type ChildKind = enum ckSingle, ckSeq
+  type ChildKind = enum ckSingle, ckSeq, ckOption
   var childFields: seq[tuple[name: string, typ: NimNode, kind: ChildKind]]
   for (fieldName, fieldType, pragmas) in objectFields(typeSym):
     if hasPragma(pragmas, "kdlArg"):
@@ -165,25 +201,31 @@ macro deriveEncode*(T: typedesc): untyped =
     elif hasPragma(pragmas, "kdlProp"):
       emitPropPush(body, vSym, eSym, fieldName, fieldType)
     elif hasPragma(pragmas, "kdlChild"):
-      # Detect seq[T] by type-AST shape — BracketExpr(seq, T).
       if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
         childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq))
+      elif isOptionType(fieldType):
+        childFields.add((name: fieldName, typ: innerOfOption(fieldType),
+                         kind: ckOption))
       else:
         childFields.add((name: fieldName, typ: fieldType, kind: ckSingle))
   if childFields.len > 0:
-    # Build the runtime "any present" predicate. Single nested
-    # children are trivially present (true); seqs check `.len > 0`.
+    # Build the runtime "any present" predicate.
     var anyPresent: NimNode = nil
     for (childName, _, childKind) in childFields:
       let childIdent = ident(childName)
-      let term =
-        case childKind
-        of ckSingle: newLit(true)
-        of ckSeq:    quote do: `vSym`.`childIdent`.len > 0
+      var term: NimNode
+      case childKind
+      of ckSingle:
+        term = newLit(true)
+      of ckSeq:
+        term = quote do:
+          `vSym`.`childIdent`.len > 0
+      of ckOption:
+        term = quote do:
+          isSome(`vSym`.`childIdent`)
       if anyPresent.isNil: anyPresent = term
       else:                anyPresent = infix(anyPresent, "or", term)
-    # Build the children-emit body: for each child field, emit either
-    # a single recursive kdlEncode or a for-loop over the seq.
+    # Build the children-emit body.
     var childBody = newStmtList()
     childBody.add quote do:
       `eSym`.pushChildrenBegin()
@@ -198,11 +240,12 @@ macro deriveEncode*(T: typedesc): untyped =
         childBody.add quote do:
           for `elemSym` in `vSym`.`childIdent`:
             kdlEncode(`elemSym`, `eSym`)
+      of ckOption:
+        childBody.add quote do:
+          if isSome(`vSym`.`childIdent`):
+            kdlEncode(get(`vSym`.`childIdent`), `eSym`)
     childBody.add quote do:
       `eSym`.pushChildrenEnd()
-    # Wrap in the present-or-skip conditional. The compiler folds
-    # `if true: ...` to unconditional code for the all-single-nested
-    # case, so the runtime check is paid only when seqs are involved.
     body.add newIfStmt((anyPresent, childBody))
   body.add quote do:
     `eSym`.pushNodeEnd()

@@ -4,7 +4,7 @@
 ## a time. Each test defines a type, derives kdlEncode, constructs a
 ## value, runs it through a BufferEmitter, and asserts the wire bytes.
 
-import std/unittest
+import std/[options, unittest]
 
 import ../src/derive_encode
 import ../src/emitter
@@ -195,7 +195,7 @@ suite "derive_encode — C6: self-recursive Tree (closes #11 by construction)":
       "}\n"
     )
 
-  test "deeply linear chain — depth 5":
+  test "linear chain — depth 5":
     var t = Tree(value: "1", children: @[
       Tree(value: "2", children: @[
         Tree(value: "3", children: @[
@@ -218,3 +218,66 @@ suite "derive_encode — C6: self-recursive Tree (closes #11 by construction)":
       "    }\n" &
       "}\n"
     )
+
+suite "derive_encode — C7: Option[T] arg / prop / child":
+
+  type Config {.kdlNode: "config".} = object
+    timeout {.kdlProp.}: Option[int]
+    label {.kdlProp.}: Option[string]
+
+  deriveEncode(Config)
+
+  test "Option[T] kdlProp emits when Some":
+    var c = Config(timeout: some(30), label: some("staging"))
+    var e = newBufferEmitter()
+    kdlEncode(c, e)
+    check e.finish() == "config timeout=30 label=\"staging\"\n"
+
+  test "Option[T] kdlProp omits when None":
+    var c = Config(timeout: some(30), label: none(string))
+    var e = newBufferEmitter()
+    kdlEncode(c, e)
+    check e.finish() == "config timeout=30\n"
+
+  test "all Option[T] None emits bare node":
+    var c = Config()
+    var e = newBufferEmitter()
+    kdlEncode(c, e)
+    check e.finish() == "config\n"
+
+  type Note {.kdlNode: "note".} = object
+    text {.kdlArg.}: Option[string]
+
+  deriveEncode(Note)
+
+  test "Option[T] kdlArg emits when Some, omits when None":
+    var n1 = Note(text: some("hi"))
+    var e1 = newBufferEmitter()
+    kdlEncode(n1, e1)
+    check e1.finish() == "note \"hi\"\n"
+    var n2 = Note(text: none(string))
+    var e2 = newBufferEmitter()
+    kdlEncode(n2, e2)
+    check e2.finish() == "note\n"
+
+  type Detail {.kdlNode: "detail".} = object
+    name {.kdlArg.}: string
+
+  deriveEncode(Detail)
+
+  type Wrapper {.kdlNode: "wrapper".} = object
+    payload {.kdlChild.}: Option[Detail]
+
+  deriveEncode(Wrapper)
+
+  test "Option[T] kdlChild emits when Some":
+    var w = Wrapper(payload: some(Detail(name: "x")))
+    var e = newBufferEmitter()
+    kdlEncode(w, e)
+    check e.finish() == "wrapper {\n    detail \"x\"\n}\n"
+
+  test "Option[T] kdlChild None omits children block":
+    var w = Wrapper(payload: none(Detail))
+    var e = newBufferEmitter()
+    kdlEncode(w, e)
+    check e.finish() == "wrapper\n"
