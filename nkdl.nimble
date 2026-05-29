@@ -50,6 +50,19 @@ task test, "Run unit tests":
   exec cmd & " tests/test_h2_compiletime.nim"
   exec cmd & " tests/test_public_api.nim"
   exec cmd & " tests/test_readme_examples.nim"
+  # Property tests via proptest. Opt-in via NKDL_PROPTEST=1 so the
+  # default `nimble test` (incl. CI) stays self-contained — proptest
+  # is currently a local-path dep resolved through milpa and not yet
+  # available on any registry. Flip the gate to file-existence (or
+  # better, drop the gate entirely) once proptest publishes.
+  #
+  # Local dev: `milpa fetch` then `NKDL_PROPTEST=1 nimble test`.
+  if existsEnv("NKDL_PROPTEST"):
+    exec cmd & " tests/test_preserve_properties.nim"
+    exec cmd & " tests/test_typed_decode_properties.nim"
+  else:
+    echo "[skip] tests/test_preserve_properties.nim — set NKDL_PROPTEST=1 + run `milpa fetch` to enable"
+    echo "[skip] tests/test_typed_decode_properties.nim — set NKDL_PROPTEST=1 + run `milpa fetch` to enable"
 
 task perfGuard, "Verify no KdlNode deep-copy regression":
   ## Compile-time check that the parser hot paths don't introduce
