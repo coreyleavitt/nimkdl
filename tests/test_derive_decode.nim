@@ -148,3 +148,90 @@ suite "derive_decode — D3: kdlProp via bytesEq dispatch":
     check r.isOk
     check m.name == "first"
     check m.count == 3
+
+suite "derive_decode — D4: kdlChild single + seq + self-recursive Tree":
+
+  type Action4 {.kdlNode: "action".} = object
+    kind {.kdlArg.}: string
+
+  deriveDecode(Action4)
+
+  type Rule {.kdlNode: "rule".} = object
+    id {.kdlArg.}: string
+    action {.kdlChild.}: Action4
+
+  deriveDecode(Rule)
+
+  test "single kdlChild decodes nested node":
+    let f = mkCursor("rule \"compaction\" {\n    action \"inject\"\n}")
+    var r: Rule
+    let res = kdlDecode(r, f.cursor)
+    check res.isOk
+    check r.id == "compaction"
+    check r.action.kind == "inject"
+
+  type Item {.kdlNode: "item".} = object
+    label {.kdlArg.}: string
+
+  deriveDecode(Item)
+
+  type Catalog {.kdlNode: "catalog".} = object
+    items {.kdlChild.}: seq[Item]
+
+  deriveDecode(Catalog)
+
+  test "kdlChild seq populates from multiple child nodes":
+    let f = mkCursor("catalog {\n    item \"a\"\n    item \"b\"\n    item \"c\"\n}")
+    var c: Catalog
+    let res = kdlDecode(c, f.cursor)
+    check res.isOk
+    check c.items.len == 3
+    check c.items[0].label == "a"
+    check c.items[1].label == "b"
+    check c.items[2].label == "c"
+
+  test "empty children block leaves seq empty":
+    let f = mkCursor("catalog")
+    var c: Catalog
+    let res = kdlDecode(c, f.cursor)
+    check res.isOk
+    check c.items.len == 0
+
+  type Tree {.kdlNode: "tree".} = object
+    value {.kdlArg.}: string
+    children {.kdlChild.}: seq[Tree]
+
+  deriveDecode(Tree)
+
+  test "self-recursive Tree — depth 1":
+    let f = mkCursor("tree \"root\"")
+    var t: Tree
+    let res = kdlDecode(t, f.cursor)
+    check res.isOk
+    check t.value == "root"
+    check t.children.len == 0
+
+  test "self-recursive Tree — depth 2":
+    let f = mkCursor("tree \"root\" {\n    tree \"a\"\n    tree \"b\"\n}")
+    var t: Tree
+    let res = kdlDecode(t, f.cursor)
+    check res.isOk
+    check t.value == "root"
+    check t.children.len == 2
+    check t.children[0].value == "a"
+    check t.children[1].value == "b"
+
+  test "self-recursive Tree — depth 3 (the #11 closure)":
+    let src = "tree \"L1\" {\n    tree \"L2a\" {\n        tree \"L3a\"\n        tree \"L3b\"\n    }\n    tree \"L2b\"\n}"
+    let f = mkCursor(src)
+    var t: Tree
+    let res = kdlDecode(t, f.cursor)
+    check res.isOk
+    check t.value == "L1"
+    check t.children.len == 2
+    check t.children[0].value == "L2a"
+    check t.children[0].children.len == 2
+    check t.children[0].children[0].value == "L3a"
+    check t.children[0].children[1].value == "L3b"
+    check t.children[1].value == "L2b"
+    check t.children[1].children.len == 0

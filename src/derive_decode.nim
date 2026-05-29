@@ -182,9 +182,12 @@ macro deriveDecode*(T: typedesc): untyped =
   let evSym2 = ident("ev2")
   let argIdxSym = ident("argIdx")
 
-  # Collect kdlArg + kdlProp fields by pragma role.
+  # Collect kdlArg + kdlProp + kdlChild fields by pragma role.
+  type ChildKind = enum ckSingle, ckSeq
   var argFields: seq[tuple[name: string, typ: NimNode]]
   var propFields: seq[tuple[name: string, typ: NimNode, wireKey: string]]
+  var childFields: seq[tuple[name: string, elemType: NimNode,
+                             kind: ChildKind, wireName: string]]
   let recList = objectRecList(typeSym)
   for (fieldName, fieldType, pragmas) in regularFields(recList):
     if hasPragma(pragmas, "kdlArg"):
@@ -196,6 +199,18 @@ macro deriveDecode*(T: typedesc): untyped =
           renameArg.strVal
         else: fieldName
       propFields.add((name: fieldName, typ: fieldType, wireKey: wireKey))
+    elif hasPragma(pragmas, "kdlChild"):
+      var kind: ChildKind
+      var elemType: NimNode
+      if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
+        kind = ckSeq
+        elemType = fieldType[1]
+      else:
+        kind = ckSingle
+        elemType = fieldType
+      let elemWire = nodeNameOf(elemType)
+      childFields.add((name: fieldName, elemType: elemType, kind: kind,
+                       wireName: elemWire))
 
   # Build the per-arg dispatch.
   var argCase = newTree(nnkCaseStmt, argIdxSym)
@@ -225,6 +240,15 @@ macro deriveDecode*(T: typedesc): untyped =
     propKeyLets.add(quote do:
       let `sym` = `lit`)
     propKeySyms.add(sym)
+  # Same lift for child wire-names — bytesEq against an addressable let.
+  var childKeyLets = newStmtList()
+  var childKeySyms: seq[NimNode]
+  for (_, _, _, wireName) in childFields:
+    let sym = genSym(nskLet, "expectedChildName")
+    let lit = newStrLitNode(wireName)
+    childKeyLets.add(quote do:
+      let `sym` = `lit`)
+    childKeySyms.add(sym)
   var propDispatch = newStmtList()
   if propFields.len > 0:
     var rootIf: NimNode = nil
@@ -252,9 +276,50 @@ macro deriveDecode*(T: typedesc): untyped =
         initError(peParseUnexpected, `evSym2`.span,
                   "unexpected property")))
 
+  # Build the per-child dispatch (used inside the ceChildrenBegin loop).
+  let nextEvSym = ident("nextEv")
+  let childPeekSym = ident("childPeek")
+  var childDispatchBody: NimNode
+  if childFields.len > 0:
+    var rootIf: NimNode = nil
+    for i, (fName, _, kind, _) in childFields:
+      let fIdent = ident(fName)
+      let keySym = childKeySyms[i]
+      let cond = quote do:
+        bytesEq(`cSym`, `childPeekSym`.nodeNameTok, `keySym`)
+      let body =
+        case kind
+        of ckSingle:
+          quote do:
+            let r = kdlDecode(`vSym`.`fIdent`, `cSym`)
+            if r.isErr: return r
+        of ckSeq:
+          # Append a fresh element to the seq, decode into it.
+          let elemSym = genSym(nskVar, "childElem")
+          let elemType = childFields[i].elemType
+          quote do:
+            var `elemSym`: `elemType`
+            let r = kdlDecode(`elemSym`, `cSym`)
+            if r.isErr: return r
+            `vSym`.`fIdent`.add(`elemSym`)
+      if rootIf.isNil:
+        rootIf = newNimNode(nnkIfStmt)
+        rootIf.add(newNimNode(nnkElifBranch).add(cond).add(body))
+      else:
+        rootIf.add(newNimNode(nnkElifBranch).add(cond).add(body))
+    rootIf.add(newNimNode(nnkElse).add(quote do:
+      # Unknown child name — skip its subtree (we already peeked it,
+      # so consume via skip after advance).
+      skip(`cSym`)))
+    childDispatchBody = rootIf
+  else:
+    childDispatchBody = quote do:
+      skip(`cSym`)
+
   let body = quote do:
     block:
       `propKeyLets`
+      `childKeyLets`
       let `evSym` = advance(`cSym`)
       if `evSym`.kind == ceError:
         return err[void, ParseError](`evSym`.err)
@@ -276,6 +341,28 @@ macro deriveDecode*(T: typedesc): untyped =
           inc `argIdxSym`
         of ceProp:
           `propDispatch`
+        of ceChildrenBegin:
+          # Inner child-loop: drives until ceChildrenEnd. For each
+          # ceNodeBegin we peek (so the recursive kdlDecode can read
+          # the ceNodeBegin itself), dispatch by wire-name, and
+          # recurse. Unknown names get skip()'d.
+          while true:
+            let `childPeekSym` = peek(`cSym`)
+            case `childPeekSym`.kind
+            of ceChildrenEnd:
+              discard advance(`cSym`)
+              break
+            of ceNodeBegin:
+              `childDispatchBody`
+            of ceEof:
+              return err[void, ParseError](
+                initError(peParseExpected, `childPeekSym`.span,
+                          "unexpected EOF in children block"))
+            of ceError:
+              discard advance(`cSym`)
+              return err[void, ParseError](`childPeekSym`.err)
+            else:
+              discard advance(`cSym`)
         of ceNodeEnd:
           break
         of ceError:
