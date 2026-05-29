@@ -22,3 +22,68 @@ suite "derive_encode — C1: tracer (one kdlArg string field)":
     var e = newBufferEmitter()
     kdlEncode(s, e)
     check e.finish() == "service \"web\"\n"
+
+suite "derive_encode — C2: multi-field typed args":
+
+  type Edge {.kdlNode: "edge".} = object
+    label {.kdlArg.}: string
+    weight {.kdlArg.}: int
+    bidir {.kdlArg.}: bool
+
+  deriveEncode(Edge)
+
+  test "string + int + bool emit in field order":
+    var v = Edge(label: "hot", weight: 7, bidir: true)
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    check e.finish() == "edge \"hot\" 7 #true\n"
+
+  type Pt {.kdlNode: "pt".} = object
+    x {.kdlArg.}: float
+    y {.kdlArg.}: float
+
+  deriveEncode(Pt)
+
+  test "two floats emit with .0 marker":
+    var p = Pt(x: 1.5, y: 2.0)
+    var e = newBufferEmitter()
+    kdlEncode(p, e)
+    check e.finish() == "pt 1.5 2.0\n"
+
+  type Empty {.kdlNode: "empty".} = object
+
+  deriveEncode(Empty)
+
+  test "node with no fields emits bare name":
+    var v = Empty()
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    check e.finish() == "empty\n"
+
+suite "derive_encode — C3: kdlProp":
+
+  type Sv {.kdlNode: "sv".} = object
+    host {.kdlProp.}: string
+    port {.kdlProp.}: int
+    enabled {.kdlProp.}: bool
+
+  deriveEncode(Sv)
+
+  test "three typed props emit key=value in field order":
+    var s = Sv(host: "a.b", port: 443, enabled: true)
+    var e = newBufferEmitter()
+    kdlEncode(s, e)
+    check e.finish() == "sv host=\"a.b\" port=443 enabled=#true\n"
+
+  type Mixed {.kdlNode: "mixed".} = object
+    name {.kdlArg.}: string
+    count {.kdlProp.}: int
+    ratio {.kdlProp.}: float
+
+  deriveEncode(Mixed)
+
+  test "kdlArg before kdlProp emits in declaration order":
+    var m = Mixed(name: "first", count: 3, ratio: 1.5)
+    var e = newBufferEmitter()
+    kdlEncode(m, e)
+    check e.finish() == "mixed \"first\" count=3 ratio=1.5\n"

@@ -93,16 +93,51 @@ proc hasPragma(pragmas: seq[NimNode], name: string): bool =
 proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
                  fieldName: string, fieldType: NimNode) =
   ## Append a `pushArg*` call appropriate to the field's static type.
-  ## Stage C1 handles `string` only; subsequent cycles widen the
-  ## type universe.
+  ## Direct typed dispatch — no KdlValue allocation, no runtime kvKind
+  ## branch. The case-on-type-name is resolved entirely at macro
+  ## expansion; the emitted code is one inline push call.
   let fieldIdent = ident(fieldName)
   case $fieldType
   of "string":
     pushBody.add quote do:
       `eSym`.pushArgString(`vSym`.`fieldIdent`)
+  of "int", "int8", "int16", "int32", "int64":
+    pushBody.add quote do:
+      `eSym`.pushArgInt(int64(`vSym`.`fieldIdent`))
+  of "float", "float32", "float64":
+    pushBody.add quote do:
+      `eSym`.pushArgFloat(float64(`vSym`.`fieldIdent`))
+  of "bool":
+    pushBody.add quote do:
+      `eSym`.pushArgBool(`vSym`.`fieldIdent`)
   else:
-    error("deriveEncode (Stage C1): kdlArg field type " & $fieldType &
-          " not yet supported")
+    error("deriveEncode: kdlArg field type " & $fieldType &
+          " not yet supported (cycle C2 covers string/int/float/bool)")
+
+proc emitPropPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
+                  fieldName: string, fieldType: NimNode) =
+  ## Append a `pushProp*` call appropriate to the field's static type.
+  ## Key bytes are inlined at macro time as a string literal — the
+  ## emitter's bareword-vs-quoted decider runs once per push call site,
+  ## not per encode call.
+  let fieldIdent = ident(fieldName)
+  let keyLit = newStrLitNode(fieldName)
+  case $fieldType
+  of "string":
+    pushBody.add quote do:
+      `eSym`.pushPropString(`keyLit`, `vSym`.`fieldIdent`)
+  of "int", "int8", "int16", "int32", "int64":
+    pushBody.add quote do:
+      `eSym`.pushPropInt(`keyLit`, int64(`vSym`.`fieldIdent`))
+  of "float", "float32", "float64":
+    pushBody.add quote do:
+      `eSym`.pushPropFloat(`keyLit`, float64(`vSym`.`fieldIdent`))
+  of "bool":
+    pushBody.add quote do:
+      `eSym`.pushPropBool(`keyLit`, `vSym`.`fieldIdent`)
+  else:
+    error("deriveEncode: kdlProp field type " & $fieldType &
+          " not yet supported (cycle C3 covers string/int/float/bool)")
 
 macro deriveEncode*(T: typedesc): untyped =
   ## Emit `proc kdlEncode*(v: T; e: var BufferEmitter)` specialized to
@@ -119,6 +154,8 @@ macro deriveEncode*(T: typedesc): untyped =
   for (fieldName, fieldType, pragmas) in objectFields(typeSym):
     if hasPragma(pragmas, "kdlArg"):
       emitArgPush(body, vSym, eSym, fieldName, fieldType)
+    elif hasPragma(pragmas, "kdlProp"):
+      emitPropPush(body, vSym, eSym, fieldName, fieldType)
   body.add quote do:
     `eSym`.pushNodeEnd()
   # Emitted unexported because deriveEncode may be invoked inside a
