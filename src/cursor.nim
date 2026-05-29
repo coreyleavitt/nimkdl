@@ -55,6 +55,10 @@ type
     csInNodeEntries     ## inside a node; expect entry, `{`, terminator, RBrace, or EOF
     csAfterChildren     ## a `}` just closed a children block; next event is NodeEnd for the parent
 
+  CursorMode* = enum
+    cmSingle         ## first ceError halts the stream (subsequent advance() returns ceEof)
+    cmAccumulating   ## ceError is emitted then the cursor re-syncs at the next safe point
+
   SlashdashKind = enum
     sdEntry             ## /- single entry: SlashdashEnd after next entry event
     sdNode              ## /- node: SlashdashEnd after matching NodeEnd at anchor depth
@@ -73,23 +77,46 @@ type
     depth*: int       ## children-block nesting depth (0 = top-level)
     pendingEnds*: seq[CursorEvent]      ## queued SlashdashEnd / similar deferred emissions
     slashdashStack*: seq[PendingSlashdash]  ## open slashdash brackets awaiting close
+    mode*: CursorMode
+    halted*: bool      ## set after a ceError in single-shot mode; subsequent advance() returns ceEof
 
-proc initStringCursor*(stream: ptr TokenStream, source: string): StringCursor =
-  StringCursor(stream: stream, source: source, tokIdx: 0, state: csTopLevel)
+proc initStringCursor*(stream: ptr TokenStream, source: string,
+                       mode: CursorMode = cmSingle): StringCursor =
+  StringCursor(stream: stream, source: source, tokIdx: 0,
+               state: csTopLevel, mode: mode)
 
 template tok(c: StringCursor): Token =
   c.stream[].tokens[c.tokIdx]
 
 proc tryConsumeAnno(c: var StringCursor): int =
-  ## If `tok` is `(`, parse `( tag )` and return the tag's token index.
-  ## Otherwise return -1. Caller is left positioned past the closing `)`.
+  ## If `tok` is `(` followed by `tag )`, parse + return the tag's
+  ## token index. Otherwise return -1 and leave tokIdx untouched.
+  ## Caller decides whether to emit ceError or recover.
   if c.tok.kind != tkLParen:
     return -1
+  let n = c.stream[].tokens.len
+  if c.tokIdx + 2 >= n: return -1
+  let closeKind = c.stream[].tokens[c.tokIdx + 2].kind
+  if closeKind != tkRParen: return -1
   let tagIdx = c.tokIdx + 1
-  # Minimal Phase 1 form: assume (ident) or (string). Strict validation
-  # comes with the error-path work in Cycle 15.
-  c.tokIdx += 3  # consume `(`, tag, `)`
+  c.tokIdx += 3
   tagIdx
+
+proc emitMalformedAnnoError(c: var StringCursor, span: Span): CursorEvent =
+  ## Construct a synthetic ceError for a malformed `(tag)` annotation.
+  ## Single-shot mode halts; accumulating mode recovers by stepping
+  ## past the stray `(` so subsequent advance() can re-sync.
+  let pe = initError(peParseUnexpected, span,
+                     "malformed type annotation: expected (ident)")
+  inc c.tokIdx
+  case c.mode
+  of cmSingle:
+    c.halted = true
+  of cmAccumulating:
+    c.state = csTopLevel
+    c.slashdashStack.setLen(0)
+    c.pendingEnds.setLen(0)
+  CursorEvent(kind: ceError, span: span, err: pe)
 
 proc bytes*(c: StringCursor, tokIdx: int): string =
   ## Token payload as a freshly-copied string. Ergonomic — binds anywhere
@@ -121,6 +148,34 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
   while c.state == csTopLevel and c.tok.kind in {tkNewline, tkSemicolon}:
     inc c.tokIdx
 
+  # Lex error short-circuits regardless of grammar state — the lexer
+  # emits tkError at the offending position and the cursor surfaces it
+  # immediately as ceError. Single-shot mode then halts the stream;
+  # accumulating mode will instead re-sync at the next node boundary
+  # (deferred to the recovery cycle).
+  if c.tok.kind == tkError:
+    let t = c.tok
+    let pe = c.stream[].errorPayloads[int(t.errIdx)]
+    inc c.tokIdx
+    case c.mode
+    of cmSingle:
+      c.halted = true
+    of cmAccumulating:
+      # Re-sync: scan forward past lexer-recovery noise (tkString /
+      # tkNumber etc.) until the next token that can safely start (or
+      # terminate) a node head. Slashdash state is cleared — the bad
+      # token broke whatever bracket was open.
+      while c.tokIdx < c.stream[].tokens.len:
+        let nk = c.stream[].tokens[c.tokIdx].kind
+        if nk in {tkIdent, tkLParen, tkSlashDash, tkLBrace, tkRBrace,
+                  tkNewline, tkSemicolon, tkEof, tkError}:
+          break
+        inc c.tokIdx
+      c.state = csTopLevel
+      c.slashdashStack.setLen(0)
+      c.pendingEnds.setLen(0)
+    return CursorEvent(kind: ceError, span: t.span, err: pe)
+
   case c.state
   of csTopLevel:
     let t = c.tok
@@ -134,7 +189,11 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       return CursorEvent(kind: ceSlashdashBegin, span: t.span)
     of tkLParen:
       let annoIdx = tryConsumeAnno(c)
+      if annoIdx == -1:
+        return emitMalformedAnnoError(c, t.span)
       let nameTok = c.tok
+      if nameTok.kind != tkIdent:
+        return emitMalformedAnnoError(c, t.span)
       let nameIdx = c.tokIdx
       inc c.tokIdx
       c.state = csInNodeEntries
@@ -185,6 +244,10 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
     of tkLParen:
       # Arg with type annotation: (tag) value
       let annoIdx = tryConsumeAnno(c)
+      if annoIdx == -1:
+        return emitMalformedAnnoError(c, t.span)
+      if c.tokIdx >= c.stream[].tokens.len:
+        return emitMalformedAnnoError(c, t.span)
       let valSpan = c.tok.span
       let valIdx = c.tokIdx
       let myArgIdx = c.argIdx
@@ -231,6 +294,8 @@ proc advance*(c: var StringCursor): CursorEvent =
   ## Public entry point: drains queued events first, then generates the
   ## next grammar event, then inspects the slashdash stack to see if the
   ## just-emitted event closes a bracket (queuing SlashdashEnd if so).
+  if c.halted:
+    return CursorEvent(kind: ceEof, span: c.tok.span)
   if c.pendingEnds.len > 0:
     result = c.pendingEnds[0]
     c.pendingEnds.delete(0)
@@ -249,3 +314,67 @@ proc advance*(c: var StringCursor): CursorEvent =
   if closes:
     discard c.slashdashStack.pop()
     c.pendingEnds.add(CursorEvent(kind: ceSlashdashEnd, span: result.span))
+
+type
+  Checkpoint* = object
+    ## Opaque snapshot of cursor state. O(1) to capture, O(state) to
+    ## restore. The slashdash stack + pending queue are sequence-typed,
+    ## so a checkpoint owns its own copies (the cursor's mutations
+    ## after pos() can't see-through into a saved Checkpoint).
+    tokIdx*: int
+    state*: CursorState
+    argIdx*: int
+    depth*: int
+    pendingEnds*: seq[CursorEvent]
+    slashdashStack*: seq[PendingSlashdash]
+    halted*: bool
+
+proc pos*(c: StringCursor): Checkpoint =
+  Checkpoint(tokIdx: c.tokIdx, state: c.state, argIdx: c.argIdx,
+             depth: c.depth, pendingEnds: c.pendingEnds,
+             slashdashStack: c.slashdashStack, halted: c.halted)
+
+proc seek*(c: var StringCursor, ck: Checkpoint) =
+  c.tokIdx = ck.tokIdx
+  c.state = ck.state
+  c.argIdx = ck.argIdx
+  c.depth = ck.depth
+  c.pendingEnds = ck.pendingEnds
+  c.slashdashStack = ck.slashdashStack
+  c.halted = ck.halted
+
+proc skip*(c: var StringCursor) =
+  ## Consume events until the current node's ceNodeEnd is emitted.
+  ## Contract: call immediately after a ceNodeBegin. On return the
+  ## cursor is positioned to emit the next event after the node.
+  ## Handles arbitrary children-block nesting within the skipped node.
+  var childrenDepth = 0
+  while true:
+    let ev = advance(c)
+    case ev.kind
+    of ceChildrenBegin: inc childrenDepth
+    of ceChildrenEnd:   dec childrenDepth
+    of ceNodeEnd:
+      if childrenDepth == 0: return
+    of ceEof, ceError:  return
+    else: discard
+
+proc peek*(c: StringCursor): CursorEvent =
+  ## Return the next event without consuming it. Two consecutive
+  ## peeks are idempotent. Implemented as save → advance → restore;
+  ## costs a Checkpoint copy per call (cheap for small stacks).
+  var tmp = c
+  result = advance(tmp)
+
+type
+  KdlCursor* = concept c, var mc
+    ## The grammar-aware cursor concept. Any type providing this
+    ## surface can act as the foundation for Cat 1 / Cat 2 / Cat 3
+    ## consumers. StringCursor is the default impl. Future impls:
+    ## TokenListCursor (tests without lexer), IncrementalCursor (LSP).
+    peek(c) is CursorEvent
+    advance(mc) is CursorEvent
+    skip(mc)
+    bytes(c, 0) is string
+    pos(c) is Checkpoint
+    seek(mc, Checkpoint())

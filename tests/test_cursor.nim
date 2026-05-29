@@ -119,6 +119,36 @@ suite "cursor — type annotations":
     check pr.propAnnoTok != -1
     check bytes(f.cursor, pr.propAnnoTok) == "u8"
 
+suite "cursor — errors (single-shot)":
+  test "lex error emits ceError then halts to ceEof":
+    let f = mkCursor("\"unterminated")
+    let ev = advance(f)
+    check ev.kind == ceError
+    # Single-shot: after the first error, the stream is done.
+    check advance(f).kind == ceEof
+    check advance(f).kind == ceEof  # idempotent after halt
+
+proc mkAccumCursor(src: string): CursorFixture =
+  ## Same as mkCursor but with accumulating error mode — cursor recovers
+  ## after each ceError and keeps emitting events.
+  var interner = initInterner()
+  var sref: ref TokenStream
+  new(sref)
+  sref[] = lex(src, interner)
+  result = CursorFixture(stream: sref,
+                         cursor: initStringCursor(addr sref[], src,
+                                                  mode = cmAccumulating))
+
+suite "cursor — errors (accumulating)":
+  test "lex error followed by recovery to next node":
+    let f = mkAccumCursor("\"unterm\nfoo")
+    check advance(f).kind == ceError
+    let nb = advance(f)
+    check nb.kind == ceNodeBegin
+    check bytes(f.cursor, nb.nodeNameTok) == "foo"
+    check advance(f).kind == ceNodeEnd
+    check advance(f).kind == ceEof
+
 suite "cursor — slashdash brackets":
   test "entry slashdash brackets a single arg":
     let f = mkCursor("foo /-42 13")
@@ -150,6 +180,70 @@ suite "cursor — slashdash brackets":
     check advance(f).kind == ceChildrenEnd
     check advance(f).kind == ceSlashdashEnd
     check advance(f).kind == ceNodeEnd         # foo
+    check advance(f).kind == ceEof
+
+suite "cursor — peek":
+  # peek() returns the next event WITHOUT advancing. Needed by Cat 2
+  # codegen which dispatches on the next event kind to choose between
+  # entries loop, children loop, or terminator.
+  test "peek returns next event without consuming it":
+    let f = mkCursor("foo")
+    check peek(f.cursor).kind == ceNodeBegin
+    check peek(f.cursor).kind == ceNodeBegin   # idempotent
+    check advance(f).kind == ceNodeBegin       # cursor still at NodeBegin
+    check advance(f).kind == ceNodeEnd
+
+  test "peek on empty input returns ceEof (not the zero enum value)":
+    # Guards against the trivial false-pass where peek returns a
+    # zero-initialized CursorEvent (kind == first enum member).
+    let f = mkCursor("")
+    check peek(f.cursor).kind == ceEof
+
+suite "cursor — concept satisfaction":
+  test "StringCursor satisfies KdlCursor concept at compile time":
+    check StringCursor is KdlCursor
+
+suite "cursor — checkpoint round-trip":
+  # `pos()` captures cursor state; `seek()` restores it. Two-call
+  # invariant: pos → seek (no advance in between) is a no-op; advance
+  # → pos → seek → advance must emit the same event as the original
+  # second advance. Used by Cat 4 (LSP/incremental).
+  test "seek to a saved checkpoint replays the next event":
+    let f = mkCursor("foo bar=1 { child }")
+    check advance(f).kind == ceNodeBegin   # foo
+    let ck = pos(f.cursor)
+    let ev1 = advance(f)
+    seek(f.cursor, ck)
+    let ev2 = advance(f)
+    check ev1.kind == ev2.kind
+    # Tail of stream after the second consumption must still work.
+    discard advance(f)  # ChildrenBegin
+    discard advance(f)  # NodeBegin(child)
+    discard advance(f)  # NodeEnd(child)
+    discard advance(f)  # ChildrenEnd
+    discard advance(f)  # NodeEnd(foo)
+    check advance(f).kind == ceEof
+
+suite "cursor — skip subtree":
+  # `skip()` is the Cat 2 codegen primitive for "unknown child name —
+  # consume the whole subtree." Contract: call immediately after a
+  # ceNodeBegin; on return, the cursor is positioned past the matching
+  # ceNodeEnd, even if the subtree contained arbitrarily-nested
+  # children blocks.
+  test "skip after NodeBegin consumes args + children + NodeEnd":
+    let f = mkCursor("parent { skip_me 1 { inner }; keep_me }")
+    check advance(f).kind == ceNodeBegin       # parent
+    check advance(f).kind == ceChildrenBegin
+    let skipNb = advance(f)
+    check skipNb.kind == ceNodeBegin           # skip_me
+    check bytes(f.cursor, skipNb.nodeNameTok) == "skip_me"
+    skip(f.cursor)
+    let keepNb = advance(f)
+    check keepNb.kind == ceNodeBegin
+    check bytes(f.cursor, keepNb.nodeNameTok) == "keep_me"
+    check advance(f).kind == ceNodeEnd         # keep_me
+    check advance(f).kind == ceChildrenEnd
+    check advance(f).kind == ceNodeEnd         # parent
     check advance(f).kind == ceEof
 
 suite "cursor — deep nesting (the #11 proof)":
