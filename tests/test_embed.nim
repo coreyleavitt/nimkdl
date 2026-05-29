@@ -11,6 +11,7 @@
 
 import std/unittest
 
+import ../src/api
 import ../src/derive_decode
 import ../src/pragmas
 

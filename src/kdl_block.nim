@@ -31,8 +31,14 @@ import std/macros
 
 import ./derive_decode
 import ./derive_encode
+import ./emitter
 
-export derive_decode, derive_encode
+# Re-export the substrate symbols the emitted derive bodies reference
+# at the user's call site: BufferEmitter / pushArg* / pushProp* etc.
+# from emitter; StringCursor + advance + Result/ParseError flow via
+# derive_decode's own re-exports. Without these the user would need
+# to import them by hand whenever they use a `kdl:` block.
+export derive_decode, derive_encode, emitter
 
 proc extractKdlTypeSym(typeDef: NimNode): NimNode {.compileTime.} =
   ## Pull the type identifier out of a typedef. Handles bare,

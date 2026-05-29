@@ -680,27 +680,6 @@ macro deriveDecode*(T: typedesc): untyped =
   # FFI), so the VM has nothing it can't interpret.
   result.pragma = newTree(nnkPragma, ident("noSideEffect"))
 
-# ---------------------------------------------------------------------------
-# embed[T] — compile-time decode wrapper
-# ---------------------------------------------------------------------------
-
-import ./intern
-export intern
-
-proc embed*[T](src: static[string]): T =
-  ## Compile-time decode of a static KDL source string into `T`. The
-  ## entire pipeline (lex → cursor → kdlDecode) runs in NimVM, so
-  ## `const cfg = embed[Service](...)` produces a constant value baked
-  ## into the binary with zero runtime parse cost.
-  ##
-  ## Requires `deriveDecode(T)` already invoked in scope. `mixin`
-  ## defers name resolution to the instantiation site so the user's
-  ## emitted kdlDecode is found.
-  mixin kdlDecode
-  var interner = initInterner()
-  var stream = lex(src, interner)
-  var c = initStringCursor(addr stream, src)
-  var v: T
-  let r = kdlDecode(v, c)
-  doAssert r.isOk, "embed[T]: " & r.getErr.hint
-  v
+# embed[T] lives in src/api.nim — single canonical compile-time decode
+# path that delegates to decode[T]. Kept out of derive_decode so this
+# module stays focused on macro emission.

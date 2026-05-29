@@ -70,6 +70,8 @@ import ./parser
 import ./grammar
 import ./pragmas
 import ./path
+import ./api
+import ./kdl_block
 # Note: ./lexer and ./typed_parser are NOT imported here on purpose.
 # Lexer keeps Token / TokenKind / Lexer / lex out of the `import nkdl`
 # namespace (still reachable via `import nkdl/lexer` for tests/advanced
@@ -97,9 +99,15 @@ export ast
 # Parser — only the public entry point (parse, MaxParserDepth).
 export parser
 
-# Encoder — temporarily absent during the clean-core rebuild. The new
-# KdlEmitter primitive + docEmit lands in Stage A/B; encode[T] etc.
-# return in Stage C/E.
+# Typed-direct surface — decode[T] / encode[T] / decodeAll[T] /
+# embed[T] entry points. Routes through derive-emitted kdlEncode /
+# kdlDecode for the user's `{.kdlNode.}`-tagged types.
+export api
+
+# kdl: block macro orchestrator — wraps a region of type
+# definitions and emits deriveEncode + deriveDecode for each
+# `{.kdlNode.}`-tagged type. Non-tagged types pass through.
+export kdl_block
 
 # Grammar — public surface includes referenceInterpret (the differential-
 # testing oracle) plus the combinators that let users build their own
