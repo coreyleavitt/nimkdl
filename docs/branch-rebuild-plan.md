@@ -9,13 +9,19 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Stages A + B + audit + C + D COMPLETE (all 15 D cycles done). 46 derive_decode + 4 embed + 9 round-trip identity + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve + substrate GREEN.
+**Current state**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 56 commits since main.
 
-Bench: 14.80 μs decode / 12.07 μs encode per 100-Service doc-set (~3× faster than the pre-rebuild's 46.9 μs decode baseline; apples-to-apples-ish since the substrate changed entirely).
+Suite: 46 derive_decode + 4 embed + 9 round-trip + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve + substrate GREEN.
 
-The architectural rewrite achieved its primary goal: #11 (depth-2+ nested-children corruption) is structurally impossible. Closed by construction at both C6 (encode side) and D4 (decode side). `embed[T]` enables zero-runtime-cost compile-time decode; depth-3 self-recursive Tree as `const` works.
+Bench (post-Audit-4): 14.98 μs decode / 12.07 μs encode per 100-Service doc-set (~3× faster than pre-rebuild's 46.9 μs baseline; apples-to-apples-ish since substrate changed entirely).
 
-**Next action**: Stage E (kdl: macro orchestration + public decode[T]/encode[T] surface) is the ergonomic gap — currently users must call deriveEncode(T) + deriveDecode(T) manually per type. Stage F (PBT catalog with grammar-aware event generator) backs the substrate-level invariants the round-trip tracer establishes.
+**The two structural proofs of #11 closure**: C6 encode side (recursive macro emission), D4 decode side (recursive kdlDecode resolution). Depth-3 Tree round-trips byte-exact both directions.
+
+**embed[T] works at compile time** — `const cfg = embed[Service](staticSrc)` produces a constant baked into the binary. Self-recursive Tree at depth 3 also evaluates at compile time. The substrate is end-to-end pure Nim (no FFI; Audit-4 dropped the `equalMem`/memcmp dependency in favor of `bytesEqLit` macro emitting inline byte compares).
+
+**Next action**: Stage E (`kdl:` macro + public `decode[T]`/`encode[T]`/`decodeAll[T]` surface) is the ergonomic gap — currently users call `deriveEncode(T)` + `deriveDecode(T)` manually per type. Stage F (PBT catalog with grammar-aware event generator) backs the substrate invariants.
+
+**Decision pending** on merging `phase3-clean-core` to `main` vs continuing on branch.
 
 ## Delete order
 
@@ -173,6 +179,13 @@ After G4: merge branch to main (or rename branch → main if cleaner).
 
 Update this line at the end of every session.
 
-**Last session ended after**: Stages A + B complete. Branch has 14 commits since main; 338/338 conformance + 243/243 preserve byte-exact + all emitter/doc_emit suites GREEN.
+**Last session ended after**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 56 commits since main; 338/338 conformance + 243/243 preserve + 46 derive_decode + 32 derive_encode + 4 embed + 9 round-trip + 20 doc_emit + 57 emitter + substrate GREEN. embed[T] works at compile time including self-recursive Tree at depth 3. Bench: 14.98 μs decode / 12.07 μs encode per 100-Service.
 
-**Next concrete action**: Stage C1 — deriveEncode tracer. Create `src/encode_codegen.nim` (or similar — verify location during Step-1 audit) and a macro `kdlEncode(T)` that emits a `proc kdlEncode[E: KdlEmitter](v: T; e: var E)` specialized to `T`'s shape. Tracer test: a `type X {.kdlNode: "x".} = object \n  name {.kdlArg.}: string` plus a value should round-trip to `x "value"\n` bytes via the codegen-emitted proc.
+**Next concrete action**: pick one of:
+
+1. **Merge `phase3-clean-core` to main**, ship the rewrite, do Stage E + F as follow-ons.
+2. **Stage E1**: build the `kdl:` block macro. `src/derive_encode.nim` already exists; the orchestrator macro is small (walks the block body, finds `type X {.kdlNode.}` declarations, emits `deriveEncode(X)` + `deriveDecode(X)` for each).
+3. **Stage E2**: build `decode[T](src: string): Result[T, ParseError]` / `encode[T](v: T): string` / `decodeAll[T]` public-API wrappers. The TDD round-trip tests already write this as a `template roundtrip[T]` — productize it.
+4. **Stage F**: rebuild the property-test catalog (P1-P12). Grammar-aware event-sequence generator (F3) is the substantial piece. Property suites currently `[skip]` in `nimble test`.
+
+The branch is in excellent state regardless of which path. Substrate is end-to-end pure Nim (Audit-4 dropped the CFFI dependency); embed[T] works; #11 closed by construction.
