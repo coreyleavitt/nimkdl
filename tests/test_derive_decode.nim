@@ -286,3 +286,51 @@ suite "derive_decode — D6: Option[T] for arg / prop":
     let res = kdlDecode(n, f.cursor)
     check res.isOk
     check n.text == none(string)
+
+suite "derive_decode — D7: enum fields (string-mapped + symbol-name)":
+
+  type ActionKind = enum
+    akInject = "inject"
+    akDeny = "deny"
+    akAllow = "allow"
+
+  type ActionD {.kdlNode: "action".} = object
+    kind {.kdlArg.}: ActionKind
+
+  deriveDecode(ActionD)
+
+  test "enum with explicit string mapping decodes from quoted string":
+    let f = mkCursor("action \"inject\"")
+    var a: ActionD
+    let res = kdlDecode(a, f.cursor)
+    check res.isOk
+    check a.kind == akInject
+
+  test "second enum variant":
+    let f = mkCursor("action \"deny\"")
+    var a: ActionD
+    let res = kdlDecode(a, f.cursor)
+    check res.isOk
+    check a.kind == akDeny
+
+  test "unknown enum literal returns error":
+    let f = mkCursor("action \"unknown\"")
+    var a: ActionD
+    let res = kdlDecode(a, f.cursor)
+    check res.isErr
+
+  type Status = enum
+    sOk
+    sFailed
+
+  type Job {.kdlNode: "job".} = object
+    state {.kdlProp.}: Status
+
+  deriveDecode(Job)
+
+  test "plain enum decodes from symbol-name string":
+    let f = mkCursor("job state=\"sOk\"")
+    var j: Job
+    let res = kdlDecode(j, f.cursor)
+    check res.isOk
+    check j.state == sOk

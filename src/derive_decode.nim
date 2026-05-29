@@ -112,6 +112,39 @@ proc isOptionType(t: NimNode): bool {.inline.} =
 proc innerOfOption(t: NimNode): NimNode {.inline.} =
   t[1]
 
+proc isEnumType(t: NimNode): bool =
+  if t.kind == nnkEnumTy: return true
+  try:
+    let impl = t.getTypeImpl
+    if impl.kind == nnkEnumTy: return true
+    if impl.kind == nnkBracketExpr and impl.len >= 2 and $impl[0] == "typeDesc":
+      let innerImpl = impl[1].getTypeImpl
+      if innerImpl.kind == nnkEnumTy: return true
+  except: discard
+  false
+
+proc enumImpl(t: NimNode): NimNode =
+  ## Resolve to the nnkEnumTy AST regardless of wrapper.
+  let impl = t.getTypeImpl
+  if impl.kind == nnkEnumTy: return impl
+  if impl.kind == nnkBracketExpr and impl.len >= 2 and $impl[0] == "typeDesc":
+    return impl[1].getTypeImpl
+  impl
+
+iterator enumVariantSyms(enumType: NimNode): string =
+  ## Yield each enum variant's symbol name. The actual wire form
+  ## (`$variant`, which honors `= "literal"` mappings) is computed at
+  ## the call site via `$<sym>` — Nim's getTypeImpl strips the
+  ## string-mapping attribute, so we can't read it at macro time.
+  let impl = enumImpl(enumType)
+  expectKind(impl, nnkEnumTy)
+  for i in 1 ..< impl.len:
+    let v = impl[i]
+    case v.kind
+    of nnkSym, nnkIdent: yield $v
+    of nnkEnumFieldDef: yield $v[0]  # fallback for unwrapped enums
+    else: discard
+
 proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
                      fieldType: NimNode, cSym: NimNode): NimNode =
   ## Emit the typed decode of a token at `tokIndexExpr` into
@@ -126,6 +159,34 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
       var `tmpSym`: `inner`
       `innerDecode`
       `targetIdent` = some(`tmpSym`)
+  if isEnumType(fieldType):
+    let tokSym = genSym(nskLet, "tok")
+    let valSym = genSym(nskLet, "valBytes")
+    var caseStmt = newTree(nnkCaseStmt, valSym)
+    for symName in enumVariantSyms(fieldType):
+      let symIdent = ident(symName)
+      # Branch label is `$<sym>` evaluated at compile time — Nim
+      # const-folds `$enumValue` to the variant's wire form (the
+      # `= "literal"` mapping when present, else the symbol name).
+      let wireExpr = newCall(ident("$"), symIdent)
+      var assignBody = newStmtList()
+      assignBody.add(newAssignment(targetIdent, symIdent))
+      caseStmt.add(newTree(nnkOfBranch, wireExpr, assignBody))
+    let elseErr = quote do:
+      return err[void, ParseError](
+        initError(peTypeEnumInvalid, `tokSym`.span,
+                  "value does not match any enum variant"))
+    caseStmt.add(newTree(nnkElse, elseErr))
+    return quote do:
+      let `tokSym` = `cSym`.stream[].tokens[`tokIndexExpr`]
+      case `tokSym`.kind
+      of tkString, tkRawString, tkIdent:
+        let `valSym` = tokenAsString(`tokSym`, `cSym`.stream[], `cSym`.source)
+        `caseStmt`
+      else:
+        return err[void, ParseError](
+          initError(peTypeMismatch, `tokSym`.span,
+                    "expected string value for enum field"))
   case $fieldType
   of "string":
     return quote do:
