@@ -506,8 +506,8 @@ macro deriveDecode*(T: typedesc): untyped =
     if fields.len == 0:
       return quote do:
         return err[void, ParseError](
-          initError(peParseUnexpected, `evSym2`.span,
-                    "unknown property"))
+          initError(peTypeUnknownField, `evSym2`.span,
+                  "unknown property"))
     var ifNode = newNimNode(nnkIfStmt)
     for i, (fName, fType, _, _) in fields:
       let fIdent = ident(fName)
@@ -533,7 +533,7 @@ macro deriveDecode*(T: typedesc): untyped =
       ifNode.add(newNimNode(nnkElifBranch).add(cond).add(fullBody))
     ifNode.add(newNimNode(nnkElse).add(quote do:
       return err[void, ParseError](
-        initError(peParseUnexpected, `evSym2`.span,
+        initError(peTypeUnknownField, `evSym2`.span,
                   "unknown property"))))
     ifNode
 
