@@ -9,13 +9,19 @@
 
 Read this section first each session. Update the "current state" line at the end of every commit on the branch.
 
-**Current state**: Stages A + B + audit + C + D-most complete. 37 derive_decode tests (D1-D4, D6-D8, D10) + 7 round-trip identity tests (D15) + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve byte-exact + substrate. Branch is ~41 commits since main.
+**Current state**: Stages A + B + audit + C + D substantially complete. 43 derive_decode (D1-D4, D6-D12) + 9 round-trip identity (D15) + 32 derive_encode + 20 doc_emit + 57 emitter + 338/338 conformance + 243/243 preserve + substrate. Branch is ~49 commits since main.
 
-Stage D cycles done: D1 tracer, D2 typed args, D3 kdlProp, D4 kdlChild + self-recursive (#11 closes decode side), D6 Option[T], D7 enum, D8 variant, D10 required-field bitmap, D15 encode-decode identity property. Skipped: D5 perfect-hash (perf opt; defer).
+Stage D done: D1 tracer, D2 typed args, D3 kdlProp, D4 kdlChild + self-recursive (#11 decode), D6 Option[T], D7 enum, D8 variant case-object, D9 kdlReserved tag validation, D10 required-field bitmap, D11 error catalog, D12 kdlRename, D15 encode-decode identity property, bench gate.
 
-**Remaining D cycles**: D9 kdlReserved tag validation; D11 type-mismatch error catalog refinement (mostly already in place via D2/D7 routing); D12 kdlRename (already collected at macro time); D14 embed[T] VM compatibility check; bench gate.
+Bench: 14.96 μs decode / 12.74 μs encode per 100-Service doc-set (~3× faster than the pre-rebuild's 46.9 μs decode baseline; apples-to-apples-ish since the substrate changed entirely).
 
-**Next action**: D9 — kdlReserved tag validation. When a value carries a different anno tag than the field declares, return peTypeReservedMismatch.
+**Open follow-ons**:
+  - D5 perfect-hash field dispatch (perf opt; defer until a real consumer with >8 fields surfaces)
+  - D14 embed[T] VM-compat: parse() runs in NimVM but kdlDecode trips an internal TFullReg.kind = rkNodeAddr type-register error. Needs systematic isolation — too much for a single cycle, doesn't block runtime use.
+
+The architectural rewrite achieved its primary goal: #11 (depth-2+ nested-children corruption) is now structurally impossible. Closed by construction at both C6 (encode side, recursive macro) and D4 (decode side, recursive macro). Depth-3 Tree round-trips byte-exact through encode → bytes → decode.
+
+**Next action (post-merge)**: integration with nkdl.nim (re-export derive_encode + derive_decode as the public Cat 2 surface); decision: merge `phase3-clean-core` to main, or further validate before merge.
 
 ## Delete order
 

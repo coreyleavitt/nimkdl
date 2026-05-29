@@ -676,3 +676,10 @@ macro deriveDecode*(T: typedesc): untyped =
     newIdentDefs(vSym, nnkVarTy.newTree(typeSym)),
     newIdentDefs(cSym, nnkVarTy.newTree(ident("StringCursor")))
   )
+  # NOTE: noSideEffect / VM-compat (D14) is a known gap. parse() runs
+  # cleanly in NimVM but kdlDecode-emitted bodies trip an internal
+  # `TFullReg.kind = rkNodeAddr` type-register error somewhere in the
+  # advance/tokenAsString/decodeIntFromToken transitive chain. Needs
+  # systematic isolation — too involved for a single TDD cycle and
+  # doesn't block runtime use. `embed[T]` for compile-time decode is
+  # deferred until that investigation completes.
