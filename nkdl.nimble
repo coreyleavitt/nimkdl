@@ -51,6 +51,7 @@ task test, "Run unit tests":
   exec cmd & " tests/test_public_api.nim"
   exec cmd & " tests/test_readme_examples.nim"
   exec cmd & " tests/test_cursor.nim"
+  exec cmd & " tests/test_build_doc.nim"
   # Property tests via proptest. Opt-in via NKDL_PROPTEST=1 so the
   # default `nimble test` (incl. CI) stays self-contained — proptest
   # is currently a local-path dep resolved through milpa and not yet

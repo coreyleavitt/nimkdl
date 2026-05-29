@@ -16,6 +16,8 @@
 ## the Nim case-object-as-case-object-field friction. Consumers call
 ## `bytes(c, idx)` or `tokenAt(c, idx)` for resolution.
 
+import ./ast
+import ./intern
 import ./lexer
 import ./spans
 
@@ -365,6 +367,29 @@ proc peek*(c: StringCursor): CursorEvent =
   ## costs a Checkpoint copy per call (cheap for small stacks).
   var tmp = c
   result = advance(tmp)
+
+proc buildDoc*(c: var StringCursor, sourcePath = "<input>"):
+    Result[KdlDoc, ParseError] {.noSideEffect.} =
+  ## Cat 3 (AST/DOM) consumer: fold cursor events into a KdlDoc using
+  ## an explicit `seq[KdlNode]` stack. Replaces the visitor-protocol
+  ## DocBuilder. The cursor is driven to ceEof (single-shot mode);
+  ## any ceError surfaces as Err.
+  var doc = newDoc(sourcePath)
+  doc.sourceText = c.source
+  while true:
+    let ev = advance(c)
+    case ev.kind
+    of ceNodeBegin:
+      let name = doc.interner.intern(bytes(c, ev.nodeNameTok))
+      var node = newNode(doc, "", ev.span)
+      node.name = name
+      doc.nodes.add(node)   # placeholder; replaced on NodeEnd via stack indexing
+    of ceEof:
+      doc.parseTopLevelCount = int32(doc.nodes.len)
+      return ok[KdlDoc, ParseError](doc)
+    of ceError:
+      return err[KdlDoc, ParseError](ev.err)
+    else: discard
 
 type
   KdlCursor* = concept c, var mc
