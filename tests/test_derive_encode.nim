@@ -281,3 +281,64 @@ suite "derive_encode — C7: Option[T] arg / prop / child":
     var e = newBufferEmitter()
     kdlEncode(w, e)
     check e.finish() == "wrapper\n"
+
+suite "derive_encode — C8: enum fields":
+
+  type ActionKind = enum
+    akInject = "inject"
+    akDeny = "deny"
+    akAllow = "allow"
+
+  type Action2 {.kdlNode: "action".} = object
+    kind {.kdlArg.}: ActionKind
+
+  deriveEncode(Action2)
+
+  test "enum field with explicit string mapping emits the string":
+    var a = Action2(kind: akInject)
+    var e = newBufferEmitter()
+    kdlEncode(a, e)
+    check e.finish() == "action \"inject\"\n"
+
+  test "second enum variant emits its mapped string":
+    var a = Action2(kind: akDeny)
+    var e = newBufferEmitter()
+    kdlEncode(a, e)
+    check e.finish() == "action \"deny\"\n"
+
+  type Status = enum
+    sOk
+    sFailed
+
+  type Job {.kdlNode: "job".} = object
+    state {.kdlProp.}: Status
+
+  deriveEncode(Job)
+
+  test "plain enum (no string mapping) emits symbol name":
+    var j = Job(state: sOk)
+    var e = newBufferEmitter()
+    kdlEncode(j, e)
+    check e.finish() == "job state=\"sOk\"\n"
+
+  type Severity = enum
+    sevLow = "low"
+    sevHigh = "high"
+
+  type Alert {.kdlNode: "alert".} = object
+    name {.kdlArg.}: string
+    threshold {.kdlProp.}: Option[Severity]
+
+  deriveEncode(Alert)
+
+  test "Option[Enum] kdlProp emits when Some":
+    var a = Alert(name: "disk", threshold: some(sevHigh))
+    var e = newBufferEmitter()
+    kdlEncode(a, e)
+    check e.finish() == "alert \"disk\" threshold=\"high\"\n"
+
+  test "Option[Enum] kdlProp omits when None":
+    var a = Alert(name: "disk", threshold: none(Severity))
+    var e = newBufferEmitter()
+    kdlEncode(a, e)
+    check e.finish() == "alert \"disk\"\n"

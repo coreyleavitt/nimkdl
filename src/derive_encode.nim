@@ -42,16 +42,21 @@ proc nodeNameOf(typeSym: NimNode): string =
   ## Read the `kdlNode` pragma value off the type's pragma list, or
   ## fall back to the type name lowercased. Type-level pragmas live
   ## on the TypeDef's pragma node (TypeDef.0 if pragmas attached).
+  ##
+  ## The pragma `{.kdlNode: "name".}` parses as `ExprColonExpr(kdlNode,
+  ## "name")` inside the pragma list — NOT as a Call. (`{.kdlNode("name").}`
+  ## with parens would be a Call, but the colon form is idiomatic.)
   let impl = typeSym.getImpl
   expectKind(impl, nnkTypeDef)
-  # impl is `Type{.pragmas.} = ObjectTy(...)` — pragmas hang off the
-  # name section's pragma child.
   let nameNode = impl[0]
   if nameNode.kind == nnkPragmaExpr:
     let pragmas = nameNode[1]
     for p in pragmas:
-      if p.kind == nnkCall and p.len == 2 and $p[0] == "kdlNode":
-        return p[1].strVal
+      let head = if p.kind in {nnkCall, nnkExprColonExpr}: p[0] else: p
+      let arg  = if p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2:
+                   p[1] else: nil
+      if $head == "kdlNode" and arg != nil and arg.kind == nnkStrLit:
+        return arg.strVal
   # Fallback: type-name lowercased.
   result = $typeSym
   for i in 0 ..< result.len:
@@ -98,6 +103,31 @@ proc innerOfOption(t: NimNode): NimNode {.inline.} =
   ## Extract the inner T of `Option[T]`.
   t[1]
 
+proc isEnumType(t: NimNode): bool =
+  ## True iff `t`'s underlying type is an enum.
+  ##
+  ## Inputs may arrive as:
+  ##   - The enum AST itself (nnkEnumTy) — direct hit
+  ##   - A type symbol that resolves to nnkEnumTy via getTypeImpl
+  ##   - A `typeDesc[T]` wrapper (this happens when `t` is the inner
+  ##     of a BracketExpr like `Option[E]` — getTypeImpl returns
+  ##     `typeDesc[E]` rather than E's impl). Unwrap and re-resolve.
+  if t.kind == nnkEnumTy: return true
+  var impl: NimNode
+  try:
+    impl = t.getTypeImpl
+  except:
+    return false
+  if impl.kind == nnkEnumTy: return true
+  if impl.kind == nnkBracketExpr and impl.len >= 2 and
+     $impl[0] == "typeDesc":
+    try:
+      let innerImpl = impl[1].getTypeImpl
+      if innerImpl.kind == nnkEnumTy: return true
+    except:
+      discard
+  false
+
 proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
                        fieldType: NimNode) =
   ## Inner of the arg-push dispatch: emit the typed push for an
@@ -117,8 +147,13 @@ proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
     pushBody.add quote do:
       `eSym`.pushArgBool(`valueExpr`)
   else:
-    error("deriveEncode: kdlArg field type " & $fieldType &
-          " not yet supported (cycle C2 covers string/int/float/bool)")
+    if isEnumType(fieldType):
+      pushBody.add quote do:
+        `eSym`.pushArgString($`valueExpr`)
+    else:
+      error("deriveEncode: kdlArg field type " & $fieldType &
+            " not yet supported (cycles C2/C8 cover string/int/float/" &
+            "bool/enum)")
 
 proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
                  fieldName: string, fieldType: NimNode) =
@@ -153,8 +188,13 @@ proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
     pushBody.add quote do:
       `eSym`.pushPropBool(`keyLit`, `valueExpr`)
   else:
-    error("deriveEncode: kdlProp field type " & $fieldType &
-          " not yet supported (cycle C3 covers string/int/float/bool)")
+    if isEnumType(fieldType):
+      pushBody.add quote do:
+        `eSym`.pushPropString(`keyLit`, $`valueExpr`)
+    else:
+      error("deriveEncode: kdlProp field type " & $fieldType &
+            " not yet supported (cycles C3/C8 cover string/int/float/" &
+            "bool/enum)")
 
 proc emitPropPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
                   fieldName: string, fieldType: NimNode) =
