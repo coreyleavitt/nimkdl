@@ -28,10 +28,11 @@
 ##   returns the number of bytes consumed; zero means failure. No
 ##   `try`/`except` needed, so callers can stay `{.noSideEffect.}`.
 
-import std/parseutils
+import std/[math, parseutils]
 
 import ./lexer
 import ./spans
+import ./spec_literals  # KdlKeywordLiterals — non-finite float keywords
 
 # ---------------------------------------------------------------------------
 # Integer decode
@@ -229,3 +230,65 @@ func looksLikeFloat*(n: NumberPayload): bool {.inline.} =
   ## an exponent. Hex/oct/bin literals are always integers.
   n.base == nbDecimal and
     ('.' in n.text or 'e' in n.text or 'E' in n.text)
+
+# ---------------------------------------------------------------------------
+# Canonical formatters (value → KDL v2 text)
+# ---------------------------------------------------------------------------
+#
+# The symmetric counterpart to `decodeIntFromToken` / `decodeFloatFromToken`
+# / `decodeIntPromoting`. Co-located here so the parser side and the
+# emitter side of a numeric value stay structurally tied. Spec changes
+# (e.g. how floats render their fractional part) update both
+# directions in one place.
+
+func formatInt*(v: int64): string {.inline.} =
+  ## Canonical decimal form of a 64-bit signed integer.
+  $v
+
+func formatFloat*(v: float64): string =
+  ## Canonical KDL v2 float form. Non-finite values use the spec
+  ## keyword bytes (#inf / #-inf / #nan); finite values use Nim's
+  ## stdlib `$float` formatter which inserts the `.0` fractional
+  ## marker for whole-valued floats (matches the spec's typed-float
+  ## disambiguation rule — `2.0`, not `2`).
+  case v.classify
+  of fcNan:    KdlKeywordLiterals[klNan]
+  of fcInf:    KdlKeywordLiterals[klInf]
+  of fcNegInf: KdlKeywordLiterals[klNegInf]
+  else:        $v
+
+func divMod128by10(hi, lo: var uint64): uint64 =
+  ## In-place `(hi:lo) := (hi:lo) div 10`; returns the remainder 0..9.
+  ## Schoolbook long division split into 32-bit chunks to keep each
+  ## intermediate within uint64. Used by `formatBigInt`.
+  let qHi = hi div 10
+  let rHi = hi mod 10
+  let loHi32 = lo shr 32
+  let loLo32 = lo and 0xFFFFFFFF'u64
+  let part1 = (rHi shl 32) or loHi32
+  let qLoHi = part1 div 10
+  let r1 = part1 mod 10
+  let part2 = (r1 shl 32) or loLo32
+  let qLoLo = part2 div 10
+  let r2 = part2 mod 10
+  hi = qHi
+  lo = (qLoHi shl 32) or qLoLo
+  r2
+
+func formatBigInt*(hi, lo: uint64, negative: bool): string =
+  ## Canonical decimal form of a 128-bit unsigned magnitude (plus
+  ## sign). Lives here so the bigint round-trip (parse → AST → emit)
+  ## has the same algorithm on both ends, in one file.
+  if hi == 0 and lo == 0: return "0"
+  var h = hi
+  var l = lo
+  var digits: array[40, char]  # max 39 digits for 2^128 - 1
+  var n = 0
+  while not (h == 0 and l == 0):
+    let r = divMod128by10(h, l)
+    digits[n] = char(ord('0') + int(r))
+    inc n
+  result = newStringOfCap(n + (if negative: 1 else: 0))
+  if negative: result.add('-')
+  for i in countdown(n - 1, 0):
+    result.add(digits[i])

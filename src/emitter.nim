@@ -1,8 +1,9 @@
-import std/[math, strutils]
+import std/strutils
 
 import ./ast
 import ./intern
 import ./lexer  # isBareword + isDisallowedControl — emitter is the dual of lexer recognition
+import ./numlit  # formatInt / formatFloat / formatBigInt — numeric value → wire bytes
 import ./spec_literals  # KdlKeywordLiterals + KdlSlashdash — wire bytes single source of truth
 
 ## emitter — symmetric OUT-side inverse of `KdlCursor`.
@@ -202,14 +203,13 @@ func pushSlashdashEnd*(e: var BufferEmitter) =
 func pushArgInt*(e: var BufferEmitter, v: int64,
                  anno: openArray[char] = "") =
   ## Append a positional integer argument to the currently-open node.
-  ## Empty `anno` means no annotation.
+  ## Empty `anno` means no annotation. Numeric formatting goes through
+  ## `numlit.formatInt` — the symmetric counterpart of the lexer's
+  ## `decodeIntFromToken`. Single source of truth for int → wire bytes.
   e.appendByte(' ')
   e.consumeSlashdash()
   e.appendAnno(anno)
-  # Render via the stdlib int-to-string fast path. Switching to a
-  ## numlit-based formatter is a Stage A follow-on if profiling shows
-  ## the alloc here mattering.
-  e.appendBytes($v)
+  e.appendBytes(formatInt(v))
 
 # ---------------------------------------------------------------------------
 # Typed value formatters (shared between Arg and Prop paths)
@@ -259,16 +259,13 @@ func appendString(e: var BufferEmitter, s: openArray[char]) =
   ## pushPropString paths. Identical to appendQuotedString.
   e.appendQuotedString(s)
 
-func appendFloat(e: var BufferEmitter, v: float64) =
-  ## KDL v2 keyword path for non-finite floats; stdlib `$` for the
-  ## finite case. The Nim default formatter inserts a fractional `.0`
-  ## for whole-valued floats (so `2.0` not `2`), which is exactly the
-  ## spec's typed-float disambiguation rule.
-  case v.classify
-  of fcNan:    e.appendBytes(KdlKeywordLiterals[klNan])
-  of fcInf:    e.appendBytes(KdlKeywordLiterals[klInf])
-  of fcNegInf: e.appendBytes(KdlKeywordLiterals[klNegInf])
-  else:        e.appendBytes($v)
+func appendFloat(e: var BufferEmitter, v: float64) {.inline.} =
+  ## Routes through `numlit.formatFloat` — single source of truth for
+  ## float → wire bytes, symmetric with `decodeFloatFromToken`. The
+  ## module-qualified call disambiguates against `strutils.formatFloat`
+  ## (a different signature, accidentally imported as part of strutils
+  ## for `IndentUnit.repeat`).
+  e.appendBytes(numlit.formatFloat(v))
 
 func appendBool(e: var BufferEmitter, v: bool) {.inline.} =
   if v: e.appendBytes(KdlKeywordLiterals[klTrue])
@@ -277,41 +274,12 @@ func appendBool(e: var BufferEmitter, v: bool) {.inline.} =
 func appendNull(e: var BufferEmitter) {.inline.} =
   e.appendBytes(KdlKeywordLiterals[klNull])
 
-func divMod128by10(hi, lo: var uint64): uint64 =
-  ## In-place `(hi:lo) := (hi:lo) div 10`; returns the remainder 0..9.
-  ## Schoolbook long division split into 32-bit chunks to keep each
-  ## intermediate within uint64. Ported verbatim from the pre-rebuild
-  ## encode.nim — the algorithm is bit-for-bit-identical.
-  let qHi = hi div 10
-  let rHi = hi mod 10
-  let loHi32 = lo shr 32
-  let loLo32 = lo and 0xFFFFFFFF'u64
-  let part1 = (rHi shl 32) or loHi32
-  let qLoHi = part1 div 10
-  let r1 = part1 mod 10
-  let part2 = (r1 shl 32) or loLo32
-  let qLoLo = part2 div 10
-  let r2 = part2 mod 10
-  hi = qHi
-  lo = (qLoHi shl 32) or qLoLo
-  r2
-
-func appendBigInt(e: var BufferEmitter, hi, lo: uint64, negative: bool) =
-  ## Render a 128-bit unsigned magnitude (plus sign) as decimal.
-  if hi == 0 and lo == 0:
-    e.appendByte('0')
-    return
-  var h = hi
-  var l = lo
-  var digits: array[40, char]  # max 39 digits for 2^128 - 1
-  var n = 0
-  while not (h == 0 and l == 0):
-    let r = divMod128by10(h, l)
-    digits[n] = char(ord('0') + int(r))
-    inc n
-  if negative: e.appendByte('-')
-  for i in countdown(n - 1, 0):
-    e.appendByte(digits[i])
+func appendBigInt(e: var BufferEmitter, hi, lo: uint64, negative: bool)
+    {.inline.} =
+  ## Routes through `numlit.formatBigInt` — single source of truth for
+  ## the 128-bit decimal magnitude rendering. Symmetric with
+  ## `decodeIntPromoting` on the parse side.
+  e.appendBytes(formatBigInt(hi, lo, negative))
 
 # ---------------------------------------------------------------------------
 # Typed-value arg pushes (string / float / bool / null)
@@ -415,8 +383,8 @@ func appendInternedAnno(e: var BufferEmitter, interner: Interner,
 func dispatchValue(e: var BufferEmitter, v: KdlValue) {.inline.} =
   case v.kind
   of kvString: e.appendString(v.strVal)
-  of kvInt:    e.appendBytes($v.intVal)
-  of kvBigInt: e.appendBigInt(v.bigHi, v.bigLo, v.bigNegative)
+  of kvInt:    e.appendBytes(formatInt(v.intVal))
+  of kvBigInt: e.appendBytes(formatBigInt(v.bigHi, v.bigLo, v.bigNegative))
   of kvFloat:  e.appendFloat(v.floatVal)
   of kvBool:   e.appendBool(v.boolVal)
   of kvNull:   e.appendNull()
