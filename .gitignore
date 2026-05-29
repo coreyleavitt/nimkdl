@@ -47,3 +47,4 @@ benchmarks/typed_roundtrip
 tests/probe_vm
 tests/test_*[^.nim]
 benchmarks/spike_bytesEq
+tests/p6probe
