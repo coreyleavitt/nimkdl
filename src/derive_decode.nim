@@ -8,7 +8,7 @@
 ##
 ## Mirrors the deriveEncode-targets-BufferEmitter decision (Stage C
 ## design notes). The cursor's token-resolution surface (bytes,
-## bytesEq, tokenAsString) lives on StringCursor rather than the
+## bytesEqLit, tokenAsString) lives on StringCursor rather than the
 ## KdlCursor concept; a generic-on-concept derive would either pull
 ## all of that into the concept or pay an indirection cost per
 ## per-field lookup. Concrete is cleaner.
@@ -410,52 +410,9 @@ macro deriveDecode*(T: typedesc): untyped =
       quote do:
         `seenSym` = `seenSym` or `bit`
 
-  # Build the proc-entry let bindings for keys + reserved tags BEFORE
-  # the dispatch loops so the dispatch can reference them.
-  # bytesEq's `unsafeAddr s[0]` needs an addressable location; each
-  # literal is lifted to a `let` at proc entry once.
-  var propKeyLets = newStmtList()
-  var propKeySyms: seq[NimNode]
-  for (_, _, wireKey, _) in propFields:
-    let sym = genSym(nskLet, "expectedPropKey")
-    let lit = newStrLitNode(wireKey)
-    propKeyLets.add(quote do:
-      let `sym` = `lit`)
-    propKeySyms.add(sym)
-  var branchPropKeySyms: seq[seq[NimNode]]
-  for (_, props) in branchProps:
-    var syms: seq[NimNode]
-    for (_, _, wireKey, _) in props:
-      let sym = genSym(nskLet, "expectedBranchPropKey")
-      let lit = newStrLitNode(wireKey)
-      propKeyLets.add(quote do:
-        let `sym` = `lit`)
-      syms.add(sym)
-    branchPropKeySyms.add(syms)
-  var argReservedSyms: seq[NimNode]
-  for (_, _, reservedTag) in argFields:
-    if reservedTag.len == 0:
-      argReservedSyms.add(nil)
-    else:
-      let sym = genSym(nskLet, "expectedArgTag")
-      let lit = newStrLitNode(reservedTag)
-      propKeyLets.add(quote do:
-        let `sym` = `lit`)
-      argReservedSyms.add(sym)
-  var propReservedSyms: seq[NimNode]
-  for (_, _, _, reservedTag) in propFields:
-    if reservedTag.len == 0:
-      propReservedSyms.add(nil)
-    else:
-      let sym = genSym(nskLet, "expectedPropTag")
-      let lit = newStrLitNode(reservedTag)
-      propKeyLets.add(quote do:
-        let `sym` = `lit`)
-      propReservedSyms.add(sym)
-
   # Build the per-arg dispatch.
   var argCase = newTree(nnkCaseStmt, argIdxSym)
-  for i, (fName, fType, _) in argFields:
+  for i, (fName, fType, reservedTag) in argFields:
     let fIdent = ident(fName)
     let idxLit = newIntLitNode(i)
     let tokIndexExpr = quote do: `evSym2`.argTok
@@ -468,16 +425,18 @@ macro deriveDecode*(T: typedesc): untyped =
           `bodyCopy`
     let mark = markSlot(argSlots[i])
     # kdlReserved tag check (if declared). Verify the cursor event's
-    # arg-annotation matches the declared tag; mismatch → error.
-    let tagSym = argReservedSyms[i]
+    # arg-annotation matches the declared tag; mismatch → error. The
+    # tag literal is inlined at the call site via bytesEqLit so the
+    # compiler folds the length + byte checks.
     var reservedCheck = newStmtList()
-    if tagSym != nil:
+    if reservedTag.len > 0:
+      let tagLit = newStrLitNode(reservedTag)
       reservedCheck = quote do:
         if `evSym2`.argAnnoTok < 0 or
-           not bytesEq(`cSym`, `evSym2`.argAnnoTok, `tagSym`):
+           not bytesEqLit(`cSym`, `evSym2`.argAnnoTok, `tagLit`):
           return err[void, ParseError](
             initError(peTypeReservedMismatch, `evSym2`.span,
-                      "expected (" & `tagSym` & ") annotation on value"))
+                      "expected (" & `tagLit` & ") annotation on value"))
     branchBody = quote do:
       `reservedCheck`
       `branchBody`
@@ -489,15 +448,6 @@ macro deriveDecode*(T: typedesc): untyped =
         initError(peParseUnexpected, `evSym2`.span,
                   "unexpected extra positional argument"))))
 
-  # Same lift for child wire-names — bytesEq against an addressable let.
-  var childKeyLets = newStmtList()
-  var childKeySyms: seq[NimNode]
-  for (_, _, _, wireName) in childFields:
-    let sym = genSym(nskLet, "expectedChildName")
-    let lit = newStrLitNode(wireName)
-    childKeyLets.add(quote do:
-      let `sym` = `lit`)
-    childKeySyms.add(sym)
   # FNV-1a 32-bit, evaluated at macro time so each prop key's hash
   # becomes a const branch label. Must match cursor.tokenBytesHash
   # byte-for-byte (FNV-1a 32-bit; offset 0x811C9DC5; prime 0x01000193).
@@ -507,34 +457,36 @@ macro deriveDecode*(T: typedesc): untyped =
       result = result xor uint32(uint8(ch))
       result = result * 0x01000193'u32
 
-  proc buildPropIf(fields: seq[PropField], keys: seq[NimNode],
-                   slots: seq[int], tags: seq[NimNode]): NimNode =
-    ## ≤8 fields → bytesEq if-elif chain (cheaper than hash for small N).
+  proc buildPropIf(fields: seq[PropField], slots: seq[int]): NimNode =
+    ## ≤8 fields → bytesEqLit if-elif chain (compiler-folded inline).
     ## >8 fields with no macro-time hash collisions → case-on-FNV-32
-    ## dispatch with bytesEq confirmation per branch.
+    ## dispatch with bytesEqLit confirmation per branch.
+    ##
+    ## bytesEqLit takes the literal directly (no lifted-let plumbing);
+    ## the macro expands to per-byte compares the compiler folds.
     if fields.len == 0:
       return quote do:
         return err[void, ParseError](
           initError(peTypeUnknownField, `evSym2`.span,
                     "unknown property"))
-    # Per-field decode body — shared across both dispatch shapes.
     proc branchBodyFor(i: int): NimNode =
       let fName = fields[i].name
       let fType = fields[i].typ
+      let reservedTag = fields[i].reservedTag
       let fIdent = ident(fName)
       let tokIndexExpr = quote do: `evSym2`.propValueTok
       let target = quote do: `vSym`.`fIdent`
       let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
       let mark = markSlot(slots[i])
-      let tagSym = tags[i]
       var reservedCheck = newStmtList()
-      if tagSym != nil:
+      if reservedTag.len > 0:
+        let tagLit = newStrLitNode(reservedTag)
         reservedCheck = quote do:
           if `evSym2`.propAnnoTok < 0 or
-             not bytesEq(`cSym`, `evSym2`.propAnnoTok, `tagSym`):
+             not bytesEqLit(`cSym`, `evSym2`.propAnnoTok, `tagLit`):
             return err[void, ParseError](
               initError(peTypeReservedMismatch, `evSym2`.span,
-                        "expected (" & `tagSym` & ") annotation on value"))
+                        "expected (" & `tagLit` & ") annotation on value"))
       quote do:
         `reservedCheck`
         `decodeBody`
@@ -559,12 +511,13 @@ macro deriveDecode*(T: typedesc): untyped =
                 quote do: `evSym2`.propKeyTok))
       for i in 0 ..< fields.len:
         let hLit = newLit(hashes[i])
-        let keySym = keys[i]
+        let keyLit = newStrLitNode(fields[i].wireKey)
         let decodeBlock = branchBodyFor(i)
-        # bytesEq confirmation guards against runtime hash collisions
+        # bytesEqLit confirmation guards against runtime hash collisions
         # from unknown keys that happen to map to a known field's hash.
+        # The literal is inlined; compiler folds the per-byte checks.
         let confirmed = quote do:
-          if bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`):
+          if bytesEqLit(`cSym`, `evSym2`.propKeyTok, `keyLit`):
             `decodeBlock`
           else:
             return err[void, ParseError](
@@ -579,8 +532,8 @@ macro deriveDecode*(T: typedesc): untyped =
     # Default: if-elif chain.
     var ifNode = newNimNode(nnkIfStmt)
     for i in 0 ..< fields.len:
-      let keySym = keys[i]
-      let cond = quote do: bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`)
+      let keyLit = newStrLitNode(fields[i].wireKey)
+      let cond = quote do: bytesEqLit(`cSym`, `evSym2`.propKeyTok, `keyLit`)
       ifNode.add(newNimNode(nnkElifBranch).add(cond).add(branchBodyFor(i)))
     ifNode.add(newNimNode(nnkElse).add(quote do:
       return err[void, ParseError](
@@ -593,17 +546,12 @@ macro deriveDecode*(T: typedesc): untyped =
     var caseStmt = newTree(nnkCaseStmt, quote do: `vSym`.`discIdent`)
     for i, (branchVal, props) in branchProps:
       var branchSlots: seq[int]
-      var branchTags: seq[NimNode]
-      for _ in props:
-        branchSlots.add(-1)
-        branchTags.add(nil)  # kdlReserved on branch fields not yet wired
-      let perBranchIf = buildPropIf(props, branchPropKeySyms[i],
-                                    branchSlots, branchTags)
+      for _ in props: branchSlots.add(-1)
+      let perBranchIf = buildPropIf(props, branchSlots)
       caseStmt.add(newTree(nnkOfBranch, branchVal, perBranchIf))
     propDispatch.add(caseStmt)
   else:
-    propDispatch.add(buildPropIf(propFields, propKeySyms, propSlots,
-                                 propReservedSyms))
+    propDispatch.add(buildPropIf(propFields, propSlots))
 
   # Build the per-child dispatch (used inside the ceChildrenBegin loop).
   let nextEvSym = ident("nextEv")
@@ -611,11 +559,11 @@ macro deriveDecode*(T: typedesc): untyped =
   var childDispatchBody: NimNode
   if childFields.len > 0:
     var rootIf: NimNode = nil
-    for i, (fName, _, kind, _) in childFields:
+    for i, (fName, _, kind, wireName) in childFields:
       let fIdent = ident(fName)
-      let keySym = childKeySyms[i]
+      let keyLit = newStrLitNode(wireName)
       let cond = quote do:
-        bytesEq(`cSym`, `childPeekSym`.nodeNameTok, `keySym`)
+        bytesEqLit(`cSym`, `childPeekSym`.nodeNameTok, `keyLit`)
       let mark = markSlot(childSlots[i])
       let body =
         case kind
@@ -645,10 +593,9 @@ macro deriveDecode*(T: typedesc): untyped =
       skip(`cSym`)
 
   let requiredMaskLit = newLit(requiredMask)
+  let wireNameLit = newStrLitNode(wireName)
   let body = quote do:
     block:
-      `propKeyLets`
-      `childKeyLets`
       var `seenSym`: uint64 = 0
       let `evSym` = advance(`cSym`)
       if `evSym`.kind == ceError:
@@ -657,11 +604,10 @@ macro deriveDecode*(T: typedesc): untyped =
         return err[void, ParseError](
           initError(peParseExpected, `evSym`.span,
                     "expected node begin"))
-      let expectedNodeName = `wireName`
-      if not bytesEq(`cSym`, `evSym`.nodeNameTok, expectedNodeName):
+      if not bytesEqLit(`cSym`, `evSym`.nodeNameTok, `wireNameLit`):
         return err[void, ParseError](
           initError(peParseExpected, `evSym`.span,
-                    "expected node named '" & expectedNodeName & "'"))
+                    "expected node named '" & `wireNameLit` & "'"))
       var `argIdxSym` = 0
       while true:
         let `evSym2` = advance(`cSym`)
@@ -729,10 +675,9 @@ macro deriveDecode*(T: typedesc): untyped =
   )
   # noSideEffect lets the macro-emitted proc run in NimVM at compile
   # time. `embed[T](staticSrc)` uses this to materialize a `const T`
-  # baked into the binary with zero runtime parse cost. The VM-fallback
-  # in `cursor.bytesEq` (via `when nimvm`) is what made this possible —
-  # without it, the C `equalMem` and `unsafeAddr` trip the VM's
-  # rkNodeAddr type-register error.
+  # baked into the binary with zero runtime parse cost. The substrate
+  # is pure Nim everywhere (bytesEqLit emits inline byte compares, not
+  # FFI), so the VM has nothing it can't interpret.
   result.pragma = newTree(nnkPragma, ident("noSideEffect"))
 
 # ---------------------------------------------------------------------------

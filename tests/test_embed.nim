@@ -3,10 +3,11 @@
 ## materializes a const T baked into the binary with zero runtime
 ## parse cost.
 ##
-## The trigger that originally broke this was `cursor.bytesEq`'s
-## `equalMem(unsafeAddr ...)` path — C memcmp doesn't exist in NimVM.
-## Fixed via `when nimvm` byte-loop fallback in the template; that's
-## what makes every test in this file compile.
+## What made this work: the dispatch substrate is pure Nim
+## end-to-end. `bytesEqLit` is a macro that emits inline byte
+## compares with literal-known length + literal-known bytes, so the
+## compiler folds them (often into SIMD) at every call site. No FFI,
+## no `when nimvm` split — same code at runtime and at compile time.
 
 import std/unittest
 
