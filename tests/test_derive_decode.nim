@@ -393,3 +393,70 @@ suite "derive_decode — D8: variant (case object) discriminator dispatch":
     check res.isOk
     check d.kind == skCircle
     check d.radius == 2.5
+
+suite "derive_decode — D10: required-field bitmap":
+
+  type Required10 {.kdlNode: "req".} = object
+    name {.kdlArg.}: string  # required
+    port {.kdlProp.}: int    # required
+
+  deriveDecode(Required10)
+
+  test "all required fields present → OK":
+    let f = mkCursor("req \"web\" port=80")
+    var r: Required10
+    let res = kdlDecode(r, f.cursor)
+    check res.isOk
+    check r.name == "web"
+    check r.port == 80
+
+  test "missing required kdlProp → error":
+    let f = mkCursor("req \"web\"")  # port missing
+    var r: Required10
+    let res = kdlDecode(r, f.cursor)
+    check res.isErr
+
+  test "missing required kdlArg → error":
+    let f = mkCursor("req port=80")  # name missing
+    var r: Required10
+    let res = kdlDecode(r, f.cursor)
+    check res.isErr
+
+  type WithOpt {.kdlNode: "wopt".} = object
+    name {.kdlArg.}: string         # required
+    count {.kdlProp.}: Option[int]  # optional
+
+  deriveDecode(WithOpt)
+
+  test "missing Option field → still OK":
+    let f = mkCursor("wopt \"x\"")
+    var w: WithOpt
+    let res = kdlDecode(w, f.cursor)
+    check res.isOk
+    check w.name == "x"
+    check w.count == none(int)
+
+  test "missing required even with optional present → error":
+    let f = mkCursor("wopt count=5")
+    var w: WithOpt
+    let res = kdlDecode(w, f.cursor)
+    check res.isErr
+
+  type Item10 {.kdlNode: "item".} = object
+    label {.kdlArg.}: string
+
+  deriveDecode(Item10)
+
+  type WithSeq {.kdlNode: "wseq".} = object
+    name {.kdlArg.}: string             # required
+    children {.kdlChild.}: seq[Item10]  # optional (empty seq is fine)
+
+  deriveDecode(WithSeq)
+
+  test "missing seq[T] kdlChild → still OK (empty seq)":
+    let f = mkCursor("wseq \"x\"")
+    var w: WithSeq
+    let res = kdlDecode(w, f.cursor)
+    check res.isOk
+    check w.name == "x"
+    check w.children.len == 0

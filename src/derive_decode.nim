@@ -347,6 +347,55 @@ macro deriveDecode*(T: typedesc): untyped =
                 "supported")
         branchProps.add((branchVal: branch[0], props: props2))
 
+  # Required-field bitmap. Each non-Option / non-seq kdlArg / kdlProp /
+  # kdlChild gets a slot bit; final mask compare emits
+  # peTypeMissingRequired when any required field was missed. Branch
+  # fields (variant) are conditionally required per branch — current
+  # implementation marks them as not-required to avoid the per-branch
+  # mask complexity; a later cycle adds branch-aware tracking.
+  let seenSym = ident("__slotsSeen")
+  var requiredMask: uint64 = 0
+  var nextSlot = 0
+  proc claimSlot(): int =
+    result = nextSlot
+    if result < 64:
+      requiredMask = requiredMask or (1'u64 shl result)
+    inc nextSlot
+
+  proc isOptionalKdlArgOrProp(typ: NimNode): bool =
+    isOptionType(typ)
+
+  # Pre-allocate slots in declaration order. Discriminator field doesn't
+  # need a required-slot — the case-object machinery itself ensures the
+  # discriminator is set; the cursor either provided it or the decode
+  # already errored at the type level.
+  var argSlots: seq[int]
+  for (fName, fType) in argFields:
+    if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
+      argSlots.add(-1)
+    else:
+      argSlots.add(claimSlot())
+  var propSlots: seq[int]
+  for (fName, fType, _) in propFields:
+    if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
+      propSlots.add(-1)
+    else:
+      propSlots.add(claimSlot())
+  var childSlots: seq[int]
+  for (_, _, kind, _) in childFields:
+    if kind == ckSeq:
+      childSlots.add(-1)  # empty seq is fine
+    else:
+      childSlots.add(claimSlot())
+
+  proc markSlot(slot: int): NimNode =
+    if slot < 0:
+      newStmtList()
+    else:
+      let bit = newLit(1'u64 shl slot)
+      quote do:
+        `seenSym` = `seenSym` or `bit`
+
   # Build the per-arg dispatch.
   var argCase = newTree(nnkCaseStmt, argIdxSym)
   for i, (fName, fType) in argFields:
@@ -355,16 +404,15 @@ macro deriveDecode*(T: typedesc): untyped =
     let tokIndexExpr = quote do: `evSym2`.argTok
     let target = quote do: `vSym`.`fIdent`
     var branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
-    # Discriminator assignment may CHANGE the variant branch from its
-    # default zero value. Nim refuses that under normal mode; wrap in
-    # `{.cast(uncheckedAssign).}: <body>` so the runtime accepts the
-    # branch change without validating prior branch-field state
-    # (correct here — we're populating a freshly-zeroed `var T`).
     if hasVariant and fName == discName:
       let bodyCopy = branchBody
       branchBody = quote do:
         {.cast(uncheckedAssign).}:
           `bodyCopy`
+    let mark = markSlot(argSlots[i])
+    branchBody = quote do:
+      `branchBody`
+      `mark`
     argCase.add(newTree(nnkOfBranch, idxLit, branchBody))
   argCase.add(newTree(nnkElse,
     quote do:
@@ -405,8 +453,11 @@ macro deriveDecode*(T: typedesc): untyped =
     childKeyLets.add(quote do:
       let `sym` = `lit`)
     childKeySyms.add(sym)
-  # Helper: build an if-elif-else for a list of (PropField, keySym) pairs.
-  proc buildPropIf(fields: seq[PropField], keys: seq[NimNode]): NimNode =
+  # Helper: build an if-elif-else for a list of (PropField, keySym, slot)
+  # tuples. The slot-bit marker is appended to each branch's body so
+  # the required-field check sees the prop as satisfied.
+  proc buildPropIf(fields: seq[PropField], keys: seq[NimNode],
+                   slots: seq[int]): NimNode =
     if fields.len == 0:
       return quote do:
         return err[void, ParseError](
@@ -419,8 +470,12 @@ macro deriveDecode*(T: typedesc): untyped =
       let tokIndexExpr = quote do: `evSym2`.propValueTok
       let target = quote do: `vSym`.`fIdent`
       let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+      let mark = markSlot(slots[i])
+      let fullBody = quote do:
+        `decodeBody`
+        `mark`
       let cond = quote do: bytesEq(`cSym`, `evSym2`.propKeyTok, `keySym`)
-      ifNode.add(newNimNode(nnkElifBranch).add(cond).add(decodeBody))
+      ifNode.add(newNimNode(nnkElifBranch).add(cond).add(fullBody))
     ifNode.add(newNimNode(nnkElse).add(quote do:
       return err[void, ParseError](
         initError(peParseUnexpected, `evSym2`.span,
@@ -429,36 +484,19 @@ macro deriveDecode*(T: typedesc): untyped =
 
   var propDispatch = newStmtList()
   if hasVariant:
-    # Variant-aware: plain props always available, then case on
-    # discriminator for branch-specific props. For the common case
-    # where ONLY branch props exist (no plain), the runtime case
-    # cleanly dispatches per-variant.
-    var allBranchesEmpty = true
-    for (_, props) in branchProps:
-      if props.len > 0: allBranchesEmpty = false
-    if propFields.len > 0:
-      # Try plain dispatch first. We can't fall-through cleanly from
-      # an if-elif's else into the variant case without restructuring,
-      # so emit a sequence of attempts: if plain matches, done; else
-      # check branch.
-      let plainIf = buildPropIf(propFields, propKeySyms)
-      propDispatch.add(plainIf)
-      # NOTE: plain dispatch returns on success or error; if it falls
-      # through to "unknown property" we'd never reach the branch case.
-      # For correctness when both exist, the plain dispatch's else
-      # branch needs to chain into the branch case. Deferred — D8
-      # tracer scopes to "branch props only" types, which is the
-      # common case.
-    elif not allBranchesEmpty or true:
-      # Branch-only path: case on v.discriminator at runtime; per-branch
-      # if-elif-else for that branch's props.
-      var caseStmt = newTree(nnkCaseStmt, quote do: `vSym`.`discIdent`)
-      for i, (branchVal, props) in branchProps:
-        let perBranchIf = buildPropIf(props, branchPropKeySyms[i])
-        caseStmt.add(newTree(nnkOfBranch, branchVal, perBranchIf))
-      propDispatch.add(caseStmt)
+    # Variant-aware: case on v.discriminator at runtime; per-branch
+    # if-elif-else for that branch's props. Branch fields don't claim
+    # required-slot bits (current scope) so passing -1 slots disables
+    # the bit-set in their decode bodies.
+    var caseStmt = newTree(nnkCaseStmt, quote do: `vSym`.`discIdent`)
+    for i, (branchVal, props) in branchProps:
+      var branchSlots: seq[int]
+      for _ in props: branchSlots.add(-1)
+      let perBranchIf = buildPropIf(props, branchPropKeySyms[i], branchSlots)
+      caseStmt.add(newTree(nnkOfBranch, branchVal, perBranchIf))
+    propDispatch.add(caseStmt)
   else:
-    propDispatch.add(buildPropIf(propFields, propKeySyms))
+    propDispatch.add(buildPropIf(propFields, propKeySyms, propSlots))
 
   # Build the per-child dispatch (used inside the ceChildrenBegin loop).
   let nextEvSym = ident("nextEv")
@@ -471,14 +509,15 @@ macro deriveDecode*(T: typedesc): untyped =
       let keySym = childKeySyms[i]
       let cond = quote do:
         bytesEq(`cSym`, `childPeekSym`.nodeNameTok, `keySym`)
+      let mark = markSlot(childSlots[i])
       let body =
         case kind
         of ckSingle:
           quote do:
             let r = kdlDecode(`vSym`.`fIdent`, `cSym`)
             if r.isErr: return r
+            `mark`
         of ckSeq:
-          # Append a fresh element to the seq, decode into it.
           let elemSym = genSym(nskVar, "childElem")
           let elemType = childFields[i].elemType
           quote do:
@@ -492,18 +531,18 @@ macro deriveDecode*(T: typedesc): untyped =
       else:
         rootIf.add(newNimNode(nnkElifBranch).add(cond).add(body))
     rootIf.add(newNimNode(nnkElse).add(quote do:
-      # Unknown child name — skip its subtree (we already peeked it,
-      # so consume via skip after advance).
       skip(`cSym`)))
     childDispatchBody = rootIf
   else:
     childDispatchBody = quote do:
       skip(`cSym`)
 
+  let requiredMaskLit = newLit(requiredMask)
   let body = quote do:
     block:
       `propKeyLets`
       `childKeyLets`
+      var `seenSym`: uint64 = 0
       let `evSym` = advance(`cSym`)
       if `evSym`.kind == ceError:
         return err[void, ParseError](`evSym`.err)
@@ -557,6 +596,13 @@ macro deriveDecode*(T: typedesc): untyped =
                       "unexpected EOF inside node"))
         else:
           discard
+      # Required-field validation. Each non-Option / non-seq field set
+      # its bit during decode; if the bitmap doesn't cover the mask,
+      # report the first missing field.
+      if (`seenSym` and `requiredMaskLit`) != `requiredMaskLit`:
+        return err[void, ParseError](
+          initError(peTypeMissingRequired, `evSym`.span,
+                    "missing required field"))
       return ok(void, ParseError)
 
   result = newProc(
