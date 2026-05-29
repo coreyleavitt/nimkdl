@@ -50,7 +50,7 @@ task test, "Run unit tests":
   #
   # Local dev: `milpa fetch` then `NKDL_PROPTEST=1 nimble test`.
   if existsEnv("NKDL_PROPTEST"):
-    discard  # P1-P12 property suites land in Stages A-F of the rebuild
+    exec cmd & " tests/test_safety_properties.nim"
   else:
     echo "[skip] property suites — being rebuilt as P1-P12 in Stages A-F"
 
