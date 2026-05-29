@@ -405,6 +405,26 @@ type
     e.pushSlashdashBegin()
     e.pushSlashdashEnd()
 
+func pushPreservedBytes*(e: var BufferEmitter, bytes: openArray[char]) =
+  ## Escape hatch: emit raw wire bytes verbatim, bypassing the
+  ## structural-event protocol. Honest about what it is — the caller
+  ## (typically `emitDocPreserve`) is asserting that `bytes` is a
+  ## valid KDL fragment whose structural position matches what would
+  ## otherwise have come out of pushNodeBegin / ... / pushNodeEnd.
+  ##
+  ## Stays out of the KdlEmitter concept on purpose: not every impl
+  ## can meaningfully accept raw bytes (a tracing emitter that records
+  ## structural-event call shapes has nothing to do with raw bytes).
+  ## Preserve-mode consumers depend on this BufferEmitter-specific
+  ## extension; canonical-mode consumers don't.
+  ##
+  ## Does NOT touch the depth / slashdashPending state. Preserve-mode
+  ## clean-subtree splicing happens at node boundaries where neither
+  ## state should be in flight; if the caller breaks that invariant,
+  ## subsequent structural pushes produce malformed output. The
+  ## constraint is a contract, not a runtime check.
+  e.appendBytes(bytes)
+
 template validateKdlEmitter*(T: typedesc) =
   ## Compile-time witness that T satisfies KdlEmitter. Nim's concept
   ## error messages are infamously hostile; this template forces the

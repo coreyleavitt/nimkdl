@@ -8,6 +8,8 @@ import ../src/ast
 import ../src/doc_emit
 import ../src/emitter
 import ../src/intern
+import ../src/parser
+import ../src/spans
 
 suite "doc_emit — B1: tracer (bare top-level node)":
 
@@ -175,3 +177,43 @@ suite "doc_emit — B4: type annotations":
     var e = newBufferEmitter()
     emitDoc(doc, e)
     check e.finish() == "(server)svc (u8)42 port=(u16)80\n"
+
+suite "doc_emit — B5: preserve mode (clean subtree → source bytes)":
+
+  test "unmutated parsed doc round-trips byte-exact for a bare node":
+    let src = "foo\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    var e = newBufferEmitter()
+    emitDocPreserve(doc, e)
+    check e.finish() == src
+
+  test "unmutated parsed doc preserves original number base":
+    # The AST stores intVal=42 regardless of source; canonical mode
+    # would re-emit "42", but preserve mode must keep "0x2a".
+    let src = "n 0x2a\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    var e = newBufferEmitter()
+    emitDocPreserve(doc, e)
+    check e.finish() == src
+
+  test "unmutated parsed doc preserves source whitespace":
+    let src = "svc   port=80    enabled=#true\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    var e = newBufferEmitter()
+    emitDocPreserve(doc, e)
+    check e.finish() == src
+
+  test "unmutated parsed doc preserves trailing comment":
+    let src = "host \"hi\"  // greeting goes here\n"
+    let r = parse(src, preserveFormat = true)
+    check r.isOk
+    var doc = r.get
+    var e = newBufferEmitter()
+    emitDocPreserve(doc, e)
+    check e.finish() == src
