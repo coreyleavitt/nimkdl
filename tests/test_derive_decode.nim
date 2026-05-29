@@ -460,3 +460,37 @@ suite "derive_decode — D10: required-field bitmap":
     check res.isOk
     check w.name == "x"
     check w.children.len == 0
+
+suite "derive_decode — D9: kdlReserved tag validation":
+
+  type HostD {.kdlNode: "host".} = object
+    addr1 {.kdlArg, kdlReserved: "ipv4".}: string
+    port {.kdlProp, kdlReserved: "u16".}: int
+
+  deriveDecode(HostD)
+
+  test "matching annotations decode cleanly":
+    let f = mkCursor("host (ipv4)\"10.0.0.1\" port=(u16)80")
+    var h: HostD
+    let res = kdlDecode(h, f.cursor)
+    check res.isOk
+    check h.addr1 == "10.0.0.1"
+    check h.port == 80
+
+  test "missing kdlReserved annotation on arg returns error":
+    let f = mkCursor("host \"10.0.0.1\" port=(u16)80")
+    var h: HostD
+    let res = kdlDecode(h, f.cursor)
+    check res.isErr
+
+  test "wrong kdlReserved annotation on arg returns error":
+    let f = mkCursor("host (ipv6)\"::1\" port=(u16)80")
+    var h: HostD
+    let res = kdlDecode(h, f.cursor)
+    check res.isErr
+
+  test "missing kdlReserved annotation on prop returns error":
+    let f = mkCursor("host (ipv4)\"10.0.0.1\" port=80")
+    var h: HostD
+    let res = kdlDecode(h, f.cursor)
+    check res.isErr
