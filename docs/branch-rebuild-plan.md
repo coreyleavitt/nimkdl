@@ -177,15 +177,42 @@ After G4: merge branch to main (or rename branch → main if cleaner).
 
 ## Resume-here pointer
 
-Update this line at the end of every session.
+**Branch complete — merging to main.** Stages A + B + Audit 1-4 + C + D + E + F + perf round A all DONE. 61 commits since main; 624 OK across full suite incl. `NKDL_PROPTEST=1`.
 
-**Last session ended after**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 47 commits since main; 338/338 conformance + 243/243 preserve + 46 derive_decode + 32 derive_encode + 4 embed + 9 round-trip + 20 doc_emit + 57 emitter + substrate GREEN. embed[T] works at compile time including self-recursive Tree at depth 3. Bench: 14.98 μs decode / 12.07 μs encode per 100-Service.
+### Final delivered scope
 
-**Next concrete action**: pick one of:
+- **A-D**: emitter + docEmit + deriveEncode + deriveDecode
+- **E**: `kdl:` block macro + `decode[T] / encode[T] / decodeAll[T] / embed[T]` public surface (encode returns Result for symmetry with decode)
+- **F**: P1-P12 property catalog; grammar-aware event-sequence generator covering every grammar position incl. annotations + all three slashdash positions
+- **Audit-4**: substrate pure-Nim end-to-end (`bytesEqLit` macro replaced `equalMem`/memcmp; no CFFI in codegen path)
+- **Perf round A**: peek lookahead cache, doc.nodes pre-size, CursorEvent 48B→24B (int32 tok indices + `ref ParseError`), inline pragmas on hot helpers
 
-1. **Merge `phase3-clean-core` to main**, ship the rewrite, do Stage E + F as follow-ons.
-2. **Stage E1**: build the `kdl:` block macro. `src/derive_encode.nim` already exists; the orchestrator macro is small (walks the block body, finds `type X {.kdlNode.}` declarations, emits `deriveEncode(X)` + `deriveDecode(X)` for each).
-3. **Stage E2**: build `decode[T](src: string): Result[T, ParseError]` / `encode[T](v: T): string` / `decodeAll[T]` public-API wrappers. The TDD round-trip tests already write this as a `template roundtrip[T]` — productize it.
-4. **Stage F**: rebuild the property-test catalog (P1-P12). Grammar-aware event-sequence generator (F3) is the substantial piece. Property suites currently `[skip]` in `nimble test`.
+### Closures by construction
 
-The branch is in excellent state regardless of which path. Substrate is end-to-end pure Nim (Audit-4 dropped the CFFI dependency); embed[T] works; #11 closed by construction.
+- **#11** depth-2+ children corruption: closed both directions (C6 encode, D4 decode); depth-3 Tree round-trips byte-exact
+- **embed[T]** at compile time end-to-end (was broken pre-rewrite — visitor codegen had FFI in dispatch)
+
+### Real bugs caught by the new property catalog
+
+- `lexer.isBareword` missing `.<digit>` rejection (P12 counterexample `.6rcx` pinned)
+- `doc_emit.emitDocPreserve` missing inter-node separator on appended dirty nodes (P6 mutation property; fixed via `ensureNodeSeparator` invariant)
+
+### Bench summary
+
+| Path | Pre-rewrite | New default | New + PGO |
+|------|------------|-------------|-----------|
+| Cat 2 decode[seq[Service]] | 42.9 μs | 47.3 μs | 38.9 μs (faster than old) |
+| Cat 3 parse | 70.3 μs | 88.8 μs | 61.6 μs (faster than old) |
+| Cat 2 encode flat | 50.2 μs | **15.5 μs (3.2× faster)** | — |
+| Cat 2 encode nested | 29.4 μs | **7.4 μs (4× faster)** | — |
+
+Default build: parse + decode ~1.3-1.6× slower than old visitor protocol (architectural cost of the three-categories design); encode 3-4× faster. PGO closes parse + decode regressions but is deployment-time only.
+
+### Open questions deferred to follow-on cycles (post-merge)
+
+1. Compact mode for emitter (no indentation, semicolons)
+2. emit-as-arg-only mode in deriveEncode
+3. `mutState` ref overhead in KdlNode copy/move (Cat 3 hot path lever)
+4. PGO default vs opt-in (deployment decision)
+5. Cross-impl bench refresh against current ckdl/knus/facet-kdl/kdl-rs numbers
+6. encode[T] runtime validation (e.g. kdlReserved bounds: `(u8)-1` should reject) — signature is already Result-shaped, body returns Ok unconditionally pending validation pass
