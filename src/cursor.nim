@@ -47,21 +47,28 @@ type
     ceError
 
   CursorEvent* = object
+    ## Span-bearing event. Token indices are `int32` (cap 2.1B —
+    ## effectively unlimited) so the 3-index variants pack into 12
+    ## bytes instead of 24, shrinking the whole struct from 48B to
+    ## 24B on x86-64. `err` is a `ref ParseError` so the error path
+    ## stays heap-allocated (rare; one per error) and the common
+    ## success path doesn't pay for a 32-byte inline ParseError
+    ## per event.
     span*: Span
     case kind*: CursorEventKind
     of ceNodeBegin:
-      nodeNameTok*: int
-      nodeAnnoTok*: int   # -1 if absent
+      nodeNameTok*: int32
+      nodeAnnoTok*: int32   # -1 if absent
     of ceArg:
-      argIdx*: int
-      argTok*: int
-      argAnnoTok*: int    # -1 if absent
+      argIdx*: int32
+      argTok*: int32
+      argAnnoTok*: int32    # -1 if absent
     of ceProp:
-      propKeyTok*: int
-      propValueTok*: int
-      propAnnoTok*: int   # -1 if absent
+      propKeyTok*: int32
+      propValueTok*: int32
+      propAnnoTok*: int32   # -1 if absent
     of ceError:
-      err*: ParseError
+      err*: ref ParseError
     else: discard
 
   CursorState = enum
@@ -105,6 +112,8 @@ type
     childrenIsSlashdashed: seq[bool]    ## per open children block: was it slashdash-prefixed?
     mode*: CursorMode
     halted*: bool      ## set after a ceError in single-shot mode; subsequent advance() returns ceEof
+    peekedValid*: bool
+    peekedEvent*: CursorEvent
 
 proc initStringCursor*(stream: ptr TokenStream, source: string,
                        mode: CursorMode = cmSingle): StringCursor =
@@ -142,13 +151,23 @@ proc inSlashdashedChildren(c: StringCursor): bool {.inline.} =
     c.slashdashStack[^1].kind == sdChildren and
     c.slashdashStack[^1].anchorDepth == c.depth
 
+proc heapErr(pe: sink ParseError): ref ParseError {.inline.} =
+  ## Box a ParseError onto the heap for embedding in a CursorEvent.
+  ## Per the cursor RFC (B-option for size compaction): every ceError
+  ## carries `ref ParseError` instead of inline ParseError, which keeps
+  ## CursorEvent at 24 bytes (return-in-registers eligible on SysV)
+  ## without losing self-containedness for accumulating-mode
+  ## consumers (each event still owns its own error).
+  new(result)
+  result[] = pe
+
 proc rejectAfterChildren(c: var StringCursor, span: Span): CursorEvent =
   let pe = initError(peParseUnexpected, span,
                      "entries are not permitted after a children block")
   case c.mode
   of cmSingle: c.halted = true
   of cmAccumulating: inc c.tokIdx
-  CursorEvent(kind: ceError, span: span, err: pe)
+  CursorEvent(kind: ceError, span: span, err: heapErr(pe))
 
 proc currentNodeSawRealChildren(c: StringCursor): bool {.inline.} =
   c.nodeFrames.len > 0 and c.nodeFrames[^1].seenRealChildren
@@ -173,7 +192,7 @@ proc emitAdjacencyError(c: var StringCursor, span: Span): CursorEvent =
   of cmAccumulating:
     # Skip the bad entry's leading token so we don't loop on it.
     inc c.tokIdx
-  CursorEvent(kind: ceError, span: span, err: pe)
+  CursorEvent(kind: ceError, span: span, err: heapErr(pe))
 
 proc emitMalformedAnnoError(c: var StringCursor, span: Span): CursorEvent =
   ## Construct a synthetic ceError for a malformed `(tag)` annotation.
@@ -189,9 +208,9 @@ proc emitMalformedAnnoError(c: var StringCursor, span: Span): CursorEvent =
     c.state = csTopLevel
     c.slashdashStack.setLen(0)
     c.pendingEnds.setLen(0)
-  CursorEvent(kind: ceError, span: span, err: pe)
+  CursorEvent(kind: ceError, span: span, err: heapErr(pe))
 
-proc bytes*(c: StringCursor, tokIdx: int): string =
+proc bytes*(c: StringCursor, tokIdx: int): string {.inline.} =
   ## Token payload as a freshly-copied string. Ergonomic — binds anywhere
   ## (let, var, check). For compile-time-known-literal hot-path dispatch
   ## use `bytesEqLit`.
@@ -244,7 +263,7 @@ macro bytesEqLit*(c: untyped, tokIdx: untyped, s: static[string]): bool =
       let `offSym` = int(`tokSym`.span.offset)
       `lenCheck` and `byteChain`
 
-proc tokenBytesHash*(c: StringCursor, tokIdx: int): uint32 =
+proc tokenBytesHash*(c: StringCursor, tokIdx: int): uint32 {.inline.} =
   ## FNV-1a 32-bit hash over the source bytes of token at `tokIdx`.
   ## Used by deriveDecode's perfect-hash kdlProp dispatch (Stage D5).
   ## The macro precomputes hashes for known wire-keys at compile time
@@ -302,7 +321,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       c.state = csTopLevel
       c.slashdashStack.setLen(0)
       c.pendingEnds.setLen(0)
-    return CursorEvent(kind: ceError, span: t.span, err: pe)
+    return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
 
   case c.state
   of csTopLevel:
@@ -313,7 +332,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         let pe = initError(peParseExpected, t.span,
                            "unclosed children block at end of input")
         c.halted = true
-        return CursorEvent(kind: ceError, span: t.span, err: pe)
+        return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
       return CursorEvent(kind: ceEof, span: t.span)
     of tkSlashDash:
       let sdSpan = t.span
@@ -329,7 +348,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         case c.mode
         of cmSingle: c.halted = true
         of cmAccumulating: discard
-        return CursorEvent(kind: ceError, span: sdSpan, err: pe)
+        return CursorEvent(kind: ceError, span: sdSpan, err: heapErr(pe))
       let kind = peekSlashdashKindAt(c, c.tokIdx)
       c.slashdashStack.add(PendingSlashdash(kind: kind, anchorDepth: c.depth))
       return CursorEvent(kind: ceSlashdashBegin, span: sdSpan)
@@ -347,21 +366,21 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
           let pe = initError(peLexInvalidIdentifier, nameTok.span,
                              "bidi control codepoint in node name")
           c.halted = true
-          return CursorEvent(kind: ceError, span: nameTok.span, err: pe)
+          return CursorEvent(kind: ceError, span: nameTok.span, err: heapErr(pe))
       elif nameTok.kind == tkRawString:
         let p = c.stream[].rawStringPayloads[nameTok.rawIdx]
         if containsBidiControl(p):
           let pe = initError(peLexInvalidIdentifier, nameTok.span,
                              "bidi control codepoint in node name")
           c.halted = true
-          return CursorEvent(kind: ceError, span: nameTok.span, err: pe)
+          return CursorEvent(kind: ceError, span: nameTok.span, err: heapErr(pe))
       let nameIdx = c.tokIdx
       inc c.tokIdx
       c.state = csInNodeEntries
       c.argIdx = 0
       c.nodeFrames.add(NodeFrame(seenRealChildren: false))
       return CursorEvent(kind: ceNodeBegin, span: nameTok.span,
-                         nodeNameTok: nameIdx, nodeAnnoTok: annoIdx)
+                         nodeNameTok: int32(nameIdx), nodeAnnoTok: int32(annoIdx))
     of tkString, tkRawString:
       # Quoted/raw-string node name (no type annotation prefix).
       if t.kind == tkString:
@@ -370,21 +389,21 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
           let pe = initError(peLexInvalidIdentifier, t.span,
                              "bidi control codepoint in node name")
           c.halted = true
-          return CursorEvent(kind: ceError, span: t.span, err: pe)
+          return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
       else:
         let p = c.stream[].rawStringPayloads[t.rawIdx]
         if containsBidiControl(p):
           let pe = initError(peLexInvalidIdentifier, t.span,
                              "bidi control codepoint in node name")
           c.halted = true
-          return CursorEvent(kind: ceError, span: t.span, err: pe)
+          return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
       let nameIdx = c.tokIdx
       inc c.tokIdx
       c.state = csInNodeEntries
       c.argIdx = 0
       c.nodeFrames.add(NodeFrame(seenRealChildren: false))
       return CursorEvent(kind: ceNodeBegin, span: t.span,
-                         nodeNameTok: nameIdx, nodeAnnoTok: -1)
+                         nodeNameTok: int32(nameIdx), nodeAnnoTok: -1)
     of tkRBrace:
       # Close of a children block. Determine whether the closing block
       # was slashdash-prefixed before popping depth — that drives both
@@ -408,14 +427,14 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       c.argIdx = 0
       c.nodeFrames.add(NodeFrame(seenRealChildren: false))
       return CursorEvent(kind: ceNodeBegin, span: t.span,
-                         nodeNameTok: nameIdx, nodeAnnoTok: -1)
+                         nodeNameTok: int32(nameIdx), nodeAnnoTok: -1)
     else:
       let pe = initError(peParseUnexpected, t.span,
                          "unexpected token at node boundary")
       case c.mode
       of cmSingle: c.halted = true
       of cmAccumulating: inc c.tokIdx
-      return CursorEvent(kind: ceError, span: t.span, err: pe)
+      return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
   of csInNodeEntries:
     let t = c.tok
     case t.kind
@@ -441,7 +460,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         case c.mode
         of cmSingle: c.halted = true
         of cmAccumulating: discard
-        return CursorEvent(kind: ceError, span: t.span, err: pe)
+        return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
       inc c.tokIdx
       inc c.depth
       c.childrenIsSlashdashed.add(isSlashdashed)
@@ -461,7 +480,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         case c.mode
         of cmSingle: c.halted = true
         of cmAccumulating: discard
-        return CursorEvent(kind: ceError, span: sdSpan, err: pe)
+        return CursorEvent(kind: ceError, span: sdSpan, err: heapErr(pe))
       let kind = peekSlashdashKindAt(c, c.tokIdx)
       c.slashdashStack.add(PendingSlashdash(kind: kind, anchorDepth: c.depth))
       return CursorEvent(kind: ceSlashdashBegin, span: sdSpan)
@@ -482,7 +501,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       inc c.argIdx
       inc c.tokIdx
       return CursorEvent(kind: ceArg, span: valSpan,
-                         argIdx: myArgIdx, argTok: valIdx, argAnnoTok: annoIdx)
+                         argIdx: int32(myArgIdx), argTok: int32(valIdx), argAnnoTok: int32(annoIdx))
     of tkNumber, tkKeyword:
       if needsWsBefore(c):
         return emitAdjacencyError(c, t.span)
@@ -493,7 +512,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       inc c.argIdx
       inc c.tokIdx
       return CursorEvent(kind: ceArg, span: t.span,
-                         argIdx: myArgIdx, argTok: valIdx, argAnnoTok: -1)
+                         argIdx: int32(myArgIdx), argTok: int32(valIdx), argAnnoTok: -1)
     of tkString, tkRawString:
       # Quoted/raw-string in entry position: prop key if followed by
       # `=`, else arg value. Prop-key form does bidi check.
@@ -510,14 +529,14 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
             let pe = initError(peLexInvalidIdentifier, t.span,
                                "bidi control codepoint in property key")
             c.halted = true
-            return CursorEvent(kind: ceError, span: t.span, err: pe)
+            return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
         else:
           let p = c.stream[].rawStringPayloads[t.rawIdx]
           if containsBidiControl(p):
             let pe = initError(peLexInvalidIdentifier, t.span,
                                "bidi control codepoint in property key")
             c.halted = true
-            return CursorEvent(kind: ceError, span: t.span, err: pe)
+            return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
         let keyIdx = c.tokIdx
         var valIdx = c.tokIdx + 2
         var annoIdx = -1
@@ -528,7 +547,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
           case c.mode
           of cmSingle: c.halted = true
           of cmAccumulating: inc c.tokIdx
-          return CursorEvent(kind: ceError, span: t.span, err: pe)
+          return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
         if c.stream[].tokens[valIdx].kind == tkLParen:
           if valIdx + 3 >= c.stream[].tokens.len:
             let pe = initError(peParseExpected, t.span,
@@ -536,20 +555,20 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
             case c.mode
             of cmSingle: c.halted = true
             of cmAccumulating: inc c.tokIdx
-            return CursorEvent(kind: ceError, span: t.span, err: pe)
+            return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
           annoIdx = valIdx + 1
           valIdx += 3
         c.tokIdx = valIdx + 1
         return CursorEvent(kind: ceProp, span: t.span,
-                           propKeyTok: keyIdx, propValueTok: valIdx,
-                           propAnnoTok: annoIdx)
+                           propKeyTok: int32(keyIdx), propValueTok: int32(valIdx),
+                           propAnnoTok: int32(annoIdx))
       else:
         let valIdx = c.tokIdx
         let myArgIdx = c.argIdx
         inc c.argIdx
         inc c.tokIdx
         return CursorEvent(kind: ceArg, span: t.span,
-                           argIdx: myArgIdx, argTok: valIdx, argAnnoTok: -1)
+                           argIdx: int32(myArgIdx), argTok: int32(valIdx), argAnnoTok: -1)
     of tkIdent:
       if needsWsBefore(c):
         return emitAdjacencyError(c, t.span)
@@ -568,7 +587,7 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
           case c.mode
           of cmSingle: c.halted = true
           of cmAccumulating: inc c.tokIdx
-          return CursorEvent(kind: ceError, span: t.span, err: pe)
+          return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
         if c.stream[].tokens[valIdx].kind == tkLParen:
           if valIdx + 3 >= c.stream[].tokens.len:
             let pe = initError(peParseExpected, t.span,
@@ -576,32 +595,35 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
             case c.mode
             of cmSingle: c.halted = true
             of cmAccumulating: inc c.tokIdx
-            return CursorEvent(kind: ceError, span: t.span, err: pe)
+            return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
           annoIdx = valIdx + 1
           valIdx += 3   # past `(`, tag, `)`
         c.tokIdx = valIdx + 1
         return CursorEvent(kind: ceProp, span: t.span,
-                           propKeyTok: keyIdx, propValueTok: valIdx,
-                           propAnnoTok: annoIdx)
+                           propKeyTok: int32(keyIdx), propValueTok: int32(valIdx),
+                           propAnnoTok: int32(annoIdx))
       else:
         let valIdx = c.tokIdx
         let myArgIdx = c.argIdx
         inc c.argIdx
         inc c.tokIdx
         return CursorEvent(kind: ceArg, span: t.span,
-                           argIdx: myArgIdx, argTok: valIdx, argAnnoTok: -1)
+                           argIdx: int32(myArgIdx), argTok: int32(valIdx), argAnnoTok: -1)
     else:
       let pe = initError(peParseUnexpected, t.span,
                          "unexpected token in node entries")
       case c.mode
       of cmSingle: c.halted = true
       of cmAccumulating: inc c.tokIdx
-      return CursorEvent(kind: ceError, span: t.span, err: pe)
+      return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
 
 proc advance*(c: var StringCursor): CursorEvent =
   ## Public entry point: drains queued events first, then generates the
   ## next grammar event, then inspects the slashdash stack to see if the
   ## just-emitted event closes a bracket (queuing SlashdashEnd if so).
+  if c.peekedValid:
+    c.peekedValid = false
+    return c.peekedEvent
   if c.halted:
     return CursorEvent(kind: ceEof, span: c.tok.span)
   if c.pendingEnds.len > 0:
@@ -636,11 +658,14 @@ type
     pendingEnds*: seq[CursorEvent]
     slashdashStack*: seq[PendingSlashdash]
     halted*: bool
+    peekedValid*: bool
+    peekedEvent*: CursorEvent
 
 proc pos*(c: StringCursor): Checkpoint =
   Checkpoint(tokIdx: c.tokIdx, state: c.state, argIdx: c.argIdx,
              depth: c.depth, pendingEnds: c.pendingEnds,
-             slashdashStack: c.slashdashStack, halted: c.halted)
+             slashdashStack: c.slashdashStack, halted: c.halted,
+             peekedValid: c.peekedValid, peekedEvent: c.peekedEvent)
 
 proc seek*(c: var StringCursor, ck: Checkpoint) =
   c.tokIdx = ck.tokIdx
@@ -650,6 +675,8 @@ proc seek*(c: var StringCursor, ck: Checkpoint) =
   c.pendingEnds = ck.pendingEnds
   c.slashdashStack = ck.slashdashStack
   c.halted = ck.halted
+  c.peekedValid = ck.peekedValid
+  c.peekedEvent = ck.peekedEvent
 
 proc skip*(c: var StringCursor) =
   ## Consume events until the current node's ceNodeEnd is emitted.
@@ -667,12 +694,20 @@ proc skip*(c: var StringCursor) =
     of ceEof, ceError:  return
     else: discard
 
-proc peek*(c: StringCursor): CursorEvent =
+proc peek*(c: var StringCursor): CursorEvent =
   ## Return the next event without consuming it. Two consecutive
-  ## peeks are idempotent. Implemented as save → advance → restore;
-  ## costs a Checkpoint copy per call (cheap for small stacks).
-  var tmp = c
-  result = advance(tmp)
+  ## peeks are idempotent.
+  ##
+  ## Uses an in-cursor one-event lookahead cache. The first peek
+  ## runs the state machine and stashes the result on the cursor;
+  ## subsequent peeks return the cached value. The next `advance`
+  ## drains the cache. Replaces the old "copy cursor → advance copy"
+  ## which allocated for the cursor's seq fields per call.
+  if c.peekedValid:
+    return c.peekedEvent
+  c.peekedEvent = advance(c)
+  c.peekedValid = true
+  c.peekedEvent
 
 
 type
@@ -681,7 +716,7 @@ type
     ## surface can act as the foundation for Cat 1 / Cat 2 / Cat 3
     ## consumers. StringCursor is the default impl. Future impls:
     ## TokenListCursor (tests without lexer), IncrementalCursor (LSP).
-    peek(c) is CursorEvent
+    peek(mc) is CursorEvent
     advance(mc) is CursorEvent
     skip(mc)
     bytes(c, 0) is string

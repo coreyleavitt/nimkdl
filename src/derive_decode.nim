@@ -599,7 +599,7 @@ macro deriveDecode*(T: typedesc): untyped =
       var `seenSym`: uint64 = 0
       let `evSym` = advance(`cSym`)
       if `evSym`.kind == ceError:
-        return err[void, ParseError](`evSym`.err)
+        return err[void, ParseError](`evSym`.err[])
       if `evSym`.kind != ceNodeBegin:
         return err[void, ParseError](
           initError(peParseExpected, `evSym`.span,
@@ -636,13 +636,13 @@ macro deriveDecode*(T: typedesc): untyped =
                           "unexpected EOF in children block"))
             of ceError:
               discard advance(`cSym`)
-              return err[void, ParseError](`childPeekSym`.err)
+              return err[void, ParseError](`childPeekSym`.err[])
             else:
               discard advance(`cSym`)
         of ceNodeEnd:
           break
         of ceError:
-          return err[void, ParseError](`evSym2`.err)
+          return err[void, ParseError](`evSym2`.err[])
         of ceEof:
           return err[void, ParseError](
             initError(peParseExpected, `evSym2`.span,

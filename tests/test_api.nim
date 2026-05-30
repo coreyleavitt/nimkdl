@@ -27,7 +27,7 @@ suite "decode[T] — E2 tracer (single node)":
 suite "encode[T] — single node":
 
   test "single typed object encodes to wire bytes":
-    let bytes = encode(Service(name: "web", port: 80))
+    let bytes = encode(Service(name: "web", port: 80)).get
     let r = decode[Service](bytes)
     check r.isOk
     check r.get.name == "web"
@@ -54,7 +54,7 @@ suite "encode[seq[T]] — multi-node":
   test "seq encodes to multiple nodes that decode back":
     let v0 = @[Service(name: "web", port: 80),
                Service(name: "api", port: 443)]
-    let bytes = encode(v0)
+    let bytes = encode(v0).get
     let r = decode[seq[Service]](bytes)
     check r.isOk
     check r.get.len == 2

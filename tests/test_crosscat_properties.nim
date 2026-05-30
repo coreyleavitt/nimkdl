@@ -58,7 +58,7 @@ proc cat2RoundtripDoc[T](src: string): KdlDoc =
   ## Path B: decode[T] src → T → encode[T] → re-parse.
   let r = decode[T](src)
   doAssert r.isOk, "cat2 path: decode[T](B) must succeed for P9 inputs"
-  let bytes = encode(r.get)
+  let bytes = encode(r.get).get
   let r2 = parse(bytes)
   doAssert r2.isOk, "cat2 path: encode[T] output must be reparseable"
   r2.get
@@ -80,7 +80,7 @@ suite "P9 — Cat 2 ↔ Cat 3 agreement on T-shaped input":
     with Settings(maxExamples: 200, testId: "p9-service")
     given name in strings(1, 32), port in integers(0, 65535)
     let v = Service(name: name, port: port)
-    let src = encode(v)
+    let src = encode(v).get
     let docA = cat3RoundtripDoc(src)
     let docB = cat2RoundtripDoc[Service](src)
     ensure docEqual(docA, docB)
@@ -94,7 +94,7 @@ suite "P9 — Cat 2 ↔ Cat 3 agreement on T-shaped input":
     var items: seq[Item] = @[]
     for ln in itemNames: items.add(Item(label: ln))
     let v = Catalog(name: catName, items: items)
-    let src = encode(v)
+    let src = encode(v).get
     let docA = cat3RoundtripDoc(src)
     let docB = cat2RoundtripDoc[Catalog](src)
     ensure docEqual(docA, docB)
@@ -119,7 +119,7 @@ suite "P10 — Cat 1 push consistency (parse vs referenceInterpret)":
     with Settings(maxExamples: 200, testId: "p10-parse-vs-ref-service")
     given name in strings(1, 32), port in integers(0, 65535)
     let v = Service(name: name, port: port)
-    let src = encode(v)
+    let src = encode(v).get
     let viaFast = parse(src)
     let viaRef = referenceInterpret(src)
     ensure viaFast.isOk and viaRef.isOk
@@ -132,7 +132,7 @@ suite "P10 — Cat 1 push consistency (parse vs referenceInterpret)":
     var items: seq[Item] = @[]
     for ln in itemNames: items.add(Item(label: ln))
     let v = Catalog(name: catName, items: items)
-    let src = encode(v)
+    let src = encode(v).get
     let viaFast = parse(src)
     let viaRef = referenceInterpret(src)
     ensure viaFast.isOk and viaRef.isOk

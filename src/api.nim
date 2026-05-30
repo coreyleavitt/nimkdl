@@ -62,17 +62,31 @@ proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect.} =
     if r.isErr: return err[T, ParseError](r.getErr)
     ok[T, ParseError](v)
 
-proc encode*[T](v: T): string =
+proc encode*[T](v: T): Result[string, ParseError] =
   ## Encode `v` to KDL wire bytes.
   ##
   ## For object types with `{.kdlNode.}`, emits a single top-level node.
+  ## For `seq[U]` where U is `{.kdlNode.}`-tagged, emits one node per
+  ## element.
+  ##
+  ## ## Why Result-shaped
+  ##
+  ## Symmetric with `decode[T]`. Today the substrate's emitter trusts
+  ## the caller — `pushArgInt` / `pushArgString` / ... just append
+  ## bytes, no validation. So this proc currently always returns
+  ## `Ok(bytes)`. The structural commitment to a fallible-encode
+  ## signature is in place so that future validation cycles
+  ## (e.g. kdlReserved bounds: `(u8)-1` is semantically invalid)
+  ## can populate errors without a breaking API change. Picking
+  ## this over a bare `string` return resolved an open question in
+  ## docs/branch-rebuild-plan.md.
   mixin kdlEncode
   var e = newBufferEmitter()
   when T is seq:
     for elem in v: kdlEncode(elem, e)
   else:
     kdlEncode(v, e)
-  e.finish()
+  ok[string, ParseError](e.finish())
 
 proc decodeAll*[T](src: string):
     tuple[value: T, errors: seq[ParseError]] {.noSideEffect.} =

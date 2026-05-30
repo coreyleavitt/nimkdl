@@ -138,8 +138,8 @@ proc main() =
   let services = svcs.get
   block:
     let el = timeIt(5_000):
-      let r = encode(services)
-      discard r.get
+      let bytes = encode(services).get
+      discard bytes
     report("nkdl encode(seq[Service])", src.len, 5_000, el)
   echo ""
   echo "  apples-to-apples competitors:"
@@ -159,8 +159,8 @@ proc main() =
   let encOut = encode(servers).get
   block:
     let el = timeIt(5_000):
-      let r = encode(servers)
-      discard r.get
+      let bytes = encode(servers).get
+      discard bytes
     report("nkdl encode(seq[Server])", encOut.len, 5_000, el)
   echo ""
   echo "  No directly comparable harness — facet-kdl's bench is flat-only."

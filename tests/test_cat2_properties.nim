@@ -43,7 +43,7 @@ suite "P7 — typed-T encode-decode identity (forAll)":
     with Settings(maxExamples: 300, testId: "p7-service")
     given name in strings(1, 32), port in integers(0, 65535)
     let v0 = Service(name: name, port: port)
-    let r = decode[Service](encode(v0))
+    let r = decode[Service](encode(v0).get)
     ensure r.isOk
     ensure r.get.name == v0.name
     ensure r.get.port == v0.port
@@ -57,7 +57,7 @@ suite "P7 — typed-T encode-decode identity (forAll)":
     given x in floats(-1e9, 1e9, allowNan = false),
           y in floats(-1e9, 1e9, allowNan = false)
     let v0 = Pt(x: x, y: y)
-    let r = decode[Pt](encode(v0))
+    let r = decode[Pt](encode(v0).get)
     ensure r.isOk
     ensure r.get.x == v0.x
     ensure r.get.y == v0.y
@@ -70,7 +70,7 @@ suite "P7 — typed-T encode-decode identity (forAll)":
       Note(body: body, pin: some(pinV))
     else:
       Note(body: body, pin: none(int))
-    let r = decode[Note](encode(v0))
+    let r = decode[Note](encode(v0).get)
     ensure r.isOk
     ensure r.get.body == v0.body
     ensure r.get.pin == v0.pin
@@ -82,7 +82,7 @@ suite "P7 — typed-T encode-decode identity (forAll)":
     var items: seq[Item] = @[]
     for ln in itemNames: items.add(Item(label: ln))
     let v0 = Catalog(name: catName, items: items)
-    let r = decode[Catalog](encode(v0))
+    let r = decode[Catalog](encode(v0).get)
     ensure r.isOk
     ensure r.get.name == v0.name
     ensure r.get.items.len == v0.items.len
@@ -95,8 +95,8 @@ suite "P8 — encode determinism (forAll)":
     with Settings(maxExamples: 300, testId: "p8-service")
     given name in strings(1, 32), port in integers(0, 65535)
     let v = Service(name: name, port: port)
-    let a = encode(v)
-    let b = encode(v)
+    let a = encode(v).get
+    let b = encode(v).get
     ensure a == b
 
   property "encode(Catalog) is deterministic across child order":
@@ -106,6 +106,6 @@ suite "P8 — encode determinism (forAll)":
     var items: seq[Item] = @[]
     for ln in itemNames: items.add(Item(label: ln))
     let v = Catalog(name: catName, items: items)
-    let a = encode(v)
-    let b = encode(v)
+    let a = encode(v).get
+    let b = encode(v).get
     ensure a == b

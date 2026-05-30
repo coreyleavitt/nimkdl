@@ -91,8 +91,16 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
   var doc = newDoc(sourcePath)
   doc.sourceText = c.source
   doc.preserveFormat = preserveFormat
-  var stack: seq[KdlNode] = @[]
-  var childHashes: seq[seq[Hash128]] = @[]
+  # Pre-size to amortize seq realloc on the hot path. Heuristics:
+  #  - top-level nodes ≈ token_count / 5 (one node ≈ name + entry +
+  #    terminator minimum). Tracks parser.estimateDocNodes.
+  #  - stack depth: 16 covers typical KDL nesting; deeper docs pay
+  #    one realloc.
+  let tokenCount = c.stream[].tokens.len
+  let estTopNodes = max(4, tokenCount div 5)
+  doc.nodes = newSeqOfCap[KdlNode](estTopNodes)
+  var stack = newSeqOfCap[KdlNode](16)
+  var childHashes = newSeqOfCap[seq[Hash128]](16)
   var slashdashDepth = 0
   while true:
     let ev = advance(c)
@@ -102,7 +110,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
       case ev.kind
       of ceSlashdashBegin: inc slashdashDepth
       of ceSlashdashEnd:   dec slashdashDepth
-      of ceError: return err[KdlDoc, ParseError](ev.err)
+      of ceError: return err[KdlDoc, ParseError](ev.err[])
       of ceEof:
         # Unbalanced — cursor should not normally produce this.
         doc.parseTopLevelCount = int32(doc.nodes.len)
@@ -203,7 +211,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
       doc.parseTopLevelCount = int32(doc.nodes.len)
       return ok[KdlDoc, ParseError](doc)
     of ceError:
-      return err[KdlDoc, ParseError](ev.err)
+      return err[KdlDoc, ParseError](ev.err[])
 
 proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
                   preserveFormat: bool = false):
@@ -215,8 +223,16 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
   var doc = newDoc(sourcePath)
   doc.sourceText = c.source
   doc.preserveFormat = preserveFormat
-  var stack: seq[KdlNode] = @[]
-  var childHashes: seq[seq[Hash128]] = @[]
+  # Pre-size to amortize seq realloc on the hot path. Heuristics:
+  #  - top-level nodes ≈ token_count / 5 (one node ≈ name + entry +
+  #    terminator minimum). Tracks parser.estimateDocNodes.
+  #  - stack depth: 16 covers typical KDL nesting; deeper docs pay
+  #    one realloc.
+  let tokenCount = c.stream[].tokens.len
+  let estTopNodes = max(4, tokenCount div 5)
+  doc.nodes = newSeqOfCap[KdlNode](estTopNodes)
+  var stack = newSeqOfCap[KdlNode](16)
+  var childHashes = newSeqOfCap[seq[Hash128]](16)
   var slashdashDepth = 0
   while true:
     let ev = advance(c)
@@ -225,7 +241,7 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
       of ceSlashdashBegin: inc slashdashDepth
       of ceSlashdashEnd:   dec slashdashDepth
       of ceError:
-        result.errors.add(ev.err)
+        result.errors.add(ev.err[])
         # On error, drop any open slashdash brackets — recovery clears them.
         slashdashDepth = 0
       of ceEof: break
@@ -323,7 +339,7 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
       doc.parseTopLevelCount = int32(doc.nodes.len)
       break
     of ceError:
-      result.errors.add(ev.err)
+      result.errors.add(ev.err[])
       # Don't pop stack frames — the cursor's recovery decides what
       # event to emit next. If it emits a NodeEnd, we'll pop then.
       # Premature popping would close ancestor nodes that may still
