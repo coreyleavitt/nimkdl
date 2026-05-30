@@ -1,6 +1,6 @@
 # Benchmarks
 
-On a 5.6KB realistic KDL config that exercises every language feature, nkdl parses about **1.54× faster than [ckdl](https://github.com/tjol/ckdl)** (a hand-written C parser), **~7× faster than [knus](https://crates.io/crates/knus)**, and **~16× faster than [kdl-rs](https://github.com/kdl-org/kdl-rs)**. On typed encode `encode[seq[Service]]` is **2.34× faster than [facet-kdl](https://crates.io/crates/facet-kdl)**'s `to_string` (56.1K vs 24.0K ops/s). On typed decode knus's serde-derive edges us 1.22× (20.5K vs 16.8K ops/s). Of the 338 files in the kdl-org reference corpus we accept **243** — the highest of any parser tested. Same container, same input bytes, same iteration counts.
+On a 5.6KB realistic KDL config that exercises every language feature, nkdl parses about **1.54× faster than [ckdl](https://github.com/tjol/ckdl)** (a hand-written C parser), **~7× faster than [knus](https://crates.io/crates/knus)**, and **~16× faster than [kdl-rs](https://github.com/kdl-org/kdl-rs)**. On typed encode `encode[seq[Service]]` is **2.34× faster than [facet-kdl](https://crates.io/crates/facet-kdl)**'s `to_string` (56.1K vs 24.0K ops/s). On typed decode knus's serde-derive edges us 1.22× (20.5K vs 16.8K ops/s). On the [kdl-org reference test corpus](https://github.com/kdl-org/kdl/tree/main/tests/test_cases) (338 files: 243 should-parse + 95 should-reject) nkdl is **338/338 conformant** — every should-parse file accepted, every should-reject file correctly rejected. Same container, same input bytes, same iteration counts.
 
 ![Headline comparison](docs/charts/headline.svg)
 
@@ -154,16 +154,20 @@ Throughput on the [kdl-org reference test corpus](https://github.com/kdl-org/kdl
 
 Average file is ~21 bytes — most are single-line edge cases. Per-call fixed overhead dominates over byte throughput, so the headline metric is microseconds per parse call (lower is better).
 
-| Parser    | μs / file  | files / sec | accepted / 338 |
-|-----------|-----------:|------------:|---------------:|
-| ckdl      | **0.47**   | 2,143K      | 240            |
-| nkdl      | 1.14       | 878K        | **243**        |
-| kdl-rs    | 7.14       | 140K        | 242            |
-| knus      | 13.54      | 74K         | 111            |
+| Parser    | μs / file  | files / sec | accepted (raw ok=N) | conformance               |
+|-----------|-----------:|------------:|--------------------:|---------------------------|
+| ckdl      | **0.47**   | 2,143K      | 240 / 338           | ≤ 240/243 should-parse    |
+| nkdl      | 1.14       | 878K        | 243 / 338           | **338 / 338 (verified)**  |
+| kdl-rs    | 7.14       | 140K        | 242 / 338           | ≤ 242/243 should-parse    |
+| knus      | 13.54      | 74K         | 111 / 338           | ≤ 111/243 should-parse    |
+
+The 338 fixtures split into 243 should-parse and 95 should-reject (negative tests). The "accepted" column from the raw `ok=N/338` bench output counts only files that parsed without error — correctly rejecting a should-reject file is the right answer there, and produces a `parse() → Err`.
+
+nkdl is **338/338 conformant** — verified by `tests/test_conformance.nim` which checks both directions per fixture (parse-and-match-expected for should-parse, parse-must-error for should-reject). The competitor `accepted / 243` columns above are upper bounds: their bench harness reports a single `ok=N` count without splitting should-parse hits from accidental should-reject acceptances. Even at the upper bound, ckdl misses at least 3 should-parse files, kdl-rs misses at least 1, and knus misses at least 132 (~54% of the should-parse set).
+
+ckdl is fastest per-file (no AST construction); nkdl follows at 2.43× ckdl's per-call time with full spec conformance. knus's 132-file gap is a real correctness signal, not a perf artifact: knus does not implement some KDL v2 features the conformance suite exercises.
 
 (facet-kdl skipped — typed-decode-only, no usable untyped path for arbitrary-shape corpus.)
-
-ckdl is fastest per-file (no AST construction); nkdl follows at 2.43× ckdl's per-call time but with the highest spec coverage in the table — 243 of 338 fixtures accepted, matching the kdl-org corpus's own "should parse" count exactly. knus's 111-accepted gap (~130 spec-valid files rejected) is a real correctness signal, not a perf artifact: knus does not implement some KDL v2 features the conformance suite exercises.
 
 Source: `benchmarks/comparisons/last-corpus.txt` (regenerate with `benchmarks/comparisons/run.sh corpus`).
 
