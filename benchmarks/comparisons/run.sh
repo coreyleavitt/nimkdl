@@ -51,7 +51,7 @@ run_nkdl() {
   # direct parseInto) + typed encode (both legacy and direct encodeFrom,
   # flat + nested shapes). All in one container build so the comparison
   # transcript is contiguous with the Rust/C harnesses below.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$REPO_ROOT:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -72,7 +72,7 @@ run_nkdl_legacy() {
   echo "================================================================"
   echo "  nkdl (legacy parse-only bench — for historical continuity)"
   echo "================================================================"
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$REPO_ROOT:/work:Z" -w /work \
     docker.io/nimlang/nim:2.2.0 \
     sh -c 'nim c --hints:off -d:release -d:lto -p:src benchmarks/bench.nim 2>&1 | tail -1 && ./benchmarks/bench'
@@ -84,7 +84,7 @@ run_ckdl() {
   echo "  ckdl (C, event-drain)"
   echo "================================================================"
   # Build ckdl + the bench harness in a single gcc image.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/ckdl:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -113,7 +113,7 @@ run_knus() {
   echo "  knus (Rust, serde-style)"
   echo "================================================================"
   # knus 3.x derive uses edition2024; needs Rust >= 1.85.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/knus:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -131,7 +131,7 @@ run_facet_kdl() {
   echo "  facet-kdl (Rust, knus successor per knus README)"
   echo "================================================================"
   # facet 0.42 requires rustc 1.89+ per its workspace pins.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/facet-kdl:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -148,7 +148,7 @@ run_kdl_rs() {
   echo "================================================================"
   echo "  kdl-rs (Rust, canonical impl)"
   echo "================================================================"
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/kdl-rs:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -173,7 +173,7 @@ run_memory() {
   echo "================================================================"
 
   # nkdl mem — build once, run per fixture.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$REPO_ROOT:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -189,7 +189,7 @@ run_memory() {
     '
 
   # ckdl mem — build alongside the existing bench binary.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/ckdl:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -214,7 +214,7 @@ run_memory() {
     '
 
   # knus mem.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/knus:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -230,7 +230,7 @@ run_memory() {
 
   # facet-kdl mem (only homogeneous-services is supported; others
   # print a SKIPPED line — see harness comment for the asymmetry).
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/facet-kdl:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -245,7 +245,7 @@ run_memory() {
     '
 
   # kdl-rs mem.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/kdl-rs:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -267,7 +267,7 @@ run_corpus() {
   echo "================================================================"
 
   # nkdl corpus
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$REPO_ROOT:/work:Z" \
     -v "$CORPUS_STAGE:/corpus:Z" \
     -w /work \
@@ -281,7 +281,7 @@ run_corpus() {
     '
 
   # ckdl corpus — builds ckdl from source if not already present.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/ckdl:/work:Z" \
     -v "$CORPUS_STAGE:/corpus:Z" \
     -w /work \
@@ -304,7 +304,7 @@ run_corpus() {
     '
 
   # knus corpus.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/knus:/work:Z" \
     -v "$CORPUS_STAGE:/corpus:Z" \
     -w /work \
@@ -317,7 +317,7 @@ run_corpus() {
     '
 
   # kdl-rs corpus.
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/kdl-rs:/work:Z" \
     -v "$CORPUS_STAGE:/corpus:Z" \
     -w /work \
@@ -339,7 +339,7 @@ run_edit() {
   echo "================================================================"
 
   # nkdl
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$REPO_ROOT:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \
@@ -353,7 +353,7 @@ run_edit() {
     '
 
   # kdl-rs
-  $CONTAINER_RUNTIME run --rm \
+  $CONTAINER_RUNTIME run --rm --network host \
     -v "$HERE/kdl-rs:/work:Z" \
     -v "$STAGE:/fixtures:Z" \
     -w /work \

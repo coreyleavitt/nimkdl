@@ -5,7 +5,9 @@
 [![Conformance](https://img.shields.io/endpoint?url=https://coreyleavitt.github.io/nkdl/conformance-badge.json)](BENCHMARK.md)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue)](LICENSE)
 
-A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. On realistic configs nkdl parses about 1.58× faster than [ckdl](https://github.com/tjol/ckdl) (a hand-written C parser) and 9-20× faster than the Rust options ([knus](https://crates.io/crates/knus), [kdl-rs](https://github.com/kdl-org/kdl-rs)). On typed decode `parseInto[T]` edges knus's serde-derive (23.3K vs 21.8K ops/s). On typed encode `encodeFrom[T]` is **4.87× faster than [facet-kdl](https://crates.io/crates/facet-kdl)** (139.6K vs 28.7K). One grammar, 338/338 conformance fixtures. Per-fixture breakdown and methodology in [BENCHMARK.md](BENCHMARK.md).
+A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. Three-categories architecture: streaming events (Cat 1), typed-derive `decode[T]` / `encode[T]` (Cat 2), and untyped DOM `parse()` / `emitDoc` (Cat 3) are independent — pay only for what you use.
+
+On realistic configs nkdl parses about **1.54× faster than [ckdl](https://github.com/tjol/ckdl)** (a hand-written C parser), **~7× faster than [knus](https://crates.io/crates/knus)**, and **~16× faster than [kdl-rs](https://github.com/kdl-org/kdl-rs)**. On typed encode `encode[seq[Service]]` is **2.34× faster than [facet-kdl](https://crates.io/crates/facet-kdl)**'s `to_string` (56.1K vs 24.0K ops/s). On typed decode knus's serde-derive edges us 1.22× (20.5K vs 16.8K ops/s). Highest spec coverage of any parser tested: **243/338** kdl-org reference fixtures (vs ckdl 240, kdl-rs 242, knus 111). On deep + large synthetic stressors ckdl pulls ahead. Per-fixture breakdown, honest regression disclosure vs the pre-rewrite numbers, and methodology in [BENCHMARK.md](BENCHMARK.md).
 
 ## Install
 
