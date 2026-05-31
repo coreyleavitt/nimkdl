@@ -109,3 +109,46 @@ suite "P8 — encode determinism (forAll)":
     let a = encode(v).get
     let b = encode(v).get
     ensure a == b
+
+suite "P9b — slashdash injection invariance (typed decode)":
+  # Hardens the class of bug found in review: deriveDecode had no
+  # slashdash tracking, so `/-`-prefixed entries/children decoded as
+  # real. Slashdash means "comment out" — injecting it MUST NOT change
+  # the decoded value. We fuzz slashdash STRUCTURE (how many, where)
+  # around fixed always-valid real content; content fidelity is P7's
+  # job. Cat 3 `buildDoc` suppresses identically — the surfaces agree.
+
+  property "slashdashed args/props/children never change a decoded Service":
+    with Settings(maxExamples: 400, testId: "p9b-slashdash-service")
+    given port in integers(0, 65535),
+          nLeadArg in integers(0, 3),
+          nMidProp in integers(0, 3),
+          nTrailProp in integers(0, 3),
+          nChild in integers(0, 2)
+    var src = "service"
+    for i in 0 ..< nLeadArg: src.add " /-\"j" & $i & "\""   # slashdashed args
+    src.add " \"web\""                                      # the one real arg
+    for i in 0 ..< nMidProp: src.add " /-m" & $i & "=" & $i # slashdashed props
+    src.add " port=" & $port                                # the one real prop
+    for i in 0 ..< nTrailProp: src.add " /-t" & $i & "=" & $i
+    for i in 0 ..< nChild: src.add " /-{ junk \"x\" }"      # slashdashed children
+    let r = decode[Service](src)
+    ensure r.isOk
+    ensure r.get.name == "web"
+    ensure r.get.port == port
+
+  property "slashdashed child nodes never change a decoded Catalog":
+    with Settings(maxExamples: 300, testId: "p9b-slashdash-catalog")
+    given nReal in integers(0, 5), nLeadJunk in integers(0, 3),
+          interleaveJunk in booleans()
+    var src = "catalog \"c\" {\n"
+    for i in 0 ..< nLeadJunk: src.add "  /-item \"j" & $i & "\"\n"
+    for i in 0 ..< nReal:
+      src.add "  item \"r" & $i & "\"\n"
+      if interleaveJunk: src.add "  /-item \"x" & $i & "\"\n"
+    src.add "}\n"
+    let r = decode[Catalog](src)
+    ensure r.isOk
+    ensure r.get.items.len == nReal
+    for i in 0 ..< nReal:
+      ensure r.get.items[i].label == "r" & $i

@@ -270,6 +270,7 @@ macro deriveDecode*(T: typedesc): untyped =
   let evSym = ident("ev")
   let evSym2 = ident("ev2")
   let argIdxSym = ident("argIdx")
+  let sdDepthSym = ident("sdDepth")
 
   # Collect kdlArg + kdlProp + kdlChild fields by pragma role.
   type ChildKind = enum ckSingle, ckSeq
@@ -609,14 +610,33 @@ macro deriveDecode*(T: typedesc): untyped =
           initError(peParseExpected, `evSym`.span,
                     "expected node named '" & `wireNameLit` & "'"))
       var `argIdxSym` = 0
+      var `sdDepthSym` = 0
       while true:
         let `evSym2` = advance(`cSym`)
+        # Inside a `/-` slashdash bracket all decoding is suppressed; we
+        # only track Begin/End nesting to find the matching close. The
+        # cursor still emits the slashdashed entry/children events, so a
+        # naive loop would decode them as real (the bug this guards). Cat 3
+        # `buildDoc` does the identical thing — the two surfaces must agree.
+        if `sdDepthSym` > 0:
+          case `evSym2`.kind
+          of ceSlashdashBegin: inc `sdDepthSym`
+          of ceSlashdashEnd:   dec `sdDepthSym`
+          of ceError: return err[void, ParseError](`evSym2`.err[])
+          of ceEof:
+            return err[void, ParseError](
+              initError(peParseExpected, `evSym2`.span,
+                        "unexpected EOF inside slashdash"))
+          else: discard
+          continue
         case `evSym2`.kind
         of ceArg:
           `argCase`
           inc `argIdxSym`
         of ceProp:
           `propDispatch`
+        of ceSlashdashBegin:
+          inc `sdDepthSym`
         of ceChildrenBegin:
           # Inner child-loop: drives until ceChildrenEnd. For each
           # ceNodeBegin we peek (so the recursive kdlDecode can read
@@ -630,6 +650,23 @@ macro deriveDecode*(T: typedesc): untyped =
               break
             of ceNodeBegin:
               `childDispatchBody`
+            of ceSlashdashBegin:
+              # A `/-` slashdashed child node (or block) inside a real
+              # children block: consume the whole slashdashed span without
+              # dispatching, tracking nesting to its matching close.
+              discard advance(`cSym`)
+              var `sdDepthSym` = 1
+              while `sdDepthSym` > 0:
+                let `evSym2` = advance(`cSym`)
+                case `evSym2`.kind
+                of ceSlashdashBegin: inc `sdDepthSym`
+                of ceSlashdashEnd:   dec `sdDepthSym`
+                of ceError: return err[void, ParseError](`evSym2`.err[])
+                of ceEof:
+                  return err[void, ParseError](
+                    initError(peParseExpected, `evSym2`.span,
+                              "unexpected EOF inside slashdash"))
+                else: discard
             of ceEof:
               return err[void, ParseError](
                 initError(peParseExpected, `childPeekSym`.span,

@@ -562,3 +562,65 @@ suite "derive_decode — D5: perfect-hash dispatch (>8 kdlProp fields)":
     var w: Wide
     let res = kdlDecode(w, fix.cursor)
     check res.isErr
+
+suite "derive_decode — slashdash entry/children suppression (regression)":
+  # Review finding #1: deriveDecode had no slashdash tracking, so a `/-`
+  # prefixed entry/children block was decoded as if real — corrupting the
+  # value or raising a spurious "extra positional argument" error.
+  # buildDoc (Cat 3) suppresses these correctly; Cat 2 must agree.
+
+  type SdTag {.kdlNode: "tag".} = object
+    label {.kdlArg.}: string
+  deriveDecode(SdTag)
+
+  type SdSvc {.kdlNode: "service".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+  deriveDecode(SdSvc)
+
+  type SdChild {.kdlNode: "child".} = object
+    tag {.kdlArg.}: string
+  deriveDecode(SdChild)
+  type SdParent {.kdlNode: "parent".} = object
+    kids {.kdlChild.}: seq[SdChild]
+  deriveDecode(SdParent)
+
+  test "slashdashed arg before a real arg is ignored":
+    let fix = mkCursor("tag /-\"skip\" \"keep\"")
+    var t: SdTag
+    let res = kdlDecode(t, fix.cursor)
+    check res.isOk
+    check t.label == "keep"
+
+  test "slashdashed prop is ignored; the real prop wins":
+    let fix = mkCursor("service \"web\" /-port=99 port=80")
+    var s: SdSvc
+    let res = kdlDecode(s, fix.cursor)
+    check res.isOk
+    check s.port == 80
+
+  test "trailing slashdashed (unknown-named) prop is ignored, not errored":
+    let fix = mkCursor("service \"web\" port=80 /-extra=1")
+    var s: SdSvc
+    let res = kdlDecode(s, fix.cursor)
+    check res.isOk
+    check s.name == "web"
+    check s.port == 80
+
+  test "slashdashed children block is ignored":
+    let fix = mkCursor("parent /-{ child \"x\" }")
+    var p: SdParent
+    let res = kdlDecode(p, fix.cursor)
+    check res.isOk
+    check p.kids.len == 0
+
+  test "slashdashed child node INSIDE a real children block is ignored":
+    # The nested-loop variant — found by the P9b property, missed by the
+    # whole-block case above. A `/-`'d child among real children must not
+    # be decoded into the seq.
+    let fix = mkCursor("parent {\n  /-child \"junk\"\n  child \"real\"\n}")
+    var p: SdParent
+    let res = kdlDecode(p, fix.cursor)
+    check res.isOk
+    check p.kids.len == 1
+    check p.kids[0].tag == "real"
