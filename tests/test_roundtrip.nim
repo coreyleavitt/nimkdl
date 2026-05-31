@@ -65,6 +65,23 @@ suite "round-trip — D15: encode-decode identity":
     check v1.x == v0.x
     check v1.y == v0.y
 
+  test "Pt — full-mantissa floats round-trip (regression: $float must be round-trip-safe)":
+    # Legacy Nim `$float` emits 16 significant digits, but ~45% of full-
+    # mantissa doubles need 17 and silently re-parse to a NEIGHBORING
+    # double — a latent encode-decode identity violation invisible to
+    # short-decimal example/conformance tests. Guards the shortest-
+    # round-trippable formatter (numlit.formatFloat via addFloatRoundtrip).
+    const counterexample = cast[float64](0x2CA92B3ED4AFDA78'u64)
+    check roundtrip(Pt(x: counterexample, y: 0.0)).x == counterexample
+    var seed = 0x9E3779B97F4A7C15'u64
+    for i in 0 ..< 256:
+      seed = seed * 6364136223846793005'u64 + 1442695040888963407'u64
+      let f = cast[float64](seed)
+      if f != f or f == Inf or f == NegInf: continue   # skip nan/inf
+      let v1 = roundtrip(Pt(x: f, y: f))
+      check v1.x == f
+      check v1.y == f
+
   type Item {.kdlNode: "item".} = object
     label {.kdlArg.}: string
 

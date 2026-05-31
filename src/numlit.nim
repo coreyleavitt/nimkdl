@@ -28,7 +28,7 @@
 ##   returns the number of bytes consumed; zero means failure. No
 ##   `try`/`except` needed, so callers can stay `{.noSideEffect.}`.
 
-import std/[math, parseutils]
+import std/[formatfloat, math, parseutils]
 
 import ./lexer
 import ./spans
@@ -247,15 +247,28 @@ func formatInt*(v: int64): string {.inline.} =
 
 func formatFloat*(v: float64): string =
   ## Canonical KDL v2 float form. Non-finite values use the spec
-  ## keyword bytes (#inf / #-inf / #nan); finite values use Nim's
-  ## stdlib `$float` formatter which inserts the `.0` fractional
-  ## marker for whole-valued floats (matches the spec's typed-float
-  ## disambiguation rule — `2.0`, not `2`).
+  ## keyword bytes (#inf / #-inf / #nan).
+  ##
+  ## Finite values use `std/formatfloat.addFloatRoundtrip` — the stdlib
+  ## Schubfach shortest-correctly-rounded formatter, called DIRECTLY
+  ## (not via `$float`, which is the legacy `c_sprintf` path unless
+  ## `-d:nimPreviewFloatRoundtrip` is set). Two reasons:
+  ##
+  ## 1. **Round-trip safety is a spec obligation, not a build flag.**
+  ##    Legacy `$float` emits 16 significant digits; ~45% of full-
+  ##    mantissa doubles need 17 and silently re-parse to a NEIGHBOURING
+  ##    double, breaking encode→decode identity (P7). Calling the
+  ##    roundtrip proc directly makes that guarantee independent of how
+  ##    a downstream consumer compiles nkdl — a global `-d:` flag would
+  ##    only fix nkdl's own builds, not a library consumer's.
+  ## 2. It still inserts the `.0` fractional marker for whole-valued
+  ##    floats (`2.0`, not `2`), preserving KDL's typed-float
+  ##    disambiguation rule.
   case v.classify
-  of fcNan:    KdlKeywordLiterals[klNan]
-  of fcInf:    KdlKeywordLiterals[klInf]
-  of fcNegInf: KdlKeywordLiterals[klNegInf]
-  else:        $v
+  of fcNan:    result = KdlKeywordLiterals[klNan]
+  of fcInf:    result = KdlKeywordLiterals[klInf]
+  of fcNegInf: result = KdlKeywordLiterals[klNegInf]
+  else:        result.addFloatRoundtrip(v)
 
 func divMod128by10(hi, lo: var uint64): uint64 =
   ## In-place `(hi:lo) := (hi:lo) div 10`; returns the remainder 0..9.
