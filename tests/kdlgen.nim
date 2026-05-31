@@ -266,3 +266,32 @@ proc wsEscapeStringSurfaces*(): Strategy[ValueSurface] =
           if i < base.len: t.add base[i]
         t.add "\""
         ValueSurface(text: t, value: newStringValue(base))))
+
+# ---------------------------------------------------------------------------
+# Slice 10 — raw strings
+#
+#   raw-string := '#' raw-string-quotes '#' | '#' raw-string '#'
+#   single-line-raw-string-char := unicode - newline - disallowed-literal
+# No escapes — the body is verbatim. We use a body with no '#', so the close
+# `"#…#` only matches at the wrapper regardless of hash count; '"' and '\'
+# appear literally. value = the body bytes.
+# ---------------------------------------------------------------------------
+
+proc rawStringSurfaces*(): Strategy[ValueSurface] =
+  ## `#…#"body"#…#` with 1–5 hashes. Per single-line-raw-string-body, a body
+  ## may NOT be a lone `"` nor start with `""` (that forms the `"""` marker),
+  ## so we draw one of its three valid shapes: empty, non-quote-first, or
+  ## one-quote-then-non-quote. `"` (mid/end) and `\` appear verbatim; no `#`
+  ## in the body so any hash count closes only at the wrapper. value = body.
+  # single-line-raw-string-body := '' | (char-'"') char*? | '"' (char-'"') char*?
+  let nonQuote = strings(intervals([(0x20'i32, 0x21'i32), (0x24'i32, 0x7E'i32)]), 1, 1)
+  let full     = strings(intervals([(0x20'i32, 0x22'i32), (0x24'i32, 0x7E'i32)]), 0, 14)
+  let bodyGen = frequency([
+    (1, just("")),                                                 # ''
+    (8, map(nonQuote, full, proc(a, b: string): string = a & b)),  # (char-'"') char*?
+    (3, map(nonQuote, full, proc(a, b: string): string = "\"" & a & b)),  # '"' (char-'"') char*?
+  ])
+  map(integers(1, 5), bodyGen, proc(n: int, body: string): ValueSurface =
+    let hashes = repeat('#', n)
+    ValueSurface(text: hashes & "\"" & body & "\"" & hashes,
+                 value: newStringValue(body)))

@@ -68,3 +68,8 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     with Settings(maxExamples: 500, testId: "sc-ws-escape")
     given s in wsEscapeStringSurfaces()
     ensure denotes(s)
+
+  property "raw strings carry their body verbatim":
+    with Settings(maxExamples: 500, testId: "sc-raw-string")
+    given s in rawStringSurfaces()
+    ensure denotes(s)
