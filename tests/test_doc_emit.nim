@@ -217,3 +217,22 @@ suite "doc_emit — B5: preserve mode (clean subtree → source bytes)":
     var e = newBufferEmitter()
     emitDocPreserve(doc, e)
     check e.finish() == src
+
+suite "doc_emit — encode(doc, mode) one-call public API":
+
+  test "encode(doc) defaults to emPreserve (byte-lossless)":
+    let src = "host \"hi\"  // greeting goes here\n"
+    let doc = parse(src, preserveFormat = true).get
+    check encode(doc) == src
+
+  test "encode(doc, emPreserve) byte-preserves parsed source":
+    let src = "node arg=1 {\n  child \"x\"\n}\n"
+    let doc = parse(src, preserveFormat = true).get
+    check encode(doc, emPreserve) == src
+
+  test "encode(doc, emPretty) matches the canonical emitDoc path":
+    let src = "foo bar=2\n"
+    let doc = parse(src).get
+    var e = newBufferEmitter()
+    emitDoc(doc, e)
+    check encode(doc, emPretty) == e.finish()

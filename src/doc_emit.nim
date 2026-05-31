@@ -173,3 +173,40 @@ proc emitDocPreserve*(doc: KdlDoc, e: var BufferEmitter) =
   if cursor < doc.sourceText.len:
     e.pushPreservedBytes(doc.sourceText.toOpenArray(
       cursor, doc.sourceText.len - 1))
+
+# ---------------------------------------------------------------------------
+# Public one-call surface: encode(doc, mode)
+# ---------------------------------------------------------------------------
+
+type EmitMode* = enum
+  ## Selects how `encode(doc, mode)` renders a `KdlDoc` to text.
+  emPreserve  ## Byte-lossless. Clean subtrees splice their verbatim
+              ## source bytes (comments, exact whitespace, original
+              ## number bases); only mutated subtrees re-emit canonical.
+              ## Requires the doc to come from `parse(src,
+              ## preserveFormat = true)` for spans to be populated.
+  emPretty    ## Canonical, indented formatting — ignores preserved
+              ## source bytes and re-derives layout from the AST.
+  # A canonical *compact* mode (no indentation, `;` separators) is
+  # planned but not yet built — see the compact-emitter follow-on. When
+  # it lands, add `emCompact` here; the `case` in `encode` below is
+  # deliberately non-exhaustive-by-construction so the compiler will
+  # force the new arm to be handled rather than silently defaulted.
+
+proc encode*(doc: KdlDoc, mode = emPreserve): string =
+  ## Render `doc` to KDL text in one call — the Cat 3 OUT entry point,
+  ## hiding the `BufferEmitter` lifecycle.
+  ##
+  ## `emPreserve` (the default) is byte-lossless for an unmutated doc
+  ## parsed with `preserveFormat = true`: `encode(parse(src,
+  ## preserveFormat = true).get) == src`. `emPretty` re-derives
+  ## canonical layout from the AST.
+  ##
+  ## Doc emission is infallible given an in-memory `KdlDoc`, so this
+  ## returns a plain `string` (unlike the typed `encode[T]`, which is
+  ## `Result`-shaped because it has a structural validation path).
+  var e = newBufferEmitter()
+  case mode
+  of emPreserve: emitDocPreserve(doc, e)
+  of emPretty:   emitDoc(doc, e)
+  e.finish()

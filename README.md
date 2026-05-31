@@ -52,7 +52,7 @@ const builtins = embed[seq[Service]]("services.kdl").get
 | Layer | Surface | Notes |
 |---|---|---|
 | Parse | `parse(src, preserveFormat = false) -> Result[KdlDoc, ParseError]` | KDL v2 text to AST. `preserveFormat` is opt-in for `emPreserve`. |
-| Encode | `encode(doc, mode = emPreserve) -> string` | `emPreserve` is byte-lossless; `emPretty` and `emCompact` are canonical. |
+| Encode | `encode(doc, mode = emPreserve) -> string` | `emPreserve` is byte-lossless; `emPretty` is canonical indented. (`emCompact`, canonical minimal, is planned — [#26](https://github.com/coreyleavitt/nkdl/issues/26).) |
 | Decode | `decode[T](src) -> Result[T, ParseError]` | Typed decode for types in a `kdl:` block. |
 | Embed | `embed[T]("path")` | `staticRead` plus decode at compile time. Bad input fails the build. |
 | Query | `path(items, [pred].chain)` | Compile-time field-checked filter and access. |

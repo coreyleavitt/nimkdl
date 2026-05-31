@@ -71,6 +71,7 @@ import ./grammar
 import ./pragmas
 import ./path
 import ./api
+import ./doc_emit
 import ./kdl_block
 # Note: ./lexer and ./typed_parser are NOT imported here on purpose.
 # Lexer keeps Token / TokenKind / Lexer / lex out of the `import nkdl`
@@ -103,6 +104,11 @@ export parser
 # embed[T] entry points. Routes through derive-emitted kdlEncode /
 # kdlDecode for the user's `{.kdlNode.}`-tagged types.
 export api
+
+# Cat 3 OUT — AST → text. `encode(doc, mode = emPreserve)` is the
+# one-call entry (the `EmitMode`-overloaded sibling of typed `encode[T]`);
+# `emitDoc` / `emitDocPreserve` are the lower-level BufferEmitter forms.
+export doc_emit
 
 # kdl: block macro orchestrator — wraps a region of type
 # definitions and emits deriveEncode + deriveDecode for each
