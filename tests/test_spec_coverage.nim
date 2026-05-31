@@ -63,3 +63,8 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     with Settings(maxExamples: 500, testId: "sc-unicode-escape")
     given s in unicodeEscapeSurfaces()
     ensure denotes(s)
+
+  property "ws-escape line continuations elide (value unchanged)":
+    with Settings(maxExamples: 500, testId: "sc-ws-escape")
+    given s in wsEscapeStringSurfaces()
+    ensure denotes(s)

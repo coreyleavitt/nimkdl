@@ -235,3 +235,34 @@ proc unicodeEscapeSurfaces*(): Strategy[ValueSurface] =
         let cp = int(s.runeAt(0))
         ValueSurface(text: "\"" & renderUnicodeEscape(cp, pad, upper) & "\"",
                      value: newStringValue(s)))
+
+# ---------------------------------------------------------------------------
+# Slice 9 — ws-escape (line continuation) in strings
+#
+#   ws-escape := '\\' (unicode-space | newline)+
+# A `\` followed by a run of whitespace/newlines (ASCII OR Unicode) elides
+# entirely. Injecting ws-escapes into a string must NOT change its value —
+# the generative form of the review-#8 fix. value = the base bytes.
+# ---------------------------------------------------------------------------
+
+const wsEscapeForms = [
+  "\\ ", "\\\t", "\\\n", "\\\r", "\\ \t",        # ASCII single + run
+  "\\\n  ",                                       # `\` + newline + indent
+  "\\\xC2\xA0",                                   # `\` + U+00A0 NBSP
+  "\\\xE2\x80\xA8",                               # `\` + U+2028 LINE SEPARATOR
+  "\\\xE2\x80\x89",                               # `\` + U+2009 THIN SPACE
+  "\\ \xC2\xA0\t",                                # `\` + mixed ASCII/Unicode run
+]
+
+proc wsEscapeStringSurfaces*(): Strategy[ValueSurface] =
+  ## Base string (a–z) with `\<ws+>` line-continuations injected at a random
+  ## subset of slots; every injection elides, so value = the base bytes.
+  strings(intervals([(0x61'i32, 0x7A'i32)]), 0, 8).flatMap(proc(base: string): Strategy[ValueSurface] =
+    lists(integers(0, wsEscapeForms.len), base.len + 1, base.len + 1).map(
+      proc(picks: seq[int]): ValueSurface =
+        var t = "\""
+        for i in 0 .. base.len:
+          if picks[i] > 0: t.add wsEscapeForms[picks[i] - 1]   # inject ws-escape
+          if i < base.len: t.add base[i]
+        t.add "\""
+        ValueSurface(text: t, value: newStringValue(base))))
