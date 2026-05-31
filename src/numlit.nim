@@ -49,27 +49,38 @@ func radixOf*(base: NumberBase): int {.inline.} =
   of nbOctal: 8
   of nbBinary: 2
 
-func decodeIntFromToken*(n: NumberPayload, span: Span):
+template numberText*(source: string, span: Span): untyped =
+  ## Borrowed view of a `tkNumber` token's source bytes — the raw
+  ## literal (sign + base prefix + digits + separators), identical to
+  ## the bytes `source[span]` covers. This replaces the old
+  ## `NumberPayload.text` heap string: the span already locates these
+  ## bytes, so the decoders read them in place with zero allocation.
+  ## A template (not a func) because `openArray` is a view and cannot
+  ## be returned or stored in a `let`.
+  source.toOpenArray(span.offset, span.endOffset - 1)
+
+func decodeIntFromToken*(text: openArray[char], base: NumberBase, span: Span):
     Result[int64, ParseError] {.inline.} =
   ## Decode a `tkNumber` token's raw integer text into `int64`, respecting
   ## sign and base. Handles `int64.low` correctly via uint64 accumulation
   ## (a value the naïve decode-magnitude-then-negate path can't represent).
   ##
+  ## `text` is a borrowed view of the source bytes (see `numberText`); the
+  ## sign is read from `text[0]`, so no separate `negative` flag is needed.
   ## Returns `peLexInvalidNumber` on any digit-character mismatch or
   ## true overflow.
-  # Index-based iteration to avoid the 3 string allocs the slice form
-  # would do (see decodeIntPromoting for the same fix).
+  let negative = text.len > 0 and text[0] == '-'
   var start = 0
-  if n.text.len > 0 and (n.text[0] == '+' or n.text[0] == '-'): start = 1
-  if n.base != nbDecimal and n.text.len >= start + 2: start += 2
-  let radix = radixOf(n.base)
+  if text.len > 0 and (text[0] == '+' or text[0] == '-'): start = 1
+  if base != nbDecimal and text.len >= start + 2: start += 2
+  let radix = radixOf(base)
   let radixU = uint64(radix)
   let limit =
-    if n.negative: Int64LowMagU
+    if negative: Int64LowMagU
     else: Int64HighU
   var acc: uint64 = 0
-  for i in start ..< n.text.len:
-    let c = n.text[i]
+  for i in start ..< text.len:
+    let c = text[i]
     if c == '_': continue
     let d =
       case c
@@ -87,7 +98,7 @@ func decodeIntFromToken*(n: NumberPayload, span: Span):
         initError(peLexInvalidNumber, span,
                   "integer literal does not fit in int64"))
     acc = acc * radixU + uint64(d)
-  if n.negative:
+  if negative:
     if acc == Int64LowMagU:
       # -2^63 — representable as int64 but not via simple negation
       # (the magnitude itself overflows the signed range). Cast through
@@ -139,24 +150,25 @@ func mulAdd128(hi, lo: var uint64, mul: uint64, add: uint64): bool =
   hi = (r3 shl 32) or r2
   false
 
-func decodeIntPromoting*(n: NumberPayload, span: Span):
+func decodeIntPromoting*(text: openArray[char], base: NumberBase, span: Span):
     Result[IntDecode, ParseError] {.inline.} =
   ## Decode an integer literal that may exceed int64.high. Produces
   ## `fits64 = true` when the value fits int64 (with int64.low special-
   ## cased like `decodeIntFromToken`); otherwise produces a 128-bit
   ## magnitude in (bigHi, bigLo) with sign in `negative`. 128-bit
   ## overflow still errors with `peLexInvalidNumber`.
-  # Iterate by index over n.text — `var s = n.text; s = s[1..^1]` triggers
-  # 3 string allocations per int decode (caught by perf record: 1.2% of
-  # CPU on deep workloads).
+  ##
+  ## `text` is a borrowed view of the source bytes (see `numberText`);
+  ## the sign is read from `text[0]`.
+  let negative = text.len > 0 and text[0] == '-'
   var start = 0
-  if n.text.len > 0 and (n.text[0] == '+' or n.text[0] == '-'): start = 1
-  if n.base != nbDecimal and n.text.len >= start + 2: start += 2
-  let radix = uint64(radixOf(n.base))
+  if text.len > 0 and (text[0] == '+' or text[0] == '-'): start = 1
+  if base != nbDecimal and text.len >= start + 2: start += 2
+  let radix = uint64(radixOf(base))
   var hi: uint64 = 0
   var lo: uint64 = 0
-  for i in start ..< n.text.len:
-    let c = n.text[i]
+  for i in start ..< text.len:
+    let c = text[i]
     if c == '_': continue
     let d =
       case c
@@ -172,7 +184,7 @@ func decodeIntPromoting*(n: NumberPayload, span: Span):
         initError(peLexInvalidNumber, span,
                   "integer literal exceeds 128 bits"))
   # Now (hi, lo) holds the unsigned magnitude.
-  let neg = n.negative
+  let neg = negative
   if hi == 0:
     if not neg:
       if lo <= Int64HighU:
@@ -193,43 +205,47 @@ func decodeIntPromoting*(n: NumberPayload, span: Span):
 # Float decode
 # ---------------------------------------------------------------------------
 
-func decodeFloatFromToken*(n: NumberPayload, span: Span):
+func decodeFloatFromToken*(text: openArray[char], span: Span):
     Result[float, ParseError] {.inline.} =
-  ## Decode a `tkNumber` token's raw float text. Non-raising — uses
-  ## `parseutils.parseFloat` which returns 0 on failure rather than
-  ## raising `ValueError`. This is the property `parser.nim`'s
-  ## `{.noSideEffect.}` contract needs.
+  ## Decode a `tkNumber` token's raw float text (a borrowed source view —
+  ## see `numberText`). Non-raising — uses `parseutils.parseFloat` which
+  ## returns 0 on failure rather than raising `ValueError`. This is the
+  ## property `parser.nim`'s `{.noSideEffect.}` contract needs.
   # parseutils doesn't strip underscores. Most decimal float tokens
   # have none, so scan first and only allocate a stripped copy when
   # underscores are actually present — keeps the common case alloc-
-  # free while still handling `1_000.5e1_2` correctly.
+  # free (parseFloat has an openArray[char] overload) while still
+  # handling `1_000.5e1_2` correctly.
   var hasUnderscore = false
-  for c in n.text:
+  for c in text:
     if c == '_': hasUnderscore = true; break
-  let text =
-    if hasUnderscore:
-      var s = newStringOfCap(n.text.len)
-      for c in n.text:
-        if c != '_': s.add(c)
-      s
-    else:
-      n.text
   var value: float
-  let consumed = parseutils.parseFloat(text, value)
-  if consumed == 0 or consumed != text.len:
-    return err[float, ParseError](
-      initError(peLexInvalidNumber, span, "malformed float literal"))
+  if hasUnderscore:
+    var s = newStringOfCap(text.len)
+    for c in text:
+      if c != '_': s.add(c)
+    let consumed = parseutils.parseFloat(s, value)
+    if consumed == 0 or consumed != s.len:
+      return err[float, ParseError](
+        initError(peLexInvalidNumber, span, "malformed float literal"))
+  else:
+    let consumed = parseutils.parseFloat(text, value)
+    if consumed == 0 or consumed != text.len:
+      return err[float, ParseError](
+        initError(peLexInvalidNumber, span, "malformed float literal"))
   ok[float, ParseError](value)
 
 # ---------------------------------------------------------------------------
 # Float-vs-int classification
 # ---------------------------------------------------------------------------
 
-func looksLikeFloat*(n: NumberPayload): bool {.inline.} =
+func looksLikeFloat*(text: openArray[char], base: NumberBase): bool {.inline.} =
   ## A decimal number is a float iff it carries a fractional part or
   ## an exponent. Hex/oct/bin literals are always integers.
-  n.base == nbDecimal and
-    ('.' in n.text or 'e' in n.text or 'E' in n.text)
+  if base != nbDecimal: return false
+  for c in text:
+    if c == '.' or c == 'e' or c == 'E': return true
+  false
 
 # ---------------------------------------------------------------------------
 # Canonical formatters (value → KDL v2 text)
@@ -252,14 +268,16 @@ func formatFloat*(v: float64): string =
   ## Finite values use `std/formatfloat.addFloatRoundtrip` — the stdlib
   ## Schubfach shortest-correctly-rounded formatter, called DIRECTLY
   ## (not via `$float`, which is the legacy `c_sprintf` path unless
-  ## `-d:nimPreviewFloatRoundtrip` is set). Two reasons:
+  ## `-d:nimPreviewFloatRoundtrip` is set). This matters for two reasons:
   ##
   ## 1. **Round-trip safety is a spec obligation, not a build flag.**
-  ##    Legacy `$float` emits 16 significant digits; ~45% of full-
-  ##    mantissa doubles need 17 and silently re-parse to a NEIGHBOURING
-  ##    double, breaking encode→decode identity (P7). Calling the
-  ##    roundtrip proc directly makes that guarantee independent of how
-  ##    a downstream consumer compiles nkdl — a global `-d:` flag would
+  ##    The legacy `$float` emits 16 significant digits; ~45% of
+  ##    full-mantissa doubles need 17 and silently re-parse to a
+  ##    NEIGHBOURING double, breaking encode→decode identity (P7). A
+  ##    multi-impl spec requires the formatter to emit the shortest
+  ##    string that round-trips by construction. Calling the roundtrip
+  ##    proc directly makes that guarantee independent of how any
+  ##    downstream consumer compiles nkdl — a global `-d:` flag would
   ##    only fix nkdl's own builds, not a library consumer's.
   ## 2. It still inserts the `.0` fractional marker for whole-valued
   ##    floats (`2.0`, not `2`), preserving KDL's typed-float

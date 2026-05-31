@@ -215,8 +215,8 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
       if tok.kind != tkNumber:
         return err[void, ParseError](
           initError(peTypeMismatch, tok.span, "expected integer value"))
-      let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
-      let decoded = decodeIntFromToken(nPayload, tok.span)
+      let decoded = decodeIntFromToken(
+        numberText(`cSym`.source, tok.span), tok.numBase, tok.span)
       if decoded.isErr:
         return err[void, ParseError](decoded.getErr)
       `targetIdent` = `typeNode`(decoded.get)
@@ -226,8 +226,8 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
       let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
       case tok.kind
       of tkNumber:
-        let nPayload = `cSym`.stream[].numberPayloads[tok.numIdx]
-        let decoded = decodeFloatFromToken(nPayload, tok.span)
+        let decoded = decodeFloatFromToken(
+          numberText(`cSym`.source, tok.span), tok.span)
         if decoded.isErr:
           return err[void, ParseError](decoded.getErr)
         `targetIdent` = `typeNode`(decoded.get)

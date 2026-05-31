@@ -361,14 +361,14 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
         return emitMalformedAnnoError(c, t.span)
       # Bidi check for quoted/raw names.
       if nameTok.kind == tkString:
-        let p = stringPayload(c.stream[], nameTok)
+        let p = tokenText(c.stream[], nameTok)
         if containsBidiControl(p):
           let pe = initError(peLexInvalidIdentifier, nameTok.span,
                              "bidi control codepoint in node name")
           c.halted = true
           return CursorEvent(kind: ceError, span: nameTok.span, err: heapErr(pe))
       elif nameTok.kind == tkRawString:
-        let p = stringPayload(c.stream[], nameTok)
+        let p = tokenText(c.stream[], nameTok)
         if containsBidiControl(p):
           let pe = initError(peLexInvalidIdentifier, nameTok.span,
                              "bidi control codepoint in node name")
@@ -384,14 +384,14 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
     of tkString, tkRawString:
       # Quoted/raw-string node name (no type annotation prefix).
       if t.kind == tkString:
-        let p = stringPayload(c.stream[], t)
+        let p = tokenText(c.stream[], t)
         if containsBidiControl(p):
           let pe = initError(peLexInvalidIdentifier, t.span,
                              "bidi control codepoint in node name")
           c.halted = true
           return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
       else:
-        let p = stringPayload(c.stream[], t)
+        let p = tokenText(c.stream[], t)
         if containsBidiControl(p):
           let pe = initError(peLexInvalidIdentifier, t.span,
                              "bidi control codepoint in node name")
@@ -524,14 +524,14 @@ proc advanceRaw(c: var StringCursor): CursorEvent =
       if nextKind == tkEquals:
         # Bidi check on prop-key payload.
         if t.kind == tkString:
-          let p = stringPayload(c.stream[], t)
+          let p = tokenText(c.stream[], t)
           if containsBidiControl(p):
             let pe = initError(peLexInvalidIdentifier, t.span,
                                "bidi control codepoint in property key")
             c.halted = true
             return CursorEvent(kind: ceError, span: t.span, err: heapErr(pe))
         else:
-          let p = stringPayload(c.stream[], t)
+          let p = tokenText(c.stream[], t)
           if containsBidiControl(p):
             let pe = initError(peLexInvalidIdentifier, t.span,
                                "bidi control codepoint in property key")

@@ -84,12 +84,11 @@ proc tokToGenArg(tok: Token, anno: string,
              argStr: tokenAsString(tok, stream, source),
              argStrAnno: anno)
   of tkNumber:
-    let payload = stream.numberPayloads[tok.numIdx]
-    let asInt = decodeIntFromToken(payload, tok.span)
+    let asInt = decodeIntFromToken(numberText(source, tok.span), tok.numBase, tok.span)
     if asInt.isOk:
       GenEvent(kind: geArgInt, argInt: asInt.get, argIntAnno: anno)
     else:
-      let asFloat = decodeFloatFromToken(payload, tok.span)
+      let asFloat = decodeFloatFromToken(numberText(source, tok.span), tok.span)
       doAssert asFloat.isOk, "number token decoded as neither int nor float"
       GenEvent(kind: geArgFloat, argFloat: asFloat.get, argFloatAnno: anno)
   of tkKeyword:

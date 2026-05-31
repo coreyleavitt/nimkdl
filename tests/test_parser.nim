@@ -118,6 +118,28 @@ suite "parser: arguments":
     parseOk("flags 0b1010"):
       check doc.nodes[0].entries[0].argValue.intVal == 10
 
+  test "number-decode contract (unified tokenContent characterization)":
+    # Pins the full number-decode contract the span-based tkNumber path
+    # (numBase inline, text via contentSpan) must preserve.
+    parseOk("a 1_000"):
+      check doc.nodes[0].entries[0].argValue.intVal == 1000
+    parseOk("a 0xFF_FF"):
+      check doc.nodes[0].entries[0].argValue.intVal == 0xFFFF
+    parseOk("a +42"):
+      check doc.nodes[0].entries[0].argValue.intVal == 42
+    parseOk("a -9223372036854775808"):
+      check doc.nodes[0].entries[0].argValue.kind == kvInt
+      check doc.nodes[0].entries[0].argValue.intVal == low(int64)
+    parseOk("a 18446744073709551616"):
+      let v = doc.nodes[0].entries[0].argValue
+      check v.kind == kvBigInt
+      check v.bigHi == 1'u64 and v.bigLo == 0'u64 and not v.bigNegative
+    parseOk("a -1.5e3"):
+      check doc.nodes[0].entries[0].argValue.kind == kvFloat
+      check doc.nodes[0].entries[0].argValue.floatVal == -1500.0
+    parseOk("a 1_0.5e0_1"):
+      check doc.nodes[0].entries[0].argValue.floatVal == 10.5e1
+
   test "ident resolution survives (lex-interner-removal characterization)":
     # Node names, prop keys, and non-ASCII barewords resolve from source
     # bytes through the doc's own interner; reserved barewords are

@@ -571,9 +571,8 @@ proc resolveName(toks: seq[Token], stream: TokenStream, doc: var KdlDoc): Intern
   ## Helper: bareword / quoted string / raw string used as a name.
   if toks.len == 0: return InvalidInterned
   case toks[0].kind
-  of tkIdent: doc.interner.intern(
-    stream.source.toOpenArray(toks[0].span.offset, toks[0].span.endOffset - 1))
-  of tkString, tkRawString: doc.interner.intern(stringPayload(stream, toks[0]))
+  of tkIdent, tkString, tkRawString:
+    doc.interner.intern(tokenText(stream, toks[0]))
   else: InvalidInterned
 
 proc findImmediate(n: ParseNode, ruleName: string): ParseNode =
@@ -613,10 +612,10 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc, stream: TokenStream, err
   let v = toks[0]
   case v.kind
   of tkString, tkRawString:
-    result = newStringValue(stringPayload(stream, v), v.span)
+    result = newStringValue(tokenText(stream, v), v.span)
   of tkIdent:
-    # Bare-ident value: read the bareword bytes from source via the span.
-    let identStr = stream.source[v.span.offset ..< v.span.endOffset]
+    # Bare-ident value: read the bareword text via the unified resolver.
+    let identStr = tokenText(stream, v)
     if isReservedBareword(identStr):
       errs.add(initError(peLexReservedKeyword, v.span,
         "reserved keyword '" & identStr & "' cannot be used as a bare value"))
@@ -624,16 +623,15 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc, stream: TokenStream, err
     else:
       result = newStringValue(identStr, v.span)
   of tkNumber:
-    let n = stream.numberPayloads[v.numIdx]
-    if looksLikeFloat(n):
-      let floatRes = decodeFloatFromToken(n, v.span)
+    if looksLikeFloat(numberText(stream.source, v.span), v.numBase):
+      let floatRes = decodeFloatFromToken(numberText(stream.source, v.span), v.span)
       if floatRes.isErr:
         errs.add(floatRes.getErr)
         result = newNullValue(v.span)
       else:
         result = newFloatValue(floatRes.get, v.span)
     else:
-      let intRes = decodeIntPromoting(n, v.span)
+      let intRes = decodeIntPromoting(numberText(stream.source, v.span), v.numBase, v.span)
       if intRes.isErr:
         errs.add(intRes.getErr)
         result = newNullValue(v.span)

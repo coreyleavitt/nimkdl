@@ -44,15 +44,16 @@ proc line(t: Token, ctx: LexCtx): int = ctx.lm.lineColOf(t.span.start.offset).li
 proc strVal(t: Token, ctx: LexCtx): string =
   # No-escape single-line strings carry no payload (span-only); resolve
   # uniformly via stringPayload.
-  stringPayload(ctx.stream, t)
+  tokenText(ctx.stream, t)
 proc rawVal(t: Token, ctx: LexCtx): string =
-  stringPayload(ctx.stream, t)
+  tokenText(ctx.stream, t)
 proc numText(t: Token, ctx: LexCtx): string =
-  ctx.stream.numberPayloads[t.numIdx].text
+  ctx.stream.source[t.span.offset ..< t.span.endOffset]
 proc numBase(t: Token, ctx: LexCtx): NumberBase =
-  ctx.stream.numberPayloads[t.numIdx].base
+  t.numBase
 proc numNegative(t: Token, ctx: LexCtx): bool =
-  ctx.stream.numberPayloads[t.numIdx].negative
+  let s = numText(t, ctx)
+  s.len > 0 and s[0] == '-'
 
 suite "lexer: whitespace and EOF":
   test "empty input yields just EOF":

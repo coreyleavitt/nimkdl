@@ -27,13 +27,25 @@ import ./numlit
 import ./reserved
 import ./spans
 
+func internToken*(interner: var Interner, stream: TokenStream,
+                  tok: Token): InternedStr =
+  ## Zero-copy intern of a text token's content. Verbatim kinds intern
+  ## directly from source via the span — no intermediate string alloc;
+  ## payload kinds intern the payload. The production hot path (node
+  ## names, prop keys) uses this; the slow oracle uses `tokenText`.
+  if tok.hasPayload:
+    interner.intern(tokenText(stream, tok))
+  else:
+    let s = tok.contentSpan
+    interner.intern(stream.source.toOpenArray(s.offset, s.endOffset - 1))
+
 proc tokenAsString*(tok: Token, stream: TokenStream, source: string): string =
   ## Resolve a token's logical text content. For tkIdent, returns the
   ## bareword bytes from source. For tkString / tkRawString, returns
   ## the unescaped payload from the lexer's side tables. For other
   ## kinds, returns the source bytes (rarely used).
   case tok.kind
-  of tkString, tkRawString: stringPayload(stream, tok)
+  of tkIdent, tkString, tkRawString, tkNumber: tokenText(stream, tok)
   else:
     let s = int(tok.span.offset)
     let f = int(tok.span.endOffset) - 1
@@ -46,7 +58,7 @@ proc buildValueFromTok(tok: Token, stream: TokenStream, source: string):
   case tok.kind
   of tkString, tkRawString:
     ok[KdlValue, ParseError](
-      newStringValue(stringPayload(stream, tok), tok.span))
+      newStringValue(tokenText(stream, tok), tok.span))
   of tkKeyword:
     let v = case tok.keyword
       of kwTrue:   newBoolValue(true, tok.span)
@@ -57,22 +69,19 @@ proc buildValueFromTok(tok: Token, stream: TokenStream, source: string):
       of kwNan:    newFloatValue(NaN, tok.span)
     ok[KdlValue, ParseError](v)
   of tkNumber:
-    let n = stream.numberPayloads[tok.numIdx]
-    if looksLikeFloat(n):
-      let fRes = decodeFloatFromToken(n, tok.span)
+    if looksLikeFloat(numberText(source, tok.span), tok.numBase):
+      let fRes = decodeFloatFromToken(numberText(source, tok.span), tok.span)
       if fRes.isErr: return err[KdlValue, ParseError](fRes.getErr)
       ok[KdlValue, ParseError](newFloatValue(fRes.get, tok.span))
     else:
-      let iRes = decodeIntPromoting(n, tok.span)
+      let iRes = decodeIntPromoting(numberText(source, tok.span), tok.numBase, tok.span)
       if iRes.isErr: return err[KdlValue, ParseError](iRes.getErr)
       let d = iRes.get
       let v = if d.fits64: newIntValue(d.intVal, tok.span)
               else: newBigIntValue(d.bigHi, d.bigLo, d.negative, tok.span)
       ok[KdlValue, ParseError](v)
   of tkIdent:
-    let s = tok.span.start.offset
-    let f = tok.span.finish.offset - 1
-    ok[KdlValue, ParseError](newStringValue(source[s .. f], tok.span))
+    ok[KdlValue, ParseError](newStringValue(tokenText(stream, tok), tok.span))
   else:
     err[KdlValue, ParseError](initError(peParseExpected, tok.span,
       "unsupported value token kind"))
@@ -115,7 +124,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
       continue
     case ev.kind
     of ceNodeBegin:
-      let nameHandle = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeNameTok], c.stream[], c.source))
+      let nameHandle = internToken(doc.interner, c.stream[], c.stream[].tokens[ev.nodeNameTok])
       var typeAnno = InvalidInterned
       if ev.nodeAnnoTok != -1:
         typeAnno = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
@@ -155,7 +164,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
       if stack.len > 0:
         stack[^1].entries.add(entry)
     of ceProp:
-      let key = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source))
+      let key = internToken(doc.interner, c.stream[], c.stream[].tokens[ev.propKeyTok])
       let keyTok = c.stream[].tokens[ev.propKeyTok]
       let valTok = c.stream[].tokens[ev.propValueTok]
       let vRes = buildValueFromTok(valTok, c.stream[], c.source)
@@ -245,7 +254,7 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
       continue
     case ev.kind
     of ceNodeBegin:
-      let nameHandle = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeNameTok], c.stream[], c.source))
+      let nameHandle = internToken(doc.interner, c.stream[], c.stream[].tokens[ev.nodeNameTok])
       var typeAnno = InvalidInterned
       if ev.nodeAnnoTok != -1:
         typeAnno = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
@@ -284,7 +293,7 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
       if stack.len > 0:
         stack[^1].entries.add(entry)
     of ceProp:
-      let key = doc.interner.intern(tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source))
+      let key = internToken(doc.interner, c.stream[], c.stream[].tokens[ev.propKeyTok])
       let keyTok = c.stream[].tokens[ev.propKeyTok]
       let valTok = c.stream[].tokens[ev.propValueTok]
       let vRes = buildValueFromTok(valTok, c.stream[], c.source)

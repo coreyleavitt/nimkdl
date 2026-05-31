@@ -108,14 +108,6 @@ type
     ## parity and the build fails immediately, before any wire-byte
     ## drift can reach the lexer ↔ emitter round-trip.
 
-  NumberPayload* = object
-    ## Heavy data for a tkNumber token. Stored once per token in the
-    ## owning `TokenStream`'s `numberPayloads` seq; the token holds a
-    ## u32 index.
-    text*: string
-    base*: NumberBase
-    negative*: bool
-
   Token* = object
     ## Compact token: 8-byte span + 1-byte flag + 1-byte kind + 4-byte
     ## payload = 14 bytes natural, padded to 24. Heavy payload (string
@@ -132,7 +124,8 @@ type
     of tkIdent:     discard
     of tkString:    strIdx*: uint32            ## 4 bytes index into stringPayloads
     of tkRawString: rawIdx*: uint32            ## 4 bytes index into rawStringPayloads
-    of tkNumber:    numIdx*: uint32            ## 4 bytes index into numberPayloads
+    of tkNumber:    numBase*: NumberBase       ## 1 byte; text = source[span]
+                                               ## (verbatim, via contentSpan)
     of tkKeyword:   keyword*: KeywordKind      ## 1 byte
     of tkError:     errIdx*: uint32            ## 4 bytes index into errorPayloads
     else:           discard
@@ -150,7 +143,6 @@ type
     tokens*: seq[Token]
     stringPayloads*: seq[string]
     rawStringPayloads*: seq[string]
-    numberPayloads*: seq[NumberPayload]
     errorPayloads*: seq[ParseError]
     source*: string
       ## Original source text — consumers read bareword (tkIdent) and
@@ -550,6 +542,26 @@ func isNewline(ch: char): bool {.inline.} =
   ## must respect the full v2 Newline table.
   ch == '\n' or ch == '\r' or ch == '\v' or ch == '\f'
 
+type StringByteClass = enum
+  sbPlain        ## ordinary content byte — copied verbatim
+  sbTerminator   ## closing `"`
+  sbEscape       ## `\` — starts an escape sequence
+  sbNewline      ## literal newline (illegal in a single-line string)
+  sbControl      ## disallowed control codepoint
+
+func classifyStringByte(c: char): StringByteClass {.inline.} =
+  ## Single source of truth for how a byte is handled inside a regular
+  ## single-line string body. BOTH the lexer fast-path (which emits a
+  ## verbatim span only when every body byte is `sbPlain`) and
+  ## `decodeRegularString` (which decodes / errors per class) consume
+  ## this — so the two can never disagree about what counts as "plain",
+  ## and adding a new special byte updates both paths at once.
+  if c == '"': sbTerminator
+  elif c == '\\': sbEscape
+  elif isNewline(c): sbNewline
+  elif isDisallowedControl(c): sbControl
+  else: sbPlain
+
 # ---------------------------------------------------------------------------
 # Token emission
 # ---------------------------------------------------------------------------
@@ -602,39 +614,64 @@ proc emitString(lx: var Lexer, value: sink string, span: Span) =
 
 proc emitStringSpan(lx: var Lexer, span: Span) =
   ## Emit a no-escape single-line string token with NO payload — its
-  ## value is `source[span.offset+1 ..< span.endOffset-1]`, read in place
-  ## by `stringPayload`. Skips both the side-table alloc and the
-  ## char-by-char `decodeRegularString` build.
+  ## value is the verbatim bytes between the quotes, read in place via
+  ## `contentSpan`. Skips the side-table alloc and the char-by-char
+  ## `decodeRegularString` build.
   lx.emit(Token(kind: tkString, strIdx: NoStrPayload, span: span))
 
-func stringPayload*(stream: TokenStream, tok: Token): string =
-  ## Single source of truth for resolving a tkString / tkRawString token
-  ## to its value. No-escape single-line strings (`strIdx == NoStrPayload`)
-  ## are read from `source` via the span — quotes stripped — with no
-  ## side-table lookup. Escaped / multi-line / raw strings come from the
-  ## payload tables.
+# ---------------------------------------------------------------------------
+# Unified token-content vocabulary
+# ---------------------------------------------------------------------------
+#
+# Every text-bearing token (tkIdent / tkString / tkNumber) resolves its
+# content through this one vocabulary — no consumer touches the side
+# tables, the NoStrPayload sentinel, or span arithmetic directly. A
+# token's content is EITHER verbatim source (a span, delimiters trimmed
+# per kind) OR a computed payload (escapes / dedent). `tkRawString` keeps
+# a payload (variable-width `#` delimiter).
+
+func innerSpan(s: Span, trim: int): Span {.inline.} =
+  ## `s` with `trim` bytes removed from each end (e.g. one quote).
+  initSpan(s.offset + trim, s.length - 2 * trim)
+
+func contentSpan*(tok: Token): Span {.inline.} =
+  ## The source extent of a VERBATIM token's content (delimiters trimmed
+  ## per kind). Only meaningful when `not hasPayload(tok)`. The per-kind
+  ## trim lives HERE, in one place.
   case tok.kind
-  of tkRawString:
-    stream.rawStringPayloads[tok.rawIdx]
-  of tkString:
-    if tok.strIdx == NoStrPayload:
-      stream.source[tok.span.offset + 1 ..< tok.span.endOffset - 1]
-    else:
-      stream.stringPayloads[tok.strIdx]
+  of tkString: innerSpan(tok.span, 1)   # strip one `"` each side
+  else:        tok.span                  # ident / number: whole literal
+
+func hasPayload*(tok: Token): bool {.inline.} =
+  ## Does this token's value live in a side table (vs. verbatim source)?
+  case tok.kind
+  of tkString:    tok.strIdx != NoStrPayload
+  of tkRawString: true
+  else:           false
+
+func tokenText*(stream: TokenStream, tok: Token): string =
+  ## Single source of truth: materialize a tkIdent / tkString / tkNumber
+  ## token's content as a string — verbatim source slice or side-table
+  ## payload, transparently.
+  if tok.hasPayload:
+    case tok.kind
+    of tkString:    stream.stringPayloads[tok.strIdx]
+    of tkRawString: stream.rawStringPayloads[tok.rawIdx]
+    else:           ""
   else:
-    ""
+    let s = tok.contentSpan
+    stream.source[s.offset ..< s.endOffset]
 
 proc emitRawString(lx: var Lexer, value: sink string, span: Span) =
   let idx = uint32(lx.stream.rawStringPayloads.len)
   lx.stream.rawStringPayloads.add(value)
   lx.emit(Token(kind: tkRawString, rawIdx: idx, span: span))
 
-proc emitNumber(lx: var Lexer, text: sink string, base: NumberBase,
-                negative: bool, span: Span) =
-  let idx = uint32(lx.stream.numberPayloads.len)
-  lx.stream.numberPayloads.add(NumberPayload(
-    text: text, base: base, negative: negative))
-  lx.emit(Token(kind: tkNumber, numIdx: idx, span: span))
+proc emitNumber(lx: var Lexer, base: NumberBase, span: Span) =
+  ## Emit a tkNumber carrying only its base. The literal text is
+  ## `source[span]` (verbatim — numbers have no delimiters); the sign is
+  ## the first source byte. Read via `contentSpan`/`numberText`. No alloc.
+  lx.emit(Token(kind: tkNumber, numBase: base, span: span))
 
 proc emitError(lx: var Lexer, code: ParseErrorCode, span: Span, hint = "") =
   let idx = uint32(lx.stream.errorPayloads.len)
@@ -833,8 +870,7 @@ proc dispatchEscape*(lx: var Lexer, escSpan: Span,
     lx.advanceOne()
     eoUnknown
 
-proc decodeRegularString(lx: var Lexer, openSpan: Span,
-                        terminator: char): string =
+proc decodeRegularString(lx: var Lexer, openSpan: Span): string =
   ## Read a regular (non-raw) string body. Caller has already consumed
   ## the opening quote. Returns the decoded value; emits error token(s)
   ## on malformed escapes and on unterminated input.
@@ -844,14 +880,15 @@ proc decodeRegularString(lx: var Lexer, openSpan: Span,
                    "unterminated string literal")
       return result
     let ch = lx.peek
-    if ch == terminator:
+    case classifyStringByte(ch)
+    of sbTerminator:
       lx.advanceOne()
       return result
-    if isNewline(ch):
+    of sbNewline:
       lx.emitError(peLexUnterminatedString, openSpan,
                    "literal newline inside string; use \\n or \"\"\"…\"\"\"")
       return result
-    if ch == '\\':
+    of sbEscape:
       let escStart = lx.pos
       lx.advanceOne()
       if lx.atEof:
@@ -867,13 +904,13 @@ proc decodeRegularString(lx: var Lexer, openSpan: Span,
               (lx.peek == ' ' or lx.peek == '\t' or
                lx.peek == '\n' or lx.peek == '\r'):
           if isNewline(lx.peek): lx.advanceNewline() else: lx.advanceOne()
-    else:
-      if isDisallowedControl(ch):
-        let s = lx.pos
-        lx.advanceOne()
-        lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
-                     "disallowed literal control codepoint in string body")
-        return result
+    of sbControl:
+      let s = lx.pos
+      lx.advanceOne()
+      lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
+                   "disallowed literal control codepoint in string body")
+      return result
+    of sbPlain:
       result.add ch
       lx.advanceOne()
 
@@ -1103,16 +1140,16 @@ proc lexRegularOrMultiline(lx: var Lexer) =
   var p = bodyStart
   var clean = false
   while p < lx.source.len:
-    let c = lx.source[p]
-    if c == '"': clean = true; break
-    if c == '\\' or isNewline(c) or isDisallowedControl(c): break
-    inc p
+    case classifyStringByte(lx.source[p])
+    of sbTerminator: clean = true; break
+    of sbPlain:      inc p
+    else:            break   # escape / newline / control → decode path
   if clean:
     lx.pos = lx.pos.advance(p - bodyStart)  # to the closing quote
     lx.advanceOne()                          # consume closing "
     lx.emitStringSpan(initSpan(start, lx.pos))
     return
-  let decoded = lx.decodeRegularString(openSpan, '"')
+  let decoded = lx.decodeRegularString(openSpan)
   lx.emitString(decoded, initSpan(start, lx.pos))
 
 proc lexRawString(lx: var Lexer) =
@@ -1270,9 +1307,9 @@ proc lexNumber(lx: var Lexer) =
   ## (decimal-only) fractional / exponent parts. Underscores are allowed
   ## anywhere within digits as separators.
   let start = lx.pos
-  var negative = false
+  # Consume an optional leading sign — not recorded on the token; the
+  # decoder reads it back from the first source byte.
   if lx.peek == '+' or lx.peek == '-':
-    negative = lx.peek == '-'
     lx.advanceOne()
 
   var base = nbDecimal
@@ -1318,7 +1355,7 @@ proc lexNumber(lx: var Lexer) =
                    "non-base digit in numeric literal")
       return
     let span = initSpan(start, lx.pos)
-    lx.emitNumber(lx.source[start.offset ..< lx.pos.offset], base, negative, span)
+    lx.emitNumber(base, span)
     return
 
   # Decimal integer part
@@ -1407,7 +1444,7 @@ proc lexNumber(lx: var Lexer) =
     return
 
   let span = initSpan(start, lx.pos)
-  lx.emitNumber(lx.source[start.offset ..< lx.pos.offset], base, negative, span)
+  lx.emitNumber(base, span)
 
 # ---------------------------------------------------------------------------
 # Identifiers + keywords
@@ -1638,12 +1675,10 @@ proc lex*(source: string): TokenStream
   # reallocations during the lex pass for typical inputs.
   let tokCap = estimateTokenCount(source.len)
   let stringCap = max(4, source.len div 64)
-  let numberCap = max(4, source.len div 128)
   var lx = Lexer(source: source, pos: StartPosition,
                  stream: TokenStream(
                    tokens: newSeqOfCap[Token](tokCap),
                    stringPayloads: newSeqOfCap[string](stringCap),
-                   numberPayloads: newSeqOfCap[NumberPayload](numberCap),
                  ),
                  wsPending: true)
   let szCheck = sourceSizeOk(source.len)
