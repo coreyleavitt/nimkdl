@@ -571,7 +571,8 @@ proc resolveName(toks: seq[Token], stream: TokenStream, doc: var KdlDoc): Intern
   ## Helper: bareword / quoted string / raw string used as a name.
   if toks.len == 0: return InvalidInterned
   case toks[0].kind
-  of tkIdent: toks[0].ident
+  of tkIdent: doc.interner.intern(
+    stream.source.toOpenArray(toks[0].span.offset, toks[0].span.endOffset - 1))
   of tkString: doc.interner.intern(stream.stringPayloads[toks[0].strIdx])
   of tkRawString: doc.interner.intern(stream.rawStringPayloads[toks[0].rawIdx])
   else: InvalidInterned
@@ -617,8 +618,8 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc, stream: TokenStream, err
   of tkRawString:
     result = newStringValue(stream.rawStringPayloads[v.rawIdx], v.span)
   of tkIdent:
-    # Bare-ident value: resolves through the doc's interner.
-    let identStr = doc.interner.lookup(v.ident)
+    # Bare-ident value: read the bareword bytes from source via the span.
+    let identStr = stream.source[v.span.offset ..< v.span.endOffset]
     if isReservedBareword(identStr):
       errs.add(initError(peLexReservedKeyword, v.span,
         "reserved keyword '" & identStr & "' cannot be used as a bare value"))
@@ -872,7 +873,7 @@ proc referenceInterpret*(source: string, sourcePath = "<input>"):
   ## KdlDoc shape as `parse()` from parser.nim. Used as the differential
   ## oracle in the conformance harness.
   var doc = newDoc(sourcePath)
-  let tokens = lex(source, doc.interner)
+  let tokens = lex(source)
   for t in tokens.tokens:
     if t.kind == tkError:
       return err[KdlDoc, ParseError](tokens.errorPayloads[t.errIdx])

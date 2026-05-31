@@ -21,7 +21,7 @@ proc mkCursor(src: string): CursorFixture =
   var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
-  sref[] = lex(src, interner)
+  sref[] = lex(src)
   result = CursorFixture(stream: sref,
                          cursor: initStringCursor(addr sref[], src))
 

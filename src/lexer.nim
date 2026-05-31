@@ -33,7 +33,6 @@
 import std/[strutils, unicode, bitops]
 
 import ./spans
-import ./intern
 import ./spec_literals  # KdlKeyword + KdlKeywordLiterals — wire bytes
 
 const
@@ -66,21 +65,6 @@ func isReservedBareword*(s: openArray[char]): bool {.inline.} =
     var matches = true
     for i in 0 ..< s.len:
       if kw[i] != s[i]: matches = false; break
-    if matches: return true
-  false
-
-func isReservedBareword*(interner: Interner, handle: InternedStr): bool {.inline.} =
-  ## Alloc-free version that scans the interned bytes directly. Saves
-  ## one string allocation per `tkIdent` token on the parser's hot path
-  ## (previously had to call `lookup(handle)` just to feed the openArray
-  ## version, allocating ~10-20 bytes per call).
-  let n = interner.entryByteLenOf(handle)
-  if n > MaxReservedBarewordLen: return false
-  for kw in ReservedBarewords:
-    if kw.len != n: continue
-    var matches = true
-    for i in 0 ..< n:
-      if kw[i] != interner.entryByteAtOf(handle, i): matches = false; break
     if matches: return true
   false
 
@@ -136,7 +120,8 @@ type
                                ## Used at entry-position sites to enforce
                                ## v2 token-adjacency rules.
     case kind*: TokenKind      ## 1 byte discriminator
-    of tkIdent:     ident*: InternedStr        ## 4 bytes (handle)
+    # tkIdent: no field — bareword text is read from source via the span
+    of tkIdent:     discard
     of tkString:    strIdx*: uint32            ## 4 bytes index into stringPayloads
     of tkRawString: rawIdx*: uint32            ## 4 bytes index into rawStringPayloads
     of tkNumber:    numIdx*: uint32            ## 4 bytes index into numberPayloads
@@ -160,13 +145,13 @@ type
     numberPayloads*: seq[NumberPayload]
     errorPayloads*: seq[ParseError]
     source*: string
-      ## Original source text — needed by visitors that read bareword
-      ## (tkIdent) bytes directly (interner is disabled in visitor mode).
+      ## Original source text — consumers read bareword (tkIdent) and
+      ## number (tkNumber) bytes directly from here via the token span.
       ## Stored as a string ref; no extra allocation beyond the bind.
 
   Lexer = object
-    ## Lexer state during a `lex(source, interner)` call. The interner
-    ## is NOT a field — it's threaded as a `var Interner` parameter.
+    ## Lexer state during a `lex(source)` call. The lexer no longer
+    ## interns — barewords are emitted as span-only tkIdent tokens.
     source: string
     pos: Position
     stream: TokenStream      ## accumulating tokens + side tables
@@ -1377,7 +1362,7 @@ proc lexNumber(lx: var Lexer) =
 # Identifiers + keywords
 # ---------------------------------------------------------------------------
 
-proc lexBareIdent(lx: var Lexer, interner: var Interner) =
+proc lexBareIdent(lx: var Lexer) =
   let start = lx.pos
   while not lx.atEof:
     let b = uint8(lx.peek)
@@ -1420,8 +1405,11 @@ proc lexBareIdent(lx: var Lexer, interner: var Interner) =
       lx.source[start.offset .. textLast] &
       "' must be quoted or `#`-prefixed; bare use is forbidden in KDL v2")
     return
-  let handle = interner.intern(lx.source.toOpenArray(start.offset, textLast))
-  lx.emit(Token(kind: tkIdent, ident: handle, span: span))
+  # The bareword's text is `source[span]`; consumers read it in place
+  # (and the doc re-interns it as needed). No lex-time interning — the
+  # handle was never read in production, only re-derived from source by
+  # every consumer (≈14% of decode/parse instructions per callgrind).
+  lx.emit(Token(kind: tkIdent, span: span))
 
 proc lexKeyword(lx: var Lexer) =
   ## At a `#` known not to start a raw string. Read identifier-like bytes
@@ -1472,7 +1460,7 @@ proc lexKeyword(lx: var Lexer) =
 # Top-level loop
 # ---------------------------------------------------------------------------
 
-proc lexOne(lx: var Lexer, interner: var Interner) =
+proc lexOne(lx: var Lexer) =
   if lx.atEof:
     lx.emit(Token(kind: tkEof, span: pointSpan(lx.pos)))
     return
@@ -1532,7 +1520,7 @@ proc lexOne(lx: var Lexer, interner: var Interner) =
     if lx.peek(1) >= '0' and lx.peek(1) <= '9':
       lx.lexNumber()
     else:
-      lx.lexBareIdent(interner)
+      lx.lexBareIdent()
   else:
     # `.` followed by a digit looks like a number-without-int-prefix
     # (`.0`), which v2 forbids — emit as an error rather than letting
@@ -1553,10 +1541,10 @@ proc lexOne(lx: var Lexer, interner: var Interner) =
         lx.emit(Token(kind: tkNewline, span: initSpan(s, lx.pos)))
         return
       if cp >= 0 and isIdentCodepoint(cp):
-        lx.lexBareIdent(interner)
+        lx.lexBareIdent()
         return
     elif isIdentStart(ch):
-      lx.lexBareIdent(interner)
+      lx.lexBareIdent()
       return
     let s = lx.pos; lx.advanceOne()
     lx.emitError(peLexUnexpectedChar, initSpan(s, lx.pos),
@@ -1589,7 +1577,7 @@ func sourceSizeOk*(len: int): Result[void, ParseError] =
     ok(void, ParseError)
 
 
-proc lex*(source: string, interner: var Interner): TokenStream
+proc lex*(source: string): TokenStream
     {.noSideEffect.} =
   ## Tokenize `source`. Returns a `TokenStream` (compact tokens + side
   ## tables for heavy payloads); the token sequence is always terminated
@@ -1626,7 +1614,7 @@ proc lex*(source: string, interner: var Interner): TokenStream
   while not lx.atEof:
     lx.skipWhitespaceAndComments()
     if lx.atEof: break
-    lx.lexOne(interner)
+    lx.lexOne()
   if lx.stream.tokens.len == 0 or lx.stream.tokens[^1].kind != tkEof:
     lx.emit(Token(kind: tkEof, span: pointSpan(lx.pos)))
   lx.stream.source = source

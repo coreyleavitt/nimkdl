@@ -27,10 +27,9 @@ proc parseAllEventKinds(src: string): seq[CursorEventKind] =
   ## Drive a cursor over `src` to EOF, return the event-kind sequence.
   ## A ceError appearing means the bytes are unparseable — what P12
   ## must prevent.
-  var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
-  sref[] = lex(src, interner)
+  sref[] = lex(src)
   var c = initStringCursor(addr sref[], src)
   while true:
     let ev = advance(c)

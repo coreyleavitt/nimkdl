@@ -47,7 +47,7 @@ suite "pre-sized tokens — calibration on real fixtures":
     ## sanity — pre-sizing didn't under-allocate forcing growth) AND
     ## ≤ 2× its length (heuristic isn't wildly over-sized).
     var interner = initInterner()
-    let stream = lex(source, interner)
+    let stream = lex(source)
     let cap = stream.tokens.len  # Nim 2.x: seq capacity isn't directly
                                  # introspectable without unsafe access.
                                  # We assert on the length-vs-estimate
@@ -74,13 +74,13 @@ suite "pre-sized tokens — edge cases":
 
   test "empty source produces a TokenStream with just tkEof":
     var interner = initInterner()
-    let stream = lex("", interner)
+    let stream = lex("")
     check stream.tokens.len >= 1
     check stream.tokens[^1].kind == tkEof
 
   test "single-character source doesn't crash":
     var interner = initInterner()
-    let stream = lex("x", interner)
+    let stream = lex("x")
     check stream.tokens.len >= 1
     # `x` should lex as a bare identifier followed by EOF.
     var sawIdent = false

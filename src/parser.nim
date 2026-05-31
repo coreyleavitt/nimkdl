@@ -28,7 +28,6 @@
 import ./ast
 import ./cursor
 import ./doc_build
-import ./intern
 import ./lexer
 import ./spans
 
@@ -55,8 +54,7 @@ proc parse*(source: string, sourcePath = "<input>",
   ## per-node and per-entry parseHash fields needed by
   ## `encode(doc, emPreserve)` for byte-lossless round-trip. Opt-in
   ## because hashing is ~18% of parse cost.
-  var interner = initInterner()
-  var stream = lex(source, interner)
+  var stream = lex(source)
   var c = initStringCursor(addr stream, source)
   buildDoc(c, sourcePath, preserveFormat)
 
@@ -72,7 +70,6 @@ proc parseAll*(source: string, sourcePath = "<input>",
   ## Caller contract:
   ##   - If `errors.len == 0`, the doc is a valid, complete parse.
   ##   - If `errors.len > 0`, the doc holds whichever nodes survived.
-  var interner = initInterner()
-  var stream = lex(source, interner)
+  var stream = lex(source)
   var c = initStringCursor(addr stream, source, mode = cmAccumulating)
   buildDocAll(c, sourcePath, preserveFormat)

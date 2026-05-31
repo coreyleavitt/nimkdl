@@ -24,7 +24,6 @@
 import ./cursor
 import ./derive_decode  # for kdlDecode mixin resolution + Result/ParseError
 import ./emitter
-import ./intern
 import ./lexer
 import ./spans
 
@@ -44,8 +43,7 @@ proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect.} =
   ##
   ## Returns the first error encountered (single-shot).
   mixin kdlDecode
-  var interner = initInterner()
-  var stream = lex(src, interner)
+  var stream = lex(src)
   var c = initStringCursor(addr stream, src)
   when T is seq:
     type Elem = typeof(default(T)[0])
@@ -101,8 +99,7 @@ proc decodeAll*[T](src: string):
               & "decode use decode[T] which already returns Result.".}
   mixin kdlDecode
   type Elem = typeof(default(T)[0])
-  var interner = initInterner()
-  var stream = lex(src, interner)
+  var stream = lex(src)
   var c = initStringCursor(addr stream, src, cmAccumulating)
   var values: T = @[]
   var errors: seq[ParseError] = @[]

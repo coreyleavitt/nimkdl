@@ -99,6 +99,17 @@ suite "parser: arguments":
     parseOk("flags 0b1010"):
       check doc.nodes[0].entries[0].argValue.intVal == 10
 
+  test "ident resolution survives (lex-interner-removal characterization)":
+    # Node names, prop keys, and non-ASCII barewords resolve from source
+    # bytes through the doc's own interner; reserved barewords are
+    # rejected at lex time. Guards that removing the lexer's (unread)
+    # interning preserves end-to-end identifier resolution.
+    parseOk("café-au-lait enabled=#true"):
+      let n = doc.nodes[0]
+      check nameOf(doc, n) == "café-au-lait"
+      check doc.interner.lookup(n.entries[0].propName) == "enabled"
+    parseErrCheck("true", peLexReservedKeyword)
+
   test "keywords decode to values":
     parseOk("config a=#true b=#false c=#null"):
       let n = doc.nodes[0]

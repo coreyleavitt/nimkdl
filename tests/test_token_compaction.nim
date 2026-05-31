@@ -52,8 +52,7 @@ suite "token compaction — boundary mitigations":
     var s = "\"\"\"\n"
     s.add(repeat("x", 70_000))  # 70 KiB of body, well past the old uint16 cap
     s.add("\n\"\"\"")
-    var interner = initInterner()
-    let stream = lex(s, interner)
+    let stream = lex(s)
     # Find the string token. There should be exactly one (plus EOF).
     var stringTok: Token
     var found = false

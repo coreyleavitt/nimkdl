@@ -18,7 +18,6 @@ import ../src/cursor
 import ../src/derive_decode
 import ../src/derive_encode
 import ../src/emitter
-import ../src/intern
 import ../src/lexer
 import ../src/pragmas
 
@@ -27,10 +26,9 @@ template roundtrip[T](v0: T): T =
   var e = newBufferEmitter()
   kdlEncode(v0, e)
   let bytes = e.finish()
-  var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
-  sref[] = lex(bytes, interner)
+  sref[] = lex(bytes)
   var c = initStringCursor(addr sref[], bytes)
   var v1: T
   let r = kdlDecode(v1, c)

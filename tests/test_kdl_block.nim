@@ -14,16 +14,14 @@ import ../src/cursor
 import ../src/derive_decode
 import ../src/derive_encode
 import ../src/emitter
-import ../src/intern
 import ../src/kdl_block
 import ../src/lexer
 import ../src/pragmas
 
 template decodeOne[T](src: string): T =
-  var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
-  sref[] = lex(src, interner)
+  sref[] = lex(src)
   var c = initStringCursor(addr sref[], src)
   var v: T
   let r = kdlDecode(v, c)

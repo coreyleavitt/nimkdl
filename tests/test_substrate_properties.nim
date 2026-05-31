@@ -34,7 +34,7 @@ proc driveToEof(src: string): bool =
   var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
-  sref[] = lex(src, interner)
+  sref[] = lex(src)
   var c = initStringCursor(addr sref[], src)
   var steps = 0
   while true:
@@ -114,7 +114,7 @@ proc cursorEventsToGen(src: string): seq[GenEvent] =
   var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
-  sref[] = lex(src, interner)
+  sref[] = lex(src)
   var c = initStringCursor(addr sref[], src)
   proc tokTextOrEmpty(idx: int): string =
     if idx < 0: "" else: tokenAsString(sref.tokens[idx], sref[], src)

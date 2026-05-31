@@ -9,7 +9,6 @@ import std/[options, unittest]
 
 import ../src/derive_decode
 import ../src/cursor
-import ../src/intern
 import ../src/lexer
 import ../src/pragmas
 import ../src/spans
@@ -19,10 +18,9 @@ type CursorFixture = ref object
   cursor*: StringCursor
 
 proc mkCursor(src: string): CursorFixture =
-  var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
-  sref[] = lex(src, interner)
+  sref[] = lex(src)
   result = CursorFixture(stream: sref,
                          cursor: initStringCursor(addr sref[], src))
 

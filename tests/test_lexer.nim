@@ -9,7 +9,6 @@
 import std/[os, strutils, unittest]
 
 import ../src/ast
-import ../src/intern
 import ../src/lexer
 import ../src/parser
 import ../src/spans
@@ -21,19 +20,19 @@ type LexCtx = object
   stream: TokenStream
   lm: LineMap
 
-proc lexAll(src: string, interner: var Interner): LexCtx =
-  LexCtx(src: src, stream: lex(src, interner), lm: buildLineMap(src))
+proc lexAll(src: string): LexCtx =
+  LexCtx(src: src, stream: lex(src), lm: buildLineMap(src))
 
 proc tokenize(src: string): seq[Token] =
-  var i = initInterner()
-  lex(src, i).tokens
+  lex(src).tokens
 
-proc tokenizeWith(src: string, i: var Interner): seq[Token] =
-  lex(src, i).tokens
+proc identText(t: Token, src: string): string =
+  ## Bareword (tkIdent) text, read from source via the token span — the
+  ## lexer no longer interns, so there is no handle to look up.
+  src[t.span.offset ..< t.span.endOffset]
 
 proc tokenizeCtx(src: string): LexCtx =
-  var i = initInterner()
-  lexAll(src, i)
+  lexAll(src)
 
 # Pulls just the kinds of non-EOF tokens — convenient for structural asserts.
 proc kinds(toks: seq[Token]): seq[TokenKind] =
@@ -116,16 +115,14 @@ suite "lexer: comments":
 
 suite "lexer: bare identifiers":
   test "single bare ident":
-    var i = initInterner()
-    let t = tokenizeWith("rule", i)
+    let t = tokenize("rule")
     check t.kinds == @[tkIdent]
-    check i.lookup(t[0].ident) == "rule"
+    check identText(t[0], "rule") == "rule"
 
   test "bare ident with hyphen and digits":
-    var i = initInterner()
-    let t = tokenizeWith("rule-v2-final", i)
+    let t = tokenize("rule-v2-final")
     check t.kinds == @[tkIdent]
-    check i.lookup(t[0].ident) == "rule-v2-final"
+    check identText(t[0], "rule-v2-final") == "rule-v2-final"
 
   test "punctuation terminates bare ident":
     let ctx = tokenizeCtx("a;b")
@@ -433,16 +430,15 @@ suite "lexer: position tracking":
 
 suite "lexer: realistic KDL fragments":
   test "rule declaration":
-    var i = initInterner()
     let src = "rule \"my-rule\" {\n  enabled #true\n}"
-    let ctx = lexAll(src, i)
+    let ctx = lexAll(src)
     let t = ctx.stream.tokens
     check t.kinds == @[
       tkIdent, tkString, tkLBrace, tkNewline,
       tkIdent, tkKeyword, tkNewline,
       tkRBrace
     ]
-    check i.lookup(t[0].ident) == "rule"
+    check identText(t[0], src) == "rule"
     check t[1].strVal(ctx) == "my-rule"
 
   test "key=value attributes":

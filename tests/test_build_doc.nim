@@ -19,7 +19,7 @@ import ../src/spans
 proc buildFrom(src: string): KdlDoc =
   var interner = initInterner()
   var stream = new(TokenStream)
-  stream[] = lex(src, interner)
+  stream[] = lex(src)
   var c = initStringCursor(addr stream[], src)
   let r = buildDoc(c, sourcePath = "<test>")
   check r.isOk
