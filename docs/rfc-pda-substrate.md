@@ -1,8 +1,24 @@
 # RFC: PDA as single substrate (Phase 4)
 
-**Status**: Active. Phase 4 north star. Replaces Phase 3's three-categories
-substrate design after spike data demonstrated structural perf advantages
-of compile-time-specialized PDA over lex+cursor+events.
+**Status**: **SUPERSEDED** by `docs/rfc-lean-batch-cursor.md`. The PDA was
+built end-to-end (Sprints 1–5, 338/338 conformance, embed[T], property
+catalog) but failed its perf predictions (general macro 39.6μs vs
+predicted 12.34μs — the spike omitted the per-node capture-replay tax)
+and cost the cursor's single-source node grammar, event narrow-waist,
+and precise diagnostics. A lex-cost decomposition then showed the eager
+lex pass is 46–56% unavoidable byte-scanning, 34–37% batch-trimmable
+(payload allocs + interning, removable with no architectural change),
+and only ~16% the seq materialization a fused iterator would recover.
+Conclusion: revert to the clean Phase-3 cursor and lean the batch lexer
+(payloads → spans, no-intern decode mode) — recovers ~2× what fusion
+would for none of the cleanliness cost. Goal kept (cut the lex pass),
+means corrected (trim wasted allocation, keep the batch abstraction).
+Kept below for the historical decision record.
+
+**Original status**: Active. Phase 4 north star. Replaces Phase 3's
+three-categories substrate design after spike data demonstrated
+structural perf advantages of compile-time-specialized PDA over
+lex+cursor+events.
 
 **Predecessor**: `docs/rfc-three-categories-architecture.md` (Phase 3).
 Phase 4 keeps its public-API surface and category model; replaces the
