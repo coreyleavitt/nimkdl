@@ -12,6 +12,7 @@ import proptest
 import ../src/ast
 import ../src/parser
 import ../src/spans   # Result.isOk / .get
+import ../src/intern  # interner.lookup
 
 import ./kdlgen
 
@@ -78,3 +79,15 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     with Settings(maxExamples: 500, testId: "sc-multiline")
     given s in multilineStringSurfaces()
     ensure denotes(s)
+
+  property "node-space trivia (ws, block comments, esclines) is transparent":
+    with Settings(maxExamples: 500, testId: "sc-trivia")
+    given s in triviaSurfaces()
+    ensure denotes(s)
+
+  property "bareword identifiers round-trip as the node name":
+    with Settings(maxExamples: 600, testId: "sc-identifier")
+    given name in identifierNames()
+    let r = parse(name)
+    ensure r.isOk and r.get.nodes.len == 1 and
+           r.get.interner.lookup(r.get.nodes[0].name) == name

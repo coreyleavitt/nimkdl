@@ -324,3 +324,61 @@ proc multilineStringSurfaces*(): Strategy[ValueSurface] =
         for ln in lines: t.add p & ln & "\n"
         t.add p & "\"\"\""
         ValueSurface(text: t, value: newStringValue(lines.join("\n"))))
+
+# ---------------------------------------------------------------------------
+# Slice 12 — node-space trivia (whitespace, block comments, esclines)
+#
+#   node-space := ws* escline ws* | ws+
+#   ws         := unicode-space | multi-line-comment      (NOT single-line!)
+#   escline    := '\\' ws* (single-line-comment | newline | eof)
+#   multi-line-comment := '/*' commented-block            (nestable)
+# Block comments are node-space; line comments are only reachable via an
+# escline. None of it changes the decoded value. Targets skipBlockComment /
+# skipLineComment / skipLineContinuation.
+# ---------------------------------------------------------------------------
+
+proc nodeSpaceTrivia(): Strategy[string] =
+  ## A sequence of valid node-space pieces, space-joined (the join space is
+  ## itself node-space, and guarantees no adjacency ambiguity between pieces).
+  let piece = frequency([
+    (5, strings(intervals([(0x20'i32, 0x20'i32), (0x09'i32, 0x09'i32)]), 1, 3)),  # ws run
+    (2, just("/* comment */")),                       # block comment
+    (2, just("/* a /* nested */ b */")),              # nested block comment
+    (2, just("\\\n")),                                # escline: '\' newline
+    (2, just("\\ \t\n")),                             # escline: '\' ws* newline
+    (2, just("\\ // trailing\n")),                    # escline: '\' ws* single-line-comment
+  ])
+  lists(piece, 0, 4).map(proc(ps: seq[string]): string = ps.join(" "))
+
+proc triviaSurfaces*(): Strategy[ValueSurface] =
+  ## An integer value preceded by arbitrary valid node-space trivia. The
+  ## value is unchanged regardless of the trivia.
+  map(nodeSpaceTrivia(), integers(-9999, 9999),
+      proc(triv: string, n: int): ValueSurface =
+        ValueSurface(text: triv & " " & $n, value: newIntValue(n.int64)))
+
+# ---------------------------------------------------------------------------
+# Slice 13 — bareword identifiers (node names)
+#
+#   identifier-string := (unambiguous-ident | ...) - disallowed-keyword-identifiers
+#   unambiguous-ident := (identifier-char - digit - sign - '.') identifier-char*
+#   identifier-char   := unicode - unicode-space - newline
+#                        - [\\/(){};\[\]"#=] - disallowed-literal-code-points
+# Barewords are node NAMES (not arg values), so this has its own property.
+# We cover unambiguous-ident over ASCII + Unicode identifier-chars (exercises
+# isIdentCodepoint), excluding the reserved keyword barewords.
+# ---------------------------------------------------------------------------
+
+proc identifierNames*(): Strategy[string] =
+  ## A first char that is an identifier-char but not digit/sign/'.', then any
+  ## identifier-chars. Excludes true/false/null/inf/-inf/nan (reserved).
+  let startCh = strings(intervals([
+    (0x41'i32, 0x5A'i32), (0x61'i32, 0x7A'i32), (0x5F'i32, 0x5F'i32),  # A-Z a-z _
+    (0x00C0'i32, 0x024F'i32), (0x0370'i32, 0x03FF'i32)]), 1, 1)        # Latin/Greek letters
+  let restCh = strings(intervals([
+    (0x41'i32, 0x5A'i32), (0x61'i32, 0x7A'i32), (0x30'i32, 0x39'i32),  # alnum
+    (0x5F'i32, 0x5F'i32), (0x2D'i32, 0x2E'i32), (0x24'i32, 0x24'i32),  # _ - . $
+    (0x00C0'i32, 0x024F'i32), (0x0370'i32, 0x03FF'i32)]), 0, 10)
+  map(startCh, restCh, proc(a, b: string): string = a & b)
+    .filter(proc(s: string): bool =
+      s notin ["true", "false", "null", "inf", "-inf", "nan"])
