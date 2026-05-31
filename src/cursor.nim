@@ -657,6 +657,14 @@ type
     depth*: int
     pendingEnds*: seq[CursorEvent]
     slashdashStack*: seq[PendingSlashdash]
+    # nodeFrames + childrenIsSlashdashed are part of the cursor's mutable
+    # state and MUST be snapshotted too: they carry the per-node
+    # "seen children" flags that drive the post-children adjacency rules.
+    # Omitting them made a mid-node seek() forget the node's children and
+    # accept illegal trailing entries. Private types → unexported fields;
+    # Checkpoint is opaque anyway.
+    nodeFrames: seq[NodeFrame]
+    childrenIsSlashdashed: seq[bool]
     halted*: bool
     peekedValid*: bool
     peekedEvent*: CursorEvent
@@ -664,7 +672,10 @@ type
 proc pos*(c: StringCursor): Checkpoint =
   Checkpoint(tokIdx: c.tokIdx, state: c.state, argIdx: c.argIdx,
              depth: c.depth, pendingEnds: c.pendingEnds,
-             slashdashStack: c.slashdashStack, halted: c.halted,
+             slashdashStack: c.slashdashStack,
+             nodeFrames: c.nodeFrames,
+             childrenIsSlashdashed: c.childrenIsSlashdashed,
+             halted: c.halted,
              peekedValid: c.peekedValid, peekedEvent: c.peekedEvent)
 
 proc seek*(c: var StringCursor, ck: Checkpoint) =
@@ -674,6 +685,8 @@ proc seek*(c: var StringCursor, ck: Checkpoint) =
   c.depth = ck.depth
   c.pendingEnds = ck.pendingEnds
   c.slashdashStack = ck.slashdashStack
+  c.nodeFrames = ck.nodeFrames
+  c.childrenIsSlashdashed = ck.childrenIsSlashdashed
   c.halted = ck.halted
   c.peekedValid = ck.peekedValid
   c.peekedEvent = ck.peekedEvent

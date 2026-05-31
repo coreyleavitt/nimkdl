@@ -51,6 +51,39 @@ proc driveToEof(src: string): bool =
     # the cursor terminates without raising. Single-shot mode is the
     # default and ceError halts the stream.
 
+proc seekIdentityHolds(src: string): bool =
+  ## For every checkpoint position, advancing-to-end then seeking-back-
+  ## and-replaying must reproduce the identical event-kind stream. Guards
+  ## review #2: Checkpoint must snapshot ALL mutable cursor state (it had
+  ## dropped nodeFrames/childrenIsSlashdashed, so a mid-node seek lost the
+  ## "this node has children" flags and accepted illegal trailing entries).
+  var sref: ref TokenStream
+  new(sref)
+  sref[] = lex(src)
+  var probe = initStringCursor(addr sref[], src)
+  var n = 0
+  while true:
+    let e = advance(probe)
+    inc n
+    if e.kind in {ceEof, ceError}: break
+  for k in 0 ..< n:
+    var c = initStringCursor(addr sref[], src)
+    for i in 0 ..< k: discard advance(c)
+    let ck = c.pos()
+    var direct: seq[CursorEventKind]
+    while true:
+      let e = advance(c)
+      direct.add(e.kind)
+      if e.kind in {ceEof, ceError}: break
+    c.seek(ck)
+    var replay: seq[CursorEventKind]
+    while true:
+      let e = advance(c)
+      replay.add(e.kind)
+      if e.kind in {ceEof, ceError}: break
+    if direct != replay: return false
+  true
+
 suite "P3 — cursor safety on arbitrary bytes":
 
   property "cursor terminates without raising on any string input":
@@ -69,6 +102,18 @@ suite "P3 — cursor safety on arbitrary bytes":
       (0x00a0'i32, 0x00ff'i32)
     ]), 0, 500)
     ensure driveToEof(src)
+
+  property "seek to any checkpoint replays the identical continuation":
+    # pos()/seek() must snapshot the FULL mutable cursor state. Fuzzes
+    # KDL-rich bytes; for each, checks identity at every checkpoint
+    # position. (Review #2 — Checkpoint had dropped two state fields.)
+    with Settings(maxExamples: 400, testId: "p3-seek-identity")
+    given src in strings(intervals([
+      (0x09'i32, 0x0d'i32),
+      (0x20'i32, 0x7e'i32),
+      (0x00a0'i32, 0x00ff'i32)
+    ]), 0, 200)
+    ensure seekIdentityHolds(src)
 
 # ---------------------------------------------------------------------------
 # P1 — cursor ↔ emitter event round-trip

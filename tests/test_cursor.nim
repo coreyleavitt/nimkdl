@@ -419,3 +419,42 @@ suite "cursor — deep nesting (the #11 proof)":
     check advance(f).kind == ceChildrenEnd
     check advance(f).kind == ceNodeEnd         # l1 end
     check advance(f).kind == ceEof
+
+suite "cursor — seek/pos restores full mutable state (regression)":
+  # Review finding #2: Checkpoint omitted nodeFrames + childrenIsSlashdashed.
+  # A seek() taken mid-node restored a cursor that forgot the node had a
+  # children block, so it stopped enforcing the post-children adjacency
+  # rule and ACCEPTED illegal trailing entries that the direct path rejects.
+
+  proc drainKinds(c: var StringCursor): seq[string] =
+    while true:
+      let e = advance(c)
+      result.add($e.kind)
+      if e.kind in {ceEof, ceError}: break
+
+  proc eventCount(src: string): int =
+    let f = mkCursor(src)
+    while true:
+      let e = advance(f)
+      inc result
+      if e.kind in {ceEof, ceError}: break
+
+  test "seek restores identical continuation at EVERY position":
+    # For any checkpoint position, advancing-to-end then seeking-back-and-
+    # replaying must reproduce the same event stream. Pre-fix this diverged
+    # whenever the checkpoint fell inside a node that owns a children block:
+    # the seeked cursor lost `nodeFrames`, forgot the children, and then
+    # ACCEPTED an illegal post-children entry the direct path rejects.
+    for src in ["node { a } b=2\n",        # entry after children → error
+                "node { a } { b }\n",       # second children block → error
+                "outer { inner { x } y }\n" # nested, trailer after inner
+               ]:
+      let n = eventCount(src)
+      for k in 0 ..< n:
+        let f = mkCursor(src)
+        for i in 0 ..< k: discard advance(f)
+        let ck = f.cursor.pos()
+        let direct = drainKinds(f.cursor)
+        f.cursor.seek(ck)
+        let replay = drainKinds(f.cursor)
+        check direct == replay
