@@ -573,8 +573,7 @@ proc resolveName(toks: seq[Token], stream: TokenStream, doc: var KdlDoc): Intern
   case toks[0].kind
   of tkIdent: doc.interner.intern(
     stream.source.toOpenArray(toks[0].span.offset, toks[0].span.endOffset - 1))
-  of tkString: doc.interner.intern(stream.stringPayloads[toks[0].strIdx])
-  of tkRawString: doc.interner.intern(stream.rawStringPayloads[toks[0].rawIdx])
+  of tkString, tkRawString: doc.interner.intern(stringPayload(stream, toks[0]))
   else: InvalidInterned
 
 proc findImmediate(n: ParseNode, ruleName: string): ParseNode =
@@ -613,10 +612,8 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc, stream: TokenStream, err
   let toks = collectTokens(rawNode)
   let v = toks[0]
   case v.kind
-  of tkString:
-    result = newStringValue(stream.stringPayloads[v.strIdx], v.span)
-  of tkRawString:
-    result = newStringValue(stream.rawStringPayloads[v.rawIdx], v.span)
+  of tkString, tkRawString:
+    result = newStringValue(stringPayload(stream, v), v.span)
   of tkIdent:
     # Bare-ident value: read the bareword bytes from source via the span.
     let identStr = stream.source[v.span.offset ..< v.span.endOffset]

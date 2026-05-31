@@ -38,6 +38,14 @@ import ./spec_literals  # KdlKeyword + KdlKeywordLiterals — wire bytes
 const
   MaxRawStringHashes* = 255
 
+  NoStrPayload* = high(uint32)
+    ## Sentinel `tkString.strIdx`: this string has NO side-table payload.
+    ## It is a no-escape single-line `"…"` whose content is exactly the
+    ## bytes between the quotes — `source[span.offset+1 ..< span.endOffset-1]`.
+    ## Read it via `stringPayload(stream, tok)`. Escaped / multi-line
+    ## strings (whose decoded value differs from source) still carry a
+    ## real index into `stringPayloads`.
+
   ReservedBarewords* = [
     "true", "false", "null", "inf", "-inf", "nan"
   ] ## KDL v2 forbids these as bare identifiers in *any* position (node
@@ -592,6 +600,30 @@ proc emitString(lx: var Lexer, value: sink string, span: Span) =
   lx.stream.stringPayloads.add(value)
   lx.emit(Token(kind: tkString, strIdx: idx, span: span))
 
+proc emitStringSpan(lx: var Lexer, span: Span) =
+  ## Emit a no-escape single-line string token with NO payload — its
+  ## value is `source[span.offset+1 ..< span.endOffset-1]`, read in place
+  ## by `stringPayload`. Skips both the side-table alloc and the
+  ## char-by-char `decodeRegularString` build.
+  lx.emit(Token(kind: tkString, strIdx: NoStrPayload, span: span))
+
+func stringPayload*(stream: TokenStream, tok: Token): string =
+  ## Single source of truth for resolving a tkString / tkRawString token
+  ## to its value. No-escape single-line strings (`strIdx == NoStrPayload`)
+  ## are read from `source` via the span — quotes stripped — with no
+  ## side-table lookup. Escaped / multi-line / raw strings come from the
+  ## payload tables.
+  case tok.kind
+  of tkRawString:
+    stream.rawStringPayloads[tok.rawIdx]
+  of tkString:
+    if tok.strIdx == NoStrPayload:
+      stream.source[tok.span.offset + 1 ..< tok.span.endOffset - 1]
+    else:
+      stream.stringPayloads[tok.strIdx]
+  else:
+    ""
+
 proc emitRawString(lx: var Lexer, value: sink string, span: Span) =
   let idx = uint32(lx.stream.rawStringPayloads.len)
   lx.stream.rawStringPayloads.add(value)
@@ -1058,9 +1090,28 @@ proc lexRegularOrMultiline(lx: var Lexer) =
                  "unterminated multi-line string")
     return
 
-  # Regular single-line string
+  # Regular single-line string.
   let openSpan = initSpan(start, Position(offset: start.offset + 1))
   lx.advanceOne()  # consume opening "
+  # Fast path: scan the body. If it reaches the closing quote with no
+  # escape, newline, or disallowed control, the value is verbatim source
+  # — emit a span-only token (no payload alloc, no char-by-char build).
+  # The exact conditions decodeRegularString gives special handling to
+  # (terminator / `\` / newline / control) are the conditions that take
+  # us off the fast path, so the two agree byte-for-byte on the result.
+  let bodyStart = lx.pos.offset
+  var p = bodyStart
+  var clean = false
+  while p < lx.source.len:
+    let c = lx.source[p]
+    if c == '"': clean = true; break
+    if c == '\\' or isNewline(c) or isDisallowedControl(c): break
+    inc p
+  if clean:
+    lx.pos = lx.pos.advance(p - bodyStart)  # to the closing quote
+    lx.advanceOne()                          # consume closing "
+    lx.emitStringSpan(initSpan(start, lx.pos))
+    return
   let decoded = lx.decodeRegularString(openSpan, '"')
   lx.emitString(decoded, initSpan(start, lx.pos))
 

@@ -33,8 +33,7 @@ proc tokenAsString*(tok: Token, stream: TokenStream, source: string): string =
   ## the unescaped payload from the lexer's side tables. For other
   ## kinds, returns the source bytes (rarely used).
   case tok.kind
-  of tkString:    stream.stringPayloads[tok.strIdx]
-  of tkRawString: stream.rawStringPayloads[tok.rawIdx]
+  of tkString, tkRawString: stringPayload(stream, tok)
   else:
     let s = int(tok.span.offset)
     let f = int(tok.span.endOffset) - 1
@@ -45,12 +44,9 @@ proc buildValueFromTok(tok: Token, stream: TokenStream, source: string):
   ## Token → KdlValue. Mirrors doc_builder.buildValue line-for-line so
   ## the cursor-fold produces semantically-equivalent values.
   case tok.kind
-  of tkString:
+  of tkString, tkRawString:
     ok[KdlValue, ParseError](
-      newStringValue(stream.stringPayloads[tok.strIdx], tok.span))
-  of tkRawString:
-    ok[KdlValue, ParseError](
-      newStringValue(stream.rawStringPayloads[tok.rawIdx], tok.span))
+      newStringValue(stringPayload(stream, tok), tok.span))
   of tkKeyword:
     let v = case tok.keyword
       of kwTrue:   newBoolValue(true, tok.span)

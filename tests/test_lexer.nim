@@ -42,12 +42,11 @@ proc kinds(toks: seq[Token]): seq[TokenKind] =
 proc col(t: Token, ctx: LexCtx): int = ctx.lm.lineColOf(t.span.start.offset).col
 proc line(t: Token, ctx: LexCtx): int = ctx.lm.lineColOf(t.span.start.offset).line
 proc strVal(t: Token, ctx: LexCtx): string =
-  case t.kind
-  of tkString: ctx.stream.stringPayloads[t.strIdx]
-  of tkRawString: ctx.stream.rawStringPayloads[t.rawIdx]
-  else: ""
+  # No-escape single-line strings carry no payload (span-only); resolve
+  # uniformly via stringPayload.
+  stringPayload(ctx.stream, t)
 proc rawVal(t: Token, ctx: LexCtx): string =
-  ctx.stream.rawStringPayloads[t.rawIdx]
+  stringPayload(ctx.stream, t)
 proc numText(t: Token, ctx: LexCtx): string =
   ctx.stream.numberPayloads[t.numIdx].text
 proc numBase(t: Token, ctx: LexCtx): NumberBase =

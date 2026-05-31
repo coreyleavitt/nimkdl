@@ -69,6 +69,25 @@ suite "parser: arguments":
       check n.entries[0].kind == keArgument
       check n.entries[0].argValue.strVal == "compaction"
 
+  test "string-value contract (span/payload split characterization)":
+    # Pins that every string form resolves to the exact value the
+    # span-based no-escape path must preserve: plain (span), empty,
+    # escaped (payload), unicode escape, raw, and multiline.
+    proc argStr(src: string): string =
+      let r = parse(src)
+      doAssert r.isOk, (if r.isErr: r.getErr.hint else: "")
+      r.get.nodes[0].entries[0].argValue.strVal
+    check argStr("n \"plain\"") == "plain"               # no-escape → span
+    check argStr("n \"\"") == ""                          # empty → span (len 0)
+    check argStr("n \"a\\nb\\tc\"") == "a\nb\tc"          # escapes → payload
+    check argStr("n \"q\\\"q\"") == "q\"q"                # escaped quote
+    check argStr("n \"\\u{2603}\"") == "\xE2\x98\x83"     # unicode escape
+    check argStr("n #\"raw\\n\"#") == "raw\\n"            # raw → payload
+    check argStr("n \"\"\"\n  a\n  b\n  \"\"\"") == "a\nb" # multiline → payload
+    # A node NAME that is a quoted string also resolves correctly.
+    parseOk("\"quoted name\" 1"):
+      check doc.interner.lookup(doc.nodes[0].name) == "quoted name"
+
   test "node with number argument":
     parseOk("limit 42"):
       let n = doc.nodes[0]
