@@ -36,3 +36,23 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     with Settings(maxExamples: 300, testId: "sc-dec-int")
     given s in decimalIntSurfaces()
     ensure denotes(s)
+
+  property "hex/octal/binary integers denote their value":
+    with Settings(maxExamples: 400, testId: "sc-radix-int")
+    given s in radixIntSurfaces()
+    ensure denotes(s)
+
+  property "digit-group underscores denote the same integer":
+    with Settings(maxExamples: 400, testId: "sc-underscore-int")
+    given s in underscoreIntSurfaces()
+    ensure denotes(s)
+
+  property "finite decimal floats denote their value":
+    with Settings(maxExamples: 500, testId: "sc-float")
+    given s in finiteFloatSurfaces()
+    ensure denotes(s)
+
+  property "keyword values denote their value":
+    with Settings(maxExamples: 100, testId: "sc-keyword")
+    given s in keywordSurfaces()
+    ensure denotes(s)
