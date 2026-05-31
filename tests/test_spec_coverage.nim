@@ -56,3 +56,13 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     with Settings(maxExamples: 100, testId: "sc-keyword")
     given s in keywordSurfaces()
     ensure denotes(s)
+
+  property "plain (unescaped) strings denote their bytes":
+    with Settings(maxExamples: 400, testId: "sc-plain-string")
+    given s in plainStringSurfaces()
+    ensure denotes(s)
+
+  property "escaped strings decode to the original bytes":
+    with Settings(maxExamples: 500, testId: "sc-escaped-string")
+    given s in escapedStringSurfaces()
+    ensure denotes(s)

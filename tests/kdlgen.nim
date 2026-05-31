@@ -23,7 +23,7 @@
 ## on stdlib `addFloatRoundtrip`, which is not nkdl and tests a different
 ## algorithm than any encoder).
 
-import std/formatfloat   # addFloatRoundtrip — stdlib, NOT nkdl's formatter
+import std/[formatfloat, strutils]   # addFloatRoundtrip — stdlib, NOT nkdl's formatter
 import proptest
 import ../src/ast
 
@@ -145,3 +145,48 @@ proc keywordSurfaces*(): Strategy[ValueSurface] =
     ("#nan",   newFloatValue(NaN)),
   ]).map(proc(p: (string, KdlValue)): ValueSurface =
     ValueSurface(text: p[0], value: p[1]))
+
+# ---------------------------------------------------------------------------
+# Slice 6 — plain (regular) strings, no escapes
+# ---------------------------------------------------------------------------
+
+proc plainStringSurfaces*(): Strategy[ValueSurface] =
+  ## `"…"` whose body is printable ASCII minus `"` (0x22) and `\` (0x5C),
+  ## so it needs no escaping. value = the verbatim bytes.
+  strings(intervals([(0x20'i32, 0x21'i32),
+                     (0x23'i32, 0x5B'i32),
+                     (0x5D'i32, 0x7E'i32)]), 0, 32)
+    .map(proc(s: string): ValueSurface =
+      ValueSurface(text: "\"" & s & "\"", value: newStringValue(s)))
+
+# ---------------------------------------------------------------------------
+# Slice 7 — escaped regular strings
+# ---------------------------------------------------------------------------
+
+func escapeRegular(s: string): string =
+  ## Independent escaper: short forms for the named escapes, `\u{HH}` for the
+  ## remaining control codes, verbatim for the rest. Shares no code with
+  ## nkdl's emitter. Input is ASCII (one byte = one codepoint).
+  for ch in s:
+    case ch
+    of '"':  result.add "\\\""
+    of '\\': result.add "\\\\"
+    of '\n': result.add "\\n"
+    of '\t': result.add "\\t"
+    of '\r': result.add "\\r"
+    of '\b': result.add "\\b"
+    of '\x0C': result.add "\\f"
+    else:
+      # Disallowed-literal codepoints (C0 controls AND DEL 0x7F) must be
+      # escaped; verbatim DEL is invalid KDL, which nkdl correctly rejects.
+      if ord(ch) < 0x20 or ord(ch) == 0x7F:
+        result.add "\\u{" & toLowerAscii(toHex(ord(ch), 2)) & "}"
+      else:
+        result.add ch
+
+proc escapedStringSurfaces*(): Strategy[ValueSurface] =
+  ## Arbitrary ASCII strings (incl. `"`, `\`, controls) rendered with escapes;
+  ## value is the decoded original. Exercises escape DECODING.
+  strings(intervals([(0x00'i32, 0x7F'i32)]), 0, 24)
+    .map(proc(s: string): ValueSurface =
+      ValueSurface(text: "\"" & escapeRegular(s) & "\"", value: newStringValue(s)))
