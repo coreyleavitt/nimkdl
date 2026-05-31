@@ -32,19 +32,11 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     check denotes(ValueSurface(text: "5", value: newIntValue(5)))
     check not denotes(ValueSurface(text: "5", value: newIntValue(6)))
 
-  property "decimal integers denote their value":
-    with Settings(maxExamples: 300, testId: "sc-dec-int")
-    given s in decimalIntSurfaces()
-    ensure denotes(s)
-
-  property "hex/octal/binary integers denote their value":
-    with Settings(maxExamples: 400, testId: "sc-radix-int")
-    given s in radixIntSurfaces()
-    ensure denotes(s)
-
-  property "digit-group underscores denote the same integer":
-    with Settings(maxExamples: 400, testId: "sc-underscore-int")
-    given s in underscoreIntSurfaces()
+  property "integers (any base, sign, underscores) denote their value":
+    # Full integer grammar: decimal/hex/octal/binary x sign{none,+,-} x
+    # underscore runs after any digit (consecutive + trailing).
+    with Settings(maxExamples: 800, testId: "sc-integer")
+    given s in integerSurfaces()
     ensure denotes(s)
 
   property "finite decimal floats denote their value":

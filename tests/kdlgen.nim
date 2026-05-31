@@ -51,66 +51,66 @@ func valueEq*(a, b: KdlValue): bool =
     a.bigNegative == b.bigNegative
 
 # ---------------------------------------------------------------------------
-# Slice 1 — decimal integers
-# ---------------------------------------------------------------------------
-
-proc decimalIntSurfaces*(): Strategy[ValueSurface] =
-  ## Plain base-10 integers, including negatives. Renders via `$` (KDL's
-  ## decimal-integer surface is identical to Nim's, so this is independent of
-  ## nkdl's own formatter).
-  integers(-1_000_000, 1_000_000).map(proc(n: int): ValueSurface =
-    ValueSurface(text: $n, value: newIntValue(n.int64)))
-
-# ---------------------------------------------------------------------------
-# Slice 2 — hex / octal / binary integers
+# Slices 1-3 (unified) — integers, full grammar coverage
+#
+#   number  := hex | octal | binary | decimal
+#   decimal := sign? integer ('.' integer)? exponent?
+#   integer := digit (digit | '_')*
+#   hex     := sign? '0x' hex-digit (hex-digit | '_')*     (octal/binary analog)
+#   sign    := '+' | '-'
+#
+# So every integer covers: base ∈ {10,16,8,2}, hex digit case, sign ∈
+# {none, '+', '-'}, and `_` runs after ANY body digit — consecutive and
+# trailing allowed, never leading (the first char after sign/prefix is a
+# digit). value derives from sign × magnitude. Independent of numlit.
 # ---------------------------------------------------------------------------
 
 const RadixBound = 1_099_511_627_776  # 2^40 — multi-digit, well inside int64
 
-func renderInBase(n: int64, base: int, upperHex: bool): string =
-  ## Independent base-2/8/16 renderer with the KDL prefix; the sign precedes
-  ## the prefix (`-0xFF`). Hand-written so it shares no code with numlit.
-  let neg = n < 0
-  var mag = (if neg: uint64(-n) else: uint64(n))
-  let prefix = (case base
-                of 2: "0b"
-                of 8: "0o"
-                else: "0x")
-  let digits = if upperHex: "0123456789ABCDEF" else: "0123456789abcdef"
-  var body = ""
-  if mag == 0'u64: body = "0"
-  while mag > 0'u64:
-    body = digits[int(mag mod uint64(base))] & body
-    mag = mag div uint64(base)
-  (if neg: "-" else: "") & prefix & body
+type IntStyle = object
+  base: int
+  upperHex: bool
 
-proc radixIntSurfaces*(): Strategy[ValueSurface] =
-  ## Hex / octal / binary integers, random sign and (for hex) digit case.
-  let styles = @[(2, false), (8, false), (16, false), (16, true)]
-  map(integers(-RadixBound, RadixBound), sampledFrom(styles),
-      proc(n: int, st: (int, bool)): ValueSurface =
-        ValueSurface(text: renderInBase(n.int64, st[0], st[1]),
-                     value: newIntValue(n.int64)))
+const intStyles = @[
+  IntStyle(base: 10, upperHex: false),
+  IntStyle(base: 16, upperHex: false),
+  IntStyle(base: 16, upperHex: true),
+  IntStyle(base: 8,  upperHex: false),
+  IntStyle(base: 2,  upperHex: false),
+]
 
-# ---------------------------------------------------------------------------
-# Slice 3 — digit-group underscores
-# ---------------------------------------------------------------------------
+func magnitudeDigits(mag: uint64, base: int, upperHex: bool): string =
+  ## The bare digits of `mag` in `base` (no prefix/sign/underscores).
+  let ds = if upperHex: "0123456789ABCDEF" else: "0123456789abcdef"
+  if mag == 0'u64: return "0"
+  var m = mag
+  while m > 0'u64:
+    result = ds[int(m mod uint64(base))] & result
+    m = m div uint64(base)
 
-proc underscoreIntSurfaces*(): Strategy[ValueSurface] =
-  ## Decimal integers with `_` inserted at a random subset of inter-digit
-  ## gaps (never leading/trailing, never doubled — a valid subset). The
-  ## lexer's `_`-stripping is base-independent, so decimal exercises the
-  ## same path as radix.
-  integers(-RadixBound, RadixBound).flatMap(proc(n: int): Strategy[ValueSurface] =
-    let neg = n < 0
-    let body = $(if neg: uint64(-n) else: uint64(n))   # magnitude digits
-    let gaps = max(0, body.len - 1)
-    lists(booleans(), gaps, gaps).map(proc(ins: seq[bool]): ValueSurface =
-      var s = ""
-      for i in 0 ..< body.len:
-        s.add body[i]
-        if i < body.high and ins[i]: s.add '_'
-      ValueSurface(text: (if neg: "-" else: "") & s, value: newIntValue(n.int64))))
+func basePrefix(base: int): string =
+  (case base
+   of 16: "0x"
+   of 8:  "0o"
+   of 2:  "0b"
+   else:  "")
+
+proc integerSurfaces*(): Strategy[ValueSurface] =
+  ## Every integer surface form. Draws magnitude × style × sign-mode, then a
+  ## per-digit underscore-run count (0..2 after each digit, trailing allowed).
+  map(integers(0, RadixBound), sampledFrom(intStyles), integers(0, 2))
+    .flatMap(proc(t: (int, IntStyle, int)): Strategy[ValueSurface] =
+      let (magI, style, signMode) = t
+      let digits = magnitudeDigits(uint64(magI), style.base, style.upperHex)
+      let signTxt = ["", "+", "-"][signMode]
+      let value = (if signMode == 2: -magI.int64 else: magI.int64)
+      lists(integers(0, 2), digits.len, digits.len).map(proc(us: seq[int]): ValueSurface =
+        var body = ""
+        for i in 0 ..< digits.len:
+          body.add digits[i]
+          for _ in 0 ..< us[i]: body.add '_'   # run after digit i (i=last ⇒ trailing)
+        ValueSurface(text: signTxt & basePrefix(style.base) & body,
+                     value: newIntValue(value))))
 
 # ---------------------------------------------------------------------------
 # Slice 4 — decimal floats
@@ -126,9 +126,13 @@ proc renderFloat(f: float): string =
     result.add ".0"
 
 proc finiteFloatSurfaces*(): Strategy[ValueSurface] =
-  ## Finite, non-keyword floats (inf/nan are the keyword slice).
-  floats(-1e12, 1e12, allowNan = false).map(proc(f: float): ValueSurface =
-    ValueSurface(text: renderFloat(f), value: newFloatValue(f)))
+  ## Finite, non-keyword floats (inf/nan are the keyword slice). A `+` sign is
+  ## added to a random subset of positives (grammar `sign := '+' | '-'`).
+  map(floats(-1e12, 1e12, allowNan = false), booleans(),
+      proc(f: float, plus: bool): ValueSurface =
+        var t = renderFloat(f)
+        if plus and t.len > 0 and t[0] notin {'-', '+'}: t = "+" & t
+        ValueSurface(text: t, value: newFloatValue(f)))
 
 # ---------------------------------------------------------------------------
 # Slice 5 — keyword values
