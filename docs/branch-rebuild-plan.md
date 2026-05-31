@@ -1,13 +1,24 @@
 # Branch-rebuild plan: clean-core for symmetric IN/OUT
 
-**Status**: Operational sequencing for the three-categories v1 milestone, replacing the incremental Phase 3-5 plan.
-**Scope**: Build emitter + docEmit + deriveDecode + deriveEncode on a clean branch, sharing the existing cursor + buildDoc foundation.
-**Design doc**: `docs/rfc-three-categories-architecture.md` (read it first if you haven't).
-**Validation gate**: Full nimble + `NKDL_PROPTEST=1` + 338-fixture conformance pass against the new substrate.
+**Status**: ✅ **COMPLETE — merged to `main`.** The three-categories rewrite
+(Stages A–F) landed; this was its operational sequencing. Kept as the
+historical build record. Two things happened *after* this plan closed, so
+its perf numbers below are pre-both and should not be cited as current:
 
-## Where to resume
+1. **Phase 4 perf investigation** — see `docs/perf-investigation-log.md`
+   (PDA built+reverted, fused-lex rejected, lean-batch landed at −27.9%
+   instructions). That log supersedes the "bench summary" table here.
+2. **Stages E + F landed** (public `decode[T]`/`encode[T]`/`decodeAll[T]`
+   API + the full P1–P12 property catalog) — they were "not started" when
+   this plan was last touched.
 
-Read this section first each session. Update the "current state" line at the end of every commit on the branch.
+**Design doc**: `docs/rfc-three-categories-architecture.md` (canonical
+architecture — still current).
+
+## Where to resume — (historical; the branch is merged)
+
+The lines below were the live resume pointer while the rebuild branch was
+in flight. Retained verbatim for provenance.
 
 **Current state**: Stages A + B + Audit 1-4 + C + D COMPLETE. Branch is 47 commits since main.
 
