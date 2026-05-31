@@ -55,6 +55,7 @@ task test, "Run unit tests":
     exec cmd & " tests/test_substrate_properties.nim"
     exec cmd & " tests/test_cat2_properties.nim"
     exec cmd & " tests/test_cat3_properties.nim"
+    exec cmd & " tests/test_spec_coverage.nim"
   else:
     echo "[skip] property suites — being rebuilt as P1-P12 in Stages A-F"
 
