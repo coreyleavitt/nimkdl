@@ -73,3 +73,8 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     with Settings(maxExamples: 500, testId: "sc-raw-string")
     given s in rawStringSurfaces()
     ensure denotes(s)
+
+  property "multi-line strings dedent to their value":
+    with Settings(maxExamples: 500, testId: "sc-multiline")
+    given s in multilineStringSurfaces()
+    ensure denotes(s)

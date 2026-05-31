@@ -295,3 +295,32 @@ proc rawStringSurfaces*(): Strategy[ValueSurface] =
     let hashes = repeat('#', n)
     ValueSurface(text: hashes & "\"" & body & "\"" & hashes,
                  value: newStringValue(body)))
+
+# ---------------------------------------------------------------------------
+# Slice 11 — multi-line strings + dedent
+#
+# Per the spec (Multi-line String): open `"""` + immediate newline; the final
+# line is whitespace-only before the closing `"""`, and THAT whitespace is the
+# prefix stripped from every line; the value omits the first+last newline, the
+# final line's whitespace, and the matching prefix on each line; whitespace-
+# only lines become empty lines. We render LITERAL content (escapes are shared
+# with the single-line slices) so value = the lines joined by '\n'.
+# Line alphabet excludes space (so a non-empty line is never whitespace-only),
+# '"' (avoid forming '"""'), and '\' (no accidental escapes).
+# ---------------------------------------------------------------------------
+
+proc multilineStringSurfaces*(): Strategy[ValueSurface] =
+  ## `"""<nl> (prefix line <nl>)* prefix"""` with a shared whitespace prefix.
+  let prefixGen = strings(intervals([(0x20'i32, 0x20'i32), (0x09'i32, 0x09'i32)]), 0, 4)
+  let lineGen = frequency([
+    (2, just("")),                                                    # whitespace-only ⇒ empty value line
+    (8, strings(intervals([(0x21'i32, 0x21'i32),                      # non-space, non-'"', non-'\'
+                           (0x23'i32, 0x5B'i32),
+                           (0x5D'i32, 0x7E'i32)]), 1, 8)),
+  ])
+  map(prefixGen, lists(lineGen, 0, 4),
+      proc(p: string, lines: seq[string]): ValueSurface =
+        var t = "\"\"\"\n"
+        for ln in lines: t.add p & ln & "\n"
+        t.add p & "\"\"\""
+        ValueSurface(text: t, value: newStringValue(lines.join("\n"))))
