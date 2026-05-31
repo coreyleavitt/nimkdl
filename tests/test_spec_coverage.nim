@@ -58,3 +58,8 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     with Settings(maxExamples: 500, testId: "sc-escaped-string")
     given s in escapedStringSurfaces()
     ensure denotes(s)
+
+  property "\\u{} escapes decode to the codepoint's UTF-8":
+    with Settings(maxExamples: 500, testId: "sc-unicode-escape")
+    given s in unicodeEscapeSurfaces()
+    ensure denotes(s)

@@ -23,7 +23,7 @@
 ## on stdlib `addFloatRoundtrip`, which is not nkdl and tests a different
 ## algorithm than any encoder).
 
-import std/[formatfloat, strutils]   # addFloatRoundtrip — stdlib, NOT nkdl's formatter
+import std/[formatfloat, strutils, unicode]   # addFloatRoundtrip — stdlib, NOT nkdl's formatter
 import proptest
 import ../src/ast
 
@@ -194,3 +194,44 @@ proc escapedStringSurfaces*(): Strategy[ValueSurface] =
   strings(intervals([(0x00'i32, 0x7F'i32)]), 0, 24)
     .map(proc(s: string): ValueSurface =
       ValueSurface(text: "\"" & escapeRegular(s) & "\"", value: newStringValue(s)))
+
+# ---------------------------------------------------------------------------
+# Slice 8 — \u{} escapes (ordinary scalar values)
+#
+#   string-character := '\\' (... | 'u{' hex-unicode '}') | ...
+#   hex-unicode      := hex-digit{1, 6} - surrogate - above-max-scalar
+# Tests the \u{} mechanics — 1..6 digits, case, leading zeros, multi-byte
+# UTF-8 — on ordinary codepoints. Disallowed-literal codepoints (controls,
+# DEL, bidi, BOM), which the spec permits *only* via escape, are a separate
+# deliberate slice. value = the codepoint's UTF-8.
+# ---------------------------------------------------------------------------
+
+func renderUnicodeEscape(cp: int, pad: int, upper: bool): string =
+  ## `\u{...}` for `cp`, with `pad` extra leading zeros (total digits capped
+  ## at 6) and chosen hex case. Hand-written; shares nothing with the lexer.
+  var nat = toHex(cp, 6)                       # 6 uppercase hex digits
+  while nat.len > 1 and nat[0] == '0': nat = nat[1 .. ^1]
+  let total = min(6, nat.len + pad)
+  var digits = repeat('0', total - nat.len) & nat
+  if not upper: digits = toLowerAscii(digits)
+  "\\u{" & digits & "}"
+
+proc unicodeEscapeSurfaces*(): Strategy[ValueSurface] =
+  ## A single `\u{}`-escaped ordinary scalar value inside a `"…"`. Codepoints
+  ## are drawn from gap-free interval ranges (so no rejection): they avoid
+  ## surrogates (D800-DFFF), bidi (200E-200F, 202A-202E, 2066-2069), BOM
+  ## (FEFF), DEL (7F), and the C0/C1 control blocks — all of which are the
+  ## escaped-disallowed-literal slice's job. One codepoint = the value's UTF-8.
+  map(strings(intervals([
+        (0x20'i32,    0x7E'i32),       # printable ASCII (no DEL)
+        (0x00A0'i32,  0x024F'i32),     # Latin-1 supplement + extended
+        (0x0370'i32,  0x1FFF'i32),     # Greek … (before the 0x200x bidi)
+        (0x2030'i32,  0x205F'i32),     # after the 0x202x bidi
+        (0x3000'i32,  0xD7FF'i32),     # CJK … up to the surrogate block
+        (0xE000'i32,  0xFDFF'i32),     # private use … before BOM
+        (0x10000'i32, 0x10FFFF'i32),   # astral planes
+      ]), 1, 1), integers(0, 5), booleans(),
+      proc(s: string, pad: int, upper: bool): ValueSurface =
+        let cp = int(s.runeAt(0))
+        ValueSurface(text: "\"" & renderUnicodeEscape(cp, pad, upper) & "\"",
+                     value: newStringValue(s)))
