@@ -351,11 +351,14 @@ proc nodeSpaceTrivia(): Strategy[string] =
   lists(piece, 0, 4).map(proc(ps: seq[string]): string = ps.join(" "))
 
 proc triviaSurfaces*(): Strategy[ValueSurface] =
-  ## An integer value preceded by arbitrary valid node-space trivia. The
-  ## value is unchanged regardless of the trivia.
-  map(nodeSpaceTrivia(), integers(-9999, 9999),
-      proc(triv: string, n: int): ValueSurface =
-        ValueSurface(text: triv & " " & $n, value: newIntValue(n.int64)))
+  ## An integer value preceded by arbitrary valid node-space trivia and
+  ## optionally followed by a node-terminator line comment (`// …` runs to
+  ## newline/eof). The value is unchanged regardless. The trailing comment
+  ## covers the line-comment-as-terminator path (skipLineComment).
+  map(nodeSpaceTrivia(), integers(-9999, 9999), booleans(),
+      proc(triv: string, n: int, trailComment: bool): ValueSurface =
+        let tail = if trailComment: " // trailing comment" else: ""
+        ValueSurface(text: triv & " " & $n & tail, value: newIntValue(n.int64)))
 
 # ---------------------------------------------------------------------------
 # Slice 13 — bareword identifiers (node names)
