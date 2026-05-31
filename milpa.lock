@@ -3,7 +3,7 @@ version 1
 strategy "maxver"
 
 dep "proptest" {
-    identity "sha256:318a1deafe12957860792edc8461f1776982ef22376cf32f55ac78099f069ff9"
+    identity "sha256:23a422f9429d862d73a180c8b330238f6147f4bfe439a14429938b39406966eb"
     version "0.0.1"
     src_dir "src"
     requires
