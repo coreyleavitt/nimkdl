@@ -583,11 +583,32 @@ func isLineAllUnicodeWhitespace(line: string): bool =
       inc i, w
   true
 
-func isMultilineWsEscapeStart(ch: char): bool {.inline.} =
-  ## In a multi-line string, `\` followed by any of these bytes triggers
-  ## the whitespace-escape rule: the `\` and the entire whitespace run
-  ## (including newlines) are deleted in phase 1.
-  ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r'
+func stringWsRunWidth(lx: Lexer): int =
+  ## If the byte(s) at the cursor are KDL whitespace or a newline — ASCII
+  ## OR multi-byte Unicode — return the byte width to advance past that one
+  ## codepoint; else 0. Single source of truth for the `\<ws+>` whitespace-
+  ## escape (line continuation) in both single-line and multi-line strings.
+  ## KDL v2's escaped-whitespace covers the full Unicode whitespace + newline
+  ## tables, not just ASCII (review #8).
+  if lx.atEof: return 0
+  let b = uint8(lx.peek)
+  if b < 0x80'u8:
+    if isAsciiWhitespace(lx.peek) or isNewline(lx.peek): return 1
+    return 0
+  let (cp, w) = decodeUtf8At(lx.source, lx.pos.offset)
+  if cp >= 0 and (isUnicodeWhitespace(cp) or isUnicodeNewline(cp)): return w
+  0
+
+proc consumeStringWsRun(lx: var Lexer) =
+  ## Elide a run of whitespace/newlines (ASCII or Unicode) at the cursor —
+  ## the body of a `\<ws+>` escape. CRLF/ASCII newlines go through
+  ## advanceNewline (line bookkeeping); multi-byte ws advances by width.
+  while true:
+    let w = stringWsRunWidth(lx)
+    if w == 0: break
+    if w == 1 and isNewline(lx.peek): lx.advanceNewline()
+    else:
+      for _ in 0 ..< w: lx.advanceOne()
 
 proc emit(lx: var Lexer, tok: sink Token) =
   var t = tok
@@ -866,9 +887,15 @@ proc dispatchEscape*(lx: var Lexer, escSpan: Span,
   of ' ', '\t', '\n', '\r':
     eoWhitespaceEscape
   else:
-    lx.emitError(peLexInvalidEscape, escSpan, "unknown escape \\" & esc)
-    lx.advanceOne()
-    eoUnknown
+    # `\` followed by a multi-byte Unicode whitespace/newline is also a
+    # line continuation (review #8). The cursor is at the first ws byte;
+    # the caller elides the run via consumeStringWsRun.
+    if lx.stringWsRunWidth > 0:
+      eoWhitespaceEscape
+    else:
+      lx.emitError(peLexInvalidEscape, escSpan, "unknown escape \\" & esc)
+      lx.advanceOne()
+      eoUnknown
 
 proc decodeRegularString(lx: var Lexer, openSpan: Span): string =
   ## Read a regular (non-raw) string body. Caller has already consumed
@@ -899,11 +926,9 @@ proc decodeRegularString(lx: var Lexer, openSpan: Span): string =
       of eoDecoded, eoUnknown:
         discard
       of eoWhitespaceEscape:
-        # Single-line semantics: drop the whitespace run entirely.
-        while not lx.atEof and
-              (lx.peek == ' ' or lx.peek == '\t' or
-               lx.peek == '\n' or lx.peek == '\r'):
-          if isNewline(lx.peek): lx.advanceNewline() else: lx.advanceOne()
+        # Single-line semantics: drop the whitespace run entirely (ASCII
+        # or Unicode — single source of truth in consumeStringWsRun).
+        lx.consumeStringWsRun()
     of sbControl:
       let s = lx.pos
       lx.advanceOne()
@@ -1092,13 +1117,12 @@ proc lexRegularOrMultiline(lx: var Lexer) =
         return
       # Phase 1: copy bytes into rawBuf, with whitespace-escapes deleted.
       if lx.peek == '\\':
-        # Look ahead: if followed by 1+ whitespace (incl. newline), it's
-        # a whitespace-escape — drop the `\` and all consecutive ws.
+        # Look ahead: if followed by 1+ whitespace (ASCII or Unicode, incl.
+        # newline), it's a whitespace-escape — drop the `\` and the run.
         let savePos = lx.pos
         lx.advanceOne()
-        if not lx.atEof and isMultilineWsEscapeStart(lx.peek):
-          while not lx.atEof and isMultilineWsEscapeStart(lx.peek):
-            if isNewline(lx.peek): lx.advanceNewline() else: lx.advanceOne()
+        if lx.stringWsRunWidth > 0:
+          lx.consumeStringWsRun()
           continue
         # Not a ws-escape — keep the `\` and the next byte verbatim for
         # phase 3 to interpret.

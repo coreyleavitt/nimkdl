@@ -6,7 +6,7 @@
 ## over the original source. Helpers in this file bridge those splits
 ## so the assertion sites can stay readable.
 
-import std/[os, strutils, unittest]
+import std/[os, strutils, unicode, unittest]
 
 import ../src/ast
 import ../src/lexer
@@ -478,3 +478,35 @@ suite "isBareword — emit/lex mirror invariants":
     # `.x` (non-digit after dot) is still a fine bareword.
     check isBareword(".x")
     check isBareword(".abc")
+
+suite "lexer: unicode-whitespace escape (line continuation) — review #8":
+  # KDL v2 escaped-whitespace `\<ws+>` covers the FULL Unicode whitespace +
+  # newline set, not just ASCII. The corpus only ever uses ASCII ws after
+  # `\`, so this was uncovered. `\<ws>` elides the run in both single-line
+  # and multi-line strings.
+
+  # The multi-byte codepoints the ASCII-only escape paths missed.
+  const unicodeWsCps = [0x00A0, 0x1680, 0x202F, 0x205F, 0x3000,
+                        0x2000, 0x2001, 0x200A,           # whitespace
+                        0x0085, 0x2028, 0x2029]           # newlines
+
+  test "single-line: \\<unicode-ws> elides like \\<space>, for every cp":
+    for cp in unicodeWsCps:
+      let ws = $Rune(cp)
+      let ctx = tokenizeCtx("\"x\\" & ws & "y\"")
+      let t = ctx.stream.tokens
+      check t.kinds == @[tkString]
+      check t[0].strVal(ctx) == "xy"          # the ws run is elided
+
+  test "multiline: \\<unicode-ws> line continuation, for every cp":
+    for cp in unicodeWsCps:
+      let ws = $Rune(cp)
+      let src = "\"\"\"\nx\\" & ws & "y\n\"\"\""
+      let ctx = tokenizeCtx(src)
+      let t = ctx.stream.tokens
+      check t.kinds == @[tkString]
+      check t[0].strVal(ctx) == "xy"
+
+  test "mixed ASCII+unicode whitespace run after \\ is fully elided":
+    let ctx = tokenizeCtx("\"a\\ \xC2\xA0\they\"")  # space, NBSP, tab
+    check ctx.stream.tokens[0].strVal(ctx) == "ahey"
