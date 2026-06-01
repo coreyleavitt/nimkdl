@@ -141,3 +141,41 @@ suite "A-string — string group instantiation (single-line quoted + raw)":
         .mapIt(instantiateString(it).value.s)
       check vals.len >= 2          # both styles present
       check vals.allIt(it == vals[0])
+
+suite "A-struct — structural group instantiation (node-shaped witnesses)":
+
+  proc argCount(n: KNode): int =
+    for e in n.entries:
+      if e.kind == keArg: inc result
+  proc propCount(n: KNode): int =
+    for e in n.entries:
+      if e.kind == keProp: inc result
+
+  test "arg count matches the factor (0/1/2 positional arguments)":
+    for row in coveringArray(structuralGroup()):
+      let want = parseInt(lvl(row, "struct.args"))
+      check argCount(instantiateStructural(row).doc[0]) == want
+
+  test "property present iff props=1":
+    for row in coveringArray(structuralGroup()):
+      let n = instantiateStructural(row).doc[0]
+      check (propCount(n) == 1) == (lvl(row, "struct.props") == "yes")
+
+  test "children block present iff children=yes":
+    for row in coveringArray(structuralGroup()):
+      let s = instantiateStructural(row)
+      let hasKids = s.doc[0].children.len > 0
+      check hasKids == (lvl(row, "struct.children") == "yes")
+      check ("{" in s.text) == hasKids
+
+  test "document has a second node iff secondNode=yes":
+    for row in coveringArray(structuralGroup()):
+      let s = instantiateStructural(row)
+      check (s.doc.len == 2) == (lvl(row, "struct.second") == "yes")
+
+  test "the interaction case — node with children followed by a sibling — is generated":
+    # children=yes ∧ second=yes is the slashdash×children-checkpoint bug home;
+    # the constrained covering array must include it.
+    let hit = coveringArray(structuralGroup()).anyIt(
+      lvl(it, "struct.children") == "yes" and lvl(it, "struct.second") == "yes")
+    check hit

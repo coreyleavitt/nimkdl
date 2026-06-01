@@ -21,6 +21,7 @@ suite "E1 — corpus emitter":
   test "one fixture per covering-array row, written in all three projections":
     var n = 0
     for (g, _) in valueGroups(): n += coveringArray(g).len
+    for (g, _) in docGroups():   n += coveringArray(g).len
     check stats.fixtures == n
     var inputFiles = 0
     for _ in walkFiles(outDir / "input" / "*.kdl"): inc inputFiles

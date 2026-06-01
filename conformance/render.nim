@@ -12,12 +12,22 @@
 import std/[strutils, formatfloat]
 import ./model
 
-type ValueSurface* = object
-  ## A rendered value paired with the exact model value it denotes — an oracle
-  ## by construction. Produced by `gen.nim` (random) and `groups.nim`
-  ## (covering-array instantiation); both share this shape.
-  text*:  string
-  value*: KValue
+type
+  ValueSurface* = object
+    ## A rendered value paired with the exact model value it denotes — an oracle
+    ## by construction. Produced by `gen.nim` (random) and `groups.nim`
+    ## (covering-array instantiation); both share this shape.
+    text*:  string
+    value*: KValue
+  NodeSurface* = object
+    text*: string
+    node*: KNode
+  DocSurface* = object
+    ## A whole-document surface (text) paired with its exact model. Node-shaped
+    ## covering-array witnesses (structural group) produce this directly, rather
+    ## than wrapping a single value.
+    text*: string
+    doc*:  KDoc
 
 # ---------------------------------------------------------------------------
 # Numbers   (grammar: number / decimal / hex / octal / binary / integer)

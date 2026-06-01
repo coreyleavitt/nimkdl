@@ -71,6 +71,11 @@ proc buildFixtures*(): seq[Fixture] =
                          input: "node " & s.text & "\n",
                          doc: nodeWitness(s.value))
       inc idx
+  for (g, instantiate) in docGroups():
+    for row in coveringArray(g):
+      let s = instantiate(row)
+      result.add Fixture(name: intToStr(idx, 3), input: s.text, doc: s.doc)
+      inc idx
 
 proc emitCorpus*(outDir: string): CorpusStats =
   ## Write the corpus to `outDir`, overwriting any prior contents. Returns stats
@@ -88,6 +93,7 @@ proc emitCorpus*(outDir: string): CorpusStats =
 
   var groups: seq[GroupCert]
   for (g, _) in valueGroups(): groups.add certify(g)
+  for (g, _) in docGroups():   groups.add certify(g)
   var certJson = %*{
     "kdl_version": 2,
     "format": "nkdl-conformance/1",

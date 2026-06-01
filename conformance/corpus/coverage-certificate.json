@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 37,
+  "fixtures": 43,
   "groups": [
     {
       "name": "integer",
@@ -40,6 +40,19 @@
       ],
       "targets": 14,
       "rows": 9,
+      "complete": true
+    },
+    {
+      "name": "structural",
+      "strength": 2,
+      "factors": [
+        "struct.args",
+        "struct.props",
+        "struct.children",
+        "struct.second"
+      ],
+      "targets": 30,
+      "rows": 6,
       "complete": true
     }
   ]

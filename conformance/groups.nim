@@ -16,6 +16,7 @@
 ## The covering array covers both; only presentation factors are subject to the
 ## metamorphic "same value under different surface" invariant.
 
+import std/strutils    # parseInt
 import ./model
 import ./render
 import ./coverage
@@ -172,15 +173,70 @@ proc instantiateString*(row: Tagset): ValueSurface =
   ValueSurface(text: text, value: kStr(value))
 
 # ---------------------------------------------------------------------------
-# Registry — every value-level group with its instantiator. emit.nim and the
-# nkdl adapter iterate this so a new group is wired in one place.
+# Structural  (grammar: base-node := type? string (node-prop-or-arg)*
+# node-children?  + the document being a list of nodes). NODE-SHAPED witnesses,
+# not value-wrapped. The factors interact — `children × second` is the
+# slashdash×children-checkpoint bug home (an entry/node after a children block).
+# ---------------------------------------------------------------------------
+
+proc structuralGroup*(): InteractionGroup =
+  ## args{0,1,2} × props{yes,no} × children{yes,no} × second{yes,no}, pairwise,
+  ## unconstrained (every shape is a legal document). `second` is a
+  ## document-level factor: is there a sibling node after the primary one.
+  InteractionGroup(
+    name: "structural",
+    t: 2,
+    factors: @[
+      Factor(name: "struct.args",     levels: @["0", "1", "2"]),
+      Factor(name: "struct.props",    levels: @["yes", "no"]),
+      Factor(name: "struct.children", levels: @["yes", "no"]),
+      Factor(name: "struct.second",   levels: @["yes", "no"]),
+    ])  # valid: nil ⇒ all configurations are realizable
+
+proc instantiateStructural*(row: Tagset): DocSurface =
+  ## Build a node-shaped witness directly (text + KDoc). Representative content:
+  ## positional args 1/2, property `k=3`, a bare child `child`, a sibling
+  ## `node2`. The crucial interaction row (children ∧ second) yields
+  ## `node … { child }` followed by `node2` — entries/nodes after a child block.
+  let nArgs    = parseInt(lvl(row, "struct.args"))
+  let hasProp  = lvl(row, "struct.props") == "yes"
+  let hasKids  = lvl(row, "struct.children") == "yes"
+  let hasSecond = lvl(row, "struct.second") == "yes"
+
+  var entries: seq[KEntry]
+  if nArgs >= 1: entries.add arg(kInt(1))
+  if nArgs >= 2: entries.add arg(kInt(2))
+  if hasProp:    entries.add prop("k", kInt(3))
+  var primary = KNode(name: "node", entries: entries)
+  if hasKids: primary.children = @[KNode(name: "child")]
+  var doc: KDoc = @[primary]
+  if hasSecond: doc.add KNode(name: "node2")
+
+  var t = "node"
+  if nArgs >= 1: t.add " 1"
+  if nArgs >= 2: t.add " 2"
+  if hasProp:    t.add " k=3"
+  if hasKids:    t.add " {\n    child\n}"
+  t.add "\n"
+  if hasSecond:  t.add "node2\n"
+  DocSurface(text: t, doc: doc)
+
+# ---------------------------------------------------------------------------
+# Registry — every group with its instantiator. emit.nim and the nkdl adapter
+# iterate these so a new group is wired in one place. Value groups wrap their
+# witness as `node <value>`; doc groups produce a whole document directly.
 # ---------------------------------------------------------------------------
 
 type
   Instantiator* = proc(row: Tagset): ValueSurface {.nimcall.}
+  NodeInstantiator* = proc(row: Tagset): DocSurface {.nimcall.}
   ValueGroup* = tuple[group: InteractionGroup, instantiate: Instantiator]
+  DocGroup* = tuple[group: InteractionGroup, instantiate: NodeInstantiator]
 
 proc valueGroups*(): seq[ValueGroup] =
   @[(integerGroup(), Instantiator(instantiateInteger)),
     (floatGroup(),   Instantiator(instantiateFloat)),
     (stringGroup(),  Instantiator(instantiateString))]
+
+proc docGroups*(): seq[DocGroup] =
+  @[(structuralGroup(), NodeInstantiator(instantiateStructural))]

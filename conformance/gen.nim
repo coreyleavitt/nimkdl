@@ -123,13 +123,8 @@ proc identifierStrings*(): Strategy[string] =
 # recurse. No slashdash/trivia noise yet — those are the next refinements.
 # ---------------------------------------------------------------------------
 
-type
-  NodeSurface* = object
-    text*: string
-    node*: KNode
-  DocSurface* = object
-    text*: string
-    doc*: KDoc
+# `NodeSurface` / `DocSurface` now live in `render.nim` (shared with the
+# covering-array node instantiator, without pulling in proptest).
 
 proc kvPair(): Strategy[(string, ValueSurface)] =
   map(identifierStrings(), valueSurfaces(),

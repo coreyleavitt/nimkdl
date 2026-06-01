@@ -85,3 +85,12 @@ suite "conformance — nkdl runs the covering-array corpus (A4)":
         check r.isOk
         if r.isOk:
           check toJson(mapDoc(r.get)) == toJson(doc)
+
+  test "every doc group: each node-shaped witness parses to its model":
+    for (g, instantiate) in docGroups():
+      for row in coveringArray(g):
+        let s = instantiate(row)
+        let r = parse(s.text)
+        check r.isOk
+        if r.isOk:
+          check toJson(mapDoc(r.get)) == toJson(s.doc)
