@@ -1,2 +1,4 @@
-node 1
+node k=3 {
+    child
+}
 node2

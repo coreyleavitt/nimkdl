@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 83,
+  "fixtures": 86,
   "groups": [
     {
       "name": "integer",
@@ -40,6 +40,16 @@
       ],
       "targets": 14,
       "rows": 9,
+      "complete": true
+    },
+    {
+      "name": "escape",
+      "strength": 1,
+      "factors": [
+        "esc.kind"
+      ],
+      "targets": 3,
+      "rows": 3,
       "complete": true
     },
     {

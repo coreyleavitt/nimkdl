@@ -1,4 +1,1 @@
-node """
-  ab
-  cd
-  """
+node "a\ b"

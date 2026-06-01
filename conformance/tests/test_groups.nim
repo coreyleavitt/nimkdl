@@ -142,6 +142,25 @@ suite "A-string — string group instantiation (single-line quoted + raw)":
       check vals.len >= 2          # both styles present
       check vals.allIt(it == vals[0])
 
+suite "A-escape — \\u{} + escaped-whitespace quoted-string escapes":
+
+  test "each escape form decodes to the right value":
+    for row in coveringArray(escapeGroup()):
+      let v = instantiateEscape(row).value.s
+      case lvl(row, "esc.kind")
+      of "unicode":         check v == "A"     # \u{41}
+      of "escaped-space":   check v == "ab"    # a\ b  → backslash+space discarded
+      of "escaped-newline": check v == "ab"    # a\<nl>b → line continuation
+      else: discard
+
+  test "canonical re-emits the decoded value literally":
+    for row in coveringArray(escapeGroup()):
+      let s = instantiateEscape(row)
+      check canonicalKdl(s.value) == (if lvl(row, "esc.kind") == "unicode": "\"A\"" else: "\"ab\"")
+
+  test "all three escape forms are covered":
+    check coveringArray(escapeGroup()).mapIt(lvl(it, "esc.kind")).deduplicate.len == 3
+
 suite "A-multiline — multi-line string group (dedent; plain + raw)":
 
   test "value is the dedented content; lines is the semantic factor":

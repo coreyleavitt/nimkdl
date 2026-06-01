@@ -6,7 +6,7 @@
       {
         "type": null,
         "kind": "string",
-        "value": "ab"
+        "value": "ab\ncd"
       }
     ],
     "props": [],

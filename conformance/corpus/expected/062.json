@@ -2,7 +2,13 @@
   {
     "name": "node",
     "type": null,
-    "args": [],
+    "args": [
+      {
+        "type": "type",
+        "kind": "int",
+        "value": "1"
+      }
+    ],
     "props": [],
     "children": []
   }

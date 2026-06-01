@@ -1,1 +1,1 @@
-node 1 2 // trailing comment
+node /- k=1 2

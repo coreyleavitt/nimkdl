@@ -2,15 +2,26 @@
   {
     "name": "node",
     "type": null,
-    "args": [
-      {
-        "type": null,
-        "kind": "int",
-        "value": "1"
-      }
+    "args": [],
+    "props": [
+      [
+        "k",
+        {
+          "type": null,
+          "kind": "int",
+          "value": "3"
+        }
+      ]
     ],
-    "props": [],
-    "children": []
+    "children": [
+      {
+        "name": "child",
+        "type": null,
+        "args": [],
+        "props": [],
+        "children": []
+      }
+    ]
   },
   {
     "name": "node2",

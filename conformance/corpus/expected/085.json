@@ -1,7 +1,7 @@
 [
   {
-    "name": "kept",
-    "type": null,
+    "name": "node",
+    "type": "type",
     "args": [],
     "props": [],
     "children": []

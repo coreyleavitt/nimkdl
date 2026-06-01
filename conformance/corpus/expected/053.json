@@ -4,9 +4,9 @@
     "type": null,
     "args": [
       {
-        "type": "type",
+        "type": null,
         "kind": "real",
-        "value": "nan"
+        "value": "inf"
       }
     ],
     "props": [],

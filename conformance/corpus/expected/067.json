@@ -1,6 +1,19 @@
 [
   {
-    "name": "kept",
+    "name": "node",
+    "type": null,
+    "args": [
+      {
+        "type": null,
+        "kind": "int",
+        "value": "1"
+      }
+    ],
+    "props": [],
+    "children": []
+  },
+  {
+    "name": "node2",
     "type": null,
     "args": [],
     "props": [],

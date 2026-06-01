@@ -4,9 +4,9 @@
     "type": null,
     "args": [
       {
-        "type": null,
-        "kind": "null",
-        "value": null
+        "type": "type",
+        "kind": "bool",
+        "value": false
       }
     ],
     "props": [],

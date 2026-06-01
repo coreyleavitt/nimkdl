@@ -7,14 +7,18 @@
         "type": null,
         "kind": "int",
         "value": "1"
-      },
-      {
-        "type": null,
-        "kind": "int",
-        "value": "2"
       }
     ],
-    "props": [],
+    "props": [
+      [
+        "k",
+        {
+          "type": null,
+          "kind": "int",
+          "value": "3"
+        }
+      ]
+    ],
     "children": [
       {
         "name": "child",

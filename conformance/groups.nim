@@ -161,6 +161,26 @@ proc stringGroup*(): InteractionGroup =
     valid: proc(c: Tagset): bool =
       (lvl(c, "str.style") == "raw") == (lvl(c, "str.hashes") != ""))
 
+proc escapeGroup*(): InteractionGroup =
+  ## §Escapes: the quoted-string escape forms the basic string group doesn't
+  ## cover — `\u{…}` unicode, escaped literal whitespace (discarded), and an
+  ## escaped newline / line continuation (discarded). One per form, t=1.
+  InteractionGroup(
+    name: "escape",
+    t: 1,
+    factors: @[
+      Factor(name: "esc.kind",
+             levels: @["unicode", "escaped-space", "escaped-newline"]),
+    ])
+
+proc instantiateEscape*(row: Tagset): ValueSurface =
+  ## `\u{41}` → "A"; `a\ b` → "ab" (backslash+whitespace discarded); `a\<nl>b`
+  ## → "ab" (line continuation). Canonical re-emits the decoded value literally.
+  case lvl(row, "esc.kind")
+  of "unicode":       ValueSurface(text: "\"\\u{41}\"", value: kStr("A"))
+  of "escaped-space": ValueSurface(text: "\"a\\ b\"",   value: kStr("ab"))
+  else:               ValueSurface(text: "\"a\\\nb\"",  value: kStr("ab"))
+
 proc multilineValue(level: string): string =
   ## Representative values with no blank lines and no quotes (so plain and raw
   ## multi-line forms denote the same value). `lines` is the semantic factor.
@@ -423,6 +443,7 @@ proc valueGroups*(): seq[ValueGroup] =
   @[(integerGroup(),    Instantiator(instantiateInteger)),
     (floatGroup(),      Instantiator(instantiateFloat)),
     (stringGroup(),     Instantiator(instantiateString)),
+    (escapeGroup(),     Instantiator(instantiateEscape)),
     (multilineGroup(),  Instantiator(instantiateMultiline)),
     (keywordGroup(),    Instantiator(instantiateKeyword)),
     (annotationGroup(), Instantiator(instantiateAnnotation))]
