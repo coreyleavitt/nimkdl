@@ -30,6 +30,11 @@ the recognizer sees); the `List Char ↔ String` UTF-8 packing is a trivial
 boundary, deferred only because Lean 4's `String` is now `ByteArray`-backed.
 All three: `propext, Quot.sound` (core; no `sorryAx`).
 
+`Kdl/Str.lean` — the QUOTED STRING fragment (escapes + recursion):
+- **round-trip** (`parse_render`): `parse (render s) = some s` for every string —
+  `"` and `\` are escaped as `\"` / `\\`; parse strips the quotes and decodes the
+  escapes. Proved by induction over the content with the escape-character cases.
+
 ## Run
 
 ```
