@@ -20,14 +20,20 @@ namespace Kdl.Full
 -- Values: quoted strings.
 -- ===========================================================================
 
+/-- A delimiter that ends a bareword: space, brace, or quote. -/
+def isSpecial (c : Char) : Bool := c = ' ' || c = '{' || c = '}' || c = '"'
+
 inductive Value where
-  | str : List Char → Value
+  | str  : List Char → Value     -- quoted string
+  | word : List Char → Value     -- bareword (nonempty run of non-special chars)
 
 def renderValue : Value → List Char
-  | .str s => '"' :: (s ++ ['"'])
+  | .str s  => '"' :: (s ++ ['"'])
+  | .word w => w
 
 def valueWF : Value → Prop
-  | .str s => ∀ c ∈ s, c ≠ '"'
+  | .str s  => ∀ c ∈ s, c ≠ '"'
+  | .word w => w ≠ [] ∧ ∀ c ∈ w, isSpecial c = false
 
 /-- Read up to the first `"`. -/
 def takeStr : List Char → Option (List Char × List Char)
@@ -42,14 +48,44 @@ theorem takeStr_app (s rest : List Char) (h : ∀ c ∈ s, c ≠ '"') :
     have hc : c ≠ '"' := h c (by simp)
     simp [takeStr, hc, ih (fun a ha => h a (by simp [ha]))]
 
-def parseValue : List Char → Option (Value × List Char)
-  | '"' :: rest => (takeStr rest).map (fun p => (Value.str p.1, p.2))
-  | _ => none
+/-- Read a bareword: a run of non-special chars, stopping at the first delimiter. -/
+def takeWord : List Char → List Char × List Char
+  | [] => ([], [])
+  | c :: rest => if isSpecial c then ([], c :: rest) else let p := takeWord rest; (c :: p.1, p.2)
 
-theorem parseValue_render (v : Value) (rest : List Char) (h : valueWF v) :
+theorem takeWord_app (w rest : List Char) (hw : ∀ c ∈ w, isSpecial c = false)
+    (hr : rest = [] ∨ ∃ c r, rest = c :: r ∧ isSpecial c = true) :
+    takeWord (w ++ rest) = (w, rest) := by
+  induction w with
+  | nil =>
+    simp only [List.nil_append]
+    rcases hr with h | ⟨c, r, heq, hs⟩
+    · subst h; rfl
+    · subst heq; simp [takeWord, hs]
+  | cons c cs ih =>
+    have hc : isSpecial c = false := hw c (by simp)
+    have ih' := ih (fun a ha => hw a (by simp [ha]))
+    simp [takeWord, hc, ih']
+
+def parseValue : List Char → Option (Value × List Char)
+  | [] => none
+  | c :: rest =>
+      if c = '"' then (takeStr rest).map (fun p => (Value.str p.1, p.2))
+      else if isSpecial c then none
+      else let p := takeWord (c :: rest); some (.word p.1, p.2)
+
+theorem parseValue_render (v : Value) (rest : List Char) (h : valueWF v)
+    (hr : rest = [] ∨ ∃ c r, rest = c :: r ∧ isSpecial c = true) :
     parseValue (renderValue v ++ rest) = some (v, rest) := by
-  obtain ⟨s⟩ := v
-  simp [renderValue, parseValue, takeStr_app s rest h]
+  match v, h with
+  | .str s, h =>
+    simp [renderValue, parseValue, takeStr_app s rest h]
+  | .word (c :: cs), ⟨_, hw⟩ =>
+    have hc : isSpecial c = false := hw c (by simp)
+    have hcq : c ≠ '"' := by intro h; subst h; simp [isSpecial] at hc
+    have htw : takeWord (c :: (cs ++ rest)) = (c :: cs, rest) :=
+      takeWord_app (c :: cs) rest hw hr
+    simp [renderValue, parseValue, hcq, hc, htw]
 
 -- ===========================================================================
 -- Document structure: nodes with name + args + recursive children.
@@ -97,21 +133,28 @@ end
     children block. Fuel = arg-list length bound. -/
 def parseArgs : Nat → List Char → Option (List Value × List Char)
   | 0, _ => none
-  | fuel + 1, ' ' :: rest =>
-      match rest with
-      | '{' :: rest2 => some ([], ' ' :: '{' :: rest2)
-      | _ =>
-          match parseValue rest with
-          | some (v, rest2) => (parseArgs fuel rest2).map (fun p => (v :: p.1, p.2))
-          | none => none
+  | fuel + 1, ' ' :: c :: rest =>
+      if c = '{' then some ([], ' ' :: '{' :: rest)
+      else
+        match parseValue (c :: rest) with
+        | some (v, rest2) => (parseArgs fuel rest2).map (fun p => (v :: p.1, p.2))
+        | none => none
   | _ + 1, toks => some ([], toks)
 
--- One-step reduction of parseArgs on ` "…` (a value, not the ` {` children delim).
-theorem parseArgs_quote (fuel : Nat) (X : List Char) :
-    parseArgs (fuel + 1) (' ' :: '"' :: X) =
-      (match parseValue ('"' :: X) with
+-- One-step reduction of parseArgs on ` c…` where `c ≠ '{'` (a value, not ` {`).
+theorem parseArgs_step (fuel : Nat) (c : Char) (rest : List Char) (hc : c ≠ '{') :
+    parseArgs (fuel + 1) (' ' :: c :: rest) =
+      (match parseValue (c :: rest) with
        | some (v, rest2) => (parseArgs fuel rest2).map (fun p => (v :: p.1, p.2))
-       | none => none) := rfl
+       | none => none) := by
+  simp only [parseArgs, if_neg hc]
+
+theorem renderArgs_append_cons (vs : List Value) (Z : List Char) :
+    ∃ r, renderArgs vs ++ ' ' :: Z = ' ' :: r := by
+  cases vs with
+  | nil => exact ⟨Z, rfl⟩
+  | cons v vs => exact ⟨renderValue v ++ renderArgs vs ++ ' ' :: Z, by
+      simp [renderArgs, List.append_assoc]⟩
 
 theorem parseArgs_render (args : List Value) (Y : List Char) (F : Nat)
     (hwf : ∀ v ∈ args, valueWF v) (hF : args.length < F) :
@@ -123,16 +166,24 @@ theorem parseArgs_render (args : List Value) (Y : List Char) (F : Nat)
   | cons v vs ih =>
     match F with
     | F + 1 =>
-      obtain ⟨s⟩ := v
-      have hv : valueWF (Value.str s) := hwf _ (by simp)
+      have hv : valueWF v := hwf _ (by simp)
       have hvs : ∀ w ∈ vs, valueWF w := fun w hw => hwf w (by simp [hw])
       have hF' : vs.length < F := by simp only [List.length_cons] at hF; omega
-      have hpv := parseValue_render (Value.str s)
-        (renderArgs vs ++ ' ' :: '{' :: Y) hv
+      -- the trailing input after this value is space-led, so it ends a bareword
+      obtain ⟨r0, hr0⟩ := renderArgs_append_cons vs ('{' :: Y)
+      have hpv := parseValue_render v (renderArgs vs ++ ' ' :: '{' :: Y) hv
+        (Or.inr ⟨' ', r0, hr0, by decide⟩)
       have hia := ih F hvs hF'
-      simp only [renderArgs, renderValue, List.cons_append, List.append_assoc,
-                 List.nil_append] at hpv ⊢
-      rw [parseArgs_quote, hpv]
+      -- renderValue v = c :: tail with c ≠ '{', so parseArgs takes the value branch
+      obtain ⟨c, tl, hvr, hc⟩ : ∃ c tl, renderValue v = c :: tl ∧ c ≠ '{' := by
+        match v, hv with
+        | .str s, _ => exact ⟨'"', s ++ ['"'], rfl, by decide⟩
+        | .word (a :: as), ⟨_, hw⟩ =>
+            refine ⟨a, as, rfl, ?_⟩
+            have := hw a (by simp); simp only [isSpecial, Bool.or_eq_false_iff] at this
+            intro h; simp_all
+      simp only [renderArgs, hvr, List.cons_append, List.append_assoc] at hpv ⊢
+      rw [parseArgs_step _ _ _ hc, hpv]
       simp [hia]
 
 mutual
