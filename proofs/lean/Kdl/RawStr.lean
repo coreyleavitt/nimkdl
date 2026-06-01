@@ -81,4 +81,22 @@ theorem parse_render (content : List Char) (n : Nat) (h : ∀ c ∈ content, c �
 
 #print axioms parse_render
 
+theorem hashes_length (n : Nat) : (hashes n).length = n := by simp [hashes]
+
+/-- SOUNDNESS: the delimiter match is ENFORCED — a closing hash count `m` that
+    differs from the opening count `n` is REJECTED. So the verified property
+    (matching) holds both ways: matched closes accept (`parse_render`), and
+    mismatched closes reject. -/
+theorem parse_mismatch (content : List Char) (n m : Nat) (hne : m ≠ n)
+    (h : ∀ c ∈ content, c ≠ '"') :
+    parse (hashes n ++ '"' :: (content ++ '"' :: hashes m)) = none := by
+  have h' : hashes m ≠ hashes n := fun hc =>
+    hne (by have := congrArg List.length hc; simpa [hashes_length] using this)
+  unfold parse
+  rw [countHashes_app n ('"' :: (content ++ '"' :: hashes m))
+        (fun c r heq => by injection heq with h1 _; subst h1; decide)]
+  simp [takeContent_app content (hashes m) h, h']
+
+#print axioms parse_mismatch
+
 end Kdl.RawStr
