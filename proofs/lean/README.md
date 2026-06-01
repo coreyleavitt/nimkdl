@@ -18,7 +18,20 @@ define `render` and `parse` and *prove* they agree for every input.
 Together: the recognizer accepts exactly the canonical renderings and never lies
 about the value.
 
+`Kdl/Number.lean` — the NUMBER fragment (first requiring real INDUCTION):
+- **faithfulness** (`ofDigits_toDigits`): `ofDigits (toDigits n) = n` — the
+  decimal digits of a natural number denote it exactly (`propext, Quot.sound`).
+
+The arithmetic heart of a verified decimal recognizer. The string surface
+(char ↔ digit, big-endian reverse, the `0` case) layers on top — the next
+increment, deferred only so `Char.ofNat` plumbing doesn't crowd out the math.
+
 ## Run
+
+```
+proofs/lean/run.sh           # builds the cached Lean image once, then checks both files
+```
+
 
 ```
 proofs/lean/run.sh           # builds the cached Lean image once, then checks
