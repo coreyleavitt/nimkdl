@@ -92,7 +92,80 @@ proc stringSurfaces*(): Strategy[ValueSurface] =
 proc valueSurfaces*(): Strategy[ValueSurface] =
   oneOf([intSurfaces(), floatSurfaces(), keywordSurfaces(), stringSurfaces()])
 
+# ---------------------------------------------------------------------------
+# Identifiers  (unambiguous-ident over ASCII + Unicode; minus keyword bareword)
+# ---------------------------------------------------------------------------
+
+proc identifierStrings*(): Strategy[string] =
+  let startCh = strings(intervals([
+    (0x41'i32, 0x5A'i32), (0x61'i32, 0x7A'i32), (0x5F'i32, 0x5F'i32),
+    (0x00C0'i32, 0x024F'i32), (0x0370'i32, 0x03FF'i32)]), 1, 1)
+  let restCh = strings(intervals([
+    (0x41'i32, 0x5A'i32), (0x61'i32, 0x7A'i32), (0x30'i32, 0x39'i32),
+    (0x5F'i32, 0x5F'i32), (0x2D'i32, 0x2E'i32), (0x24'i32, 0x24'i32),
+    (0x00C0'i32, 0x024F'i32), (0x0370'i32, 0x03FF'i32)]), 0, 8)
+  map(startCh, restCh, proc(a, b: string): string = a & b)
+    .filter(proc(s: string): bool =
+      s notin ["true", "false", "null", "inf", "-inf", "nan"])
+
+# ---------------------------------------------------------------------------
+# Nodes + documents
+#   base-node := type? string (node-space (node-space) node-prop-or-arg)*
+#                (node-space node-children)? ...
+# Args/props reuse valueSurfaces (text+value paired). Props are deduped by key
+# (distinct keys for now; repeated-key last-wins is a follow-up). Children
+# recurse. No slashdash/trivia noise yet — those are the next refinements.
+# ---------------------------------------------------------------------------
+
+type
+  NodeSurface* = object
+    text*: string
+    node*: KNode
+  DocSurface* = object
+    text*: string
+    doc*: KDoc
+
+proc kvPair(): Strategy[(string, ValueSurface)] =
+  map(identifierStrings(), valueSurfaces(),
+      proc(k: string, v: ValueSurface): (string, ValueSurface) = (k, v))
+
+proc nodeSurface*(): Strategy[NodeSurface] =
+  map(identifierStrings(), lists(valueSurfaces(), 0, 3), lists(kvPair(), 0, 2),
+      proc(name: string, args: seq[ValueSurface],
+           props: seq[(string, ValueSurface)]): NodeSurface =
+        var t = name
+        var entries: seq[KEntry]
+        for a in args:
+          t.add " " & a.text
+          entries.add arg(a.value)
+        # Keep the last occurrence of each key (KDL last-wins), distinct in
+        # both text and model for this tracer.
+        var seen: seq[string]
+        var kept: seq[(string, ValueSurface)]
+        for i in countdown(props.high, 0):
+          if props[i][0] notin seen:
+            seen.add props[i][0]
+            kept.insert(props[i], 0)
+        for kv in kept:
+          t.add " " & kv[0] & "=" & kv[1].text
+          entries.add prop(kv[0], kv[1].value)
+        NodeSurface(text: t, node: KNode(name: name, entries: entries)))
+
+proc docSurface*(): Strategy[DocSurface] =
+  ## A document: one or more nodes, newline-terminated.
+  lists(nodeSurface(), 1, 4).map(proc(ns: seq[NodeSurface]): DocSurface =
+    var t = ""
+    var doc: KDoc
+    for i in 0 ..< ns.len:
+      if i > 0: t.add "\n"
+      t.add ns[i].text
+      doc.add ns[i].node
+    DocSurface(text: t & "\n", doc: doc))
+
 when isMainModule:
-  # Clean-room proof: sample (text, expected-json) pairs, proptest+stdlib only.
-  for vs in valueSurfaces().sampleN(12):
-    echo vs.text, "   =>   ", $toJson(vs.value)
+  # Clean-room proof: sample whole documents → (input text, expected json).
+  for ds in docSurface().sampleN(4):
+    echo "--- input ---"
+    echo ds.text
+    echo "--- expected ---"
+    echo pretty(toJson(ds.doc))

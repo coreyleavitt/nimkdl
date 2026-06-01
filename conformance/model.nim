@@ -17,7 +17,7 @@
 ## (no ambiguity / lookahead / error recovery), so the (text, model) pair is an
 ## oracle by construction — no parser required to produce it.
 
-import std/json
+import std/[json, formatfloat]   # formatfloat = stdlib Schubfach (NOT nkdl)
 
 type
   KValueKind* = enum
@@ -71,8 +71,12 @@ func annoJson(anno: string): JsonNode =
   if anno.len == 0: newJNull() else: %anno
 
 func toJson*(v: KValue): JsonNode =
-  ## Tagged, language-neutral. Non-finite floats are strings ("inf"/"-inf"/
-  ## "nan") since JSON has no IEEE specials. `int` stays a JSON integer.
+  ## Tagged, language-neutral. FLOATS are emitted as the shortest decimal
+  ## STRING that round-trips to the exact IEEE-754 double (and "inf"/"-inf"/
+  ## "nan" for the specials) — a JSON *number* would lose bits and there is no
+  ## JSON for the specials, so any consumer's `strtod` on the string recovers
+  ## the exact value. `int` stays a JSON integer (generation is bounded inside
+  ## 2^53, so it is exact; full i64/u64/bigint will move to strings too).
   result = newJObject()
   result["type"] = annoJson(v.typeAnno)
   case v.kind
@@ -82,10 +86,13 @@ func toJson*(v: KValue): JsonNode =
   of kvString: result["kind"] = %"string"; result["value"] = %v.s
   of kvFloat:
     result["kind"] = %"float"
-    if v.f != v.f:            result["value"] = %"nan"
-    elif v.f == Inf:          result["value"] = %"inf"
-    elif v.f == NegInf:       result["value"] = %"-inf"
-    else:                     result["value"] = %v.f
+    if v.f != v.f:      result["value"] = %"nan"
+    elif v.f == Inf:    result["value"] = %"inf"
+    elif v.f == NegInf: result["value"] = %"-inf"
+    else:
+      var s = ""
+      s.addFloatRoundtrip(v.f)
+      result["value"] = %s
 
 func toJson*(n: KNode): JsonNode =
   result = newJObject()
