@@ -1,0 +1,12 @@
+[package]
+name = "kdl-rs-adapter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kdl = "6"
+serde_json = "1"
+
+[[bin]]
+name = "adapter"
+path = "src/main.rs"
