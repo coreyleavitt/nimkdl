@@ -5,8 +5,8 @@
     "args": [
       {
         "type": "type",
-        "kind": "real",
-        "value": "nan"
+        "kind": "null",
+        "value": null
       }
     ],
     "props": [],

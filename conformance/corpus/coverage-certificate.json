@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 77,
+  "fixtures": 83,
   "groups": [
     {
       "name": "integer",
@@ -40,6 +40,18 @@
       ],
       "targets": 14,
       "rows": 9,
+      "complete": true
+    },
+    {
+      "name": "multiline",
+      "strength": 2,
+      "factors": [
+        "ml.style",
+        "ml.indent",
+        "ml.lines"
+      ],
+      "targets": 16,
+      "rows": 6,
       "complete": true
     },
     {

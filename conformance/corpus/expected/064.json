@@ -6,9 +6,16 @@
       {
         "type": null,
         "kind": "int",
-        "value": "2"
+        "value": "1"
       }
     ],
+    "props": [],
+    "children": []
+  },
+  {
+    "name": "node2",
+    "type": null,
+    "args": [],
     "props": [],
     "children": []
   }

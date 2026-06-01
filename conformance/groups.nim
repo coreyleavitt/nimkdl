@@ -161,6 +161,35 @@ proc stringGroup*(): InteractionGroup =
     valid: proc(c: Tagset): bool =
       (lvl(c, "str.style") == "raw") == (lvl(c, "str.hashes") != ""))
 
+proc multilineValue(level: string): string =
+  ## Representative values with no blank lines and no quotes (so plain and raw
+  ## multi-line forms denote the same value). `lines` is the semantic factor.
+  if level == "two": "ab\ncd" else: "ab"
+
+proc multilineGroup*(): InteractionGroup =
+  ## §Multi-line String: style{plain,raw} × indent{none,two,four} × lines{one,two},
+  ## pairwise. style/indent are surface (the dedent strips the closing-line
+  ## prefix); `lines` is semantic. Canonical = the quoted single-line string.
+  InteractionGroup(
+    name: "multiline",
+    t: 2,
+    factors: @[
+      Factor(name: "ml.style",  levels: @["plain", "raw"]),
+      Factor(name: "ml.indent", levels: @["none", "two", "four"]),
+      Factor(name: "ml.lines",  levels: @["one", "two"]),
+    ])
+
+proc instantiateMultiline*(row: Tagset): ValueSurface =
+  ## Render one multi-line covering-array row. The value is the dedented content;
+  ## indent/style only shape the surface. (`node """…"""` — a multi-line arg.)
+  let value = multilineValue(lvl(row, "ml.lines"))
+  let indent = case lvl(row, "ml.indent")
+               of "two": 2
+               of "four": 4
+               else: 0
+  let raw = lvl(row, "ml.style") == "raw"
+  ValueSurface(text: renderMultiline(value, indent, raw), value: kStr(value))
+
 proc instantiateString*(row: Tagset): ValueSurface =
   ## Render one string covering-array row to a witness. `content` is the decoded
   ## value (semantic); `style`/`hashes` shape only the surface text.
@@ -394,6 +423,7 @@ proc valueGroups*(): seq[ValueGroup] =
   @[(integerGroup(),    Instantiator(instantiateInteger)),
     (floatGroup(),      Instantiator(instantiateFloat)),
     (stringGroup(),     Instantiator(instantiateString)),
+    (multilineGroup(),  Instantiator(instantiateMultiline)),
     (keywordGroup(),    Instantiator(instantiateKeyword)),
     (annotationGroup(), Instantiator(instantiateAnnotation))]
 

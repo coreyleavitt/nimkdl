@@ -1,1 +1,3 @@
-( type ) node
+node 1 /- {
+    x
+}

@@ -1,1 +1,4 @@
-node #true
+node """
+  ab
+  cd
+  """

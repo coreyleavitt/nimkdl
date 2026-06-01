@@ -1,1 +1,3 @@
-node (type)#null
+node """
+    ab
+    """

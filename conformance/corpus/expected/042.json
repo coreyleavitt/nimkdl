@@ -5,8 +5,8 @@
     "args": [
       {
         "type": null,
-        "kind": "null",
-        "value": null
+        "kind": "string",
+        "value": "ab\ncd"
       }
     ],
     "props": [],

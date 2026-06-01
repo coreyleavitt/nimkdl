@@ -6,10 +6,27 @@
       {
         "type": null,
         "kind": "int",
-        "value": "2"
+        "value": "1"
       }
     ],
-    "props": [],
-    "children": []
+    "props": [
+      [
+        "k",
+        {
+          "type": null,
+          "kind": "int",
+          "value": "3"
+        }
+      ]
+    ],
+    "children": [
+      {
+        "name": "child",
+        "type": null,
+        "args": [],
+        "props": [],
+        "children": []
+      }
+    ]
   }
 ]

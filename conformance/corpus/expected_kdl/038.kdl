@@ -1,1 +1,1 @@
-node #true
+node "ab\ncd"

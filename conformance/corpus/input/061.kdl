@@ -1,2 +1,4 @@
-/-gone 1 2
-kept
+node k=3 {
+    child
+}
+node2

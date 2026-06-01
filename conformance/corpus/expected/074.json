@@ -1,8 +1,14 @@
 [
   {
     "name": "node",
-    "type": "type",
-    "args": [],
+    "type": null,
+    "args": [
+      {
+        "type": null,
+        "kind": "int",
+        "value": "1"
+      }
+    ],
     "props": [],
     "children": []
   }

@@ -142,6 +142,39 @@ suite "A-string — string group instantiation (single-line quoted + raw)":
       check vals.len >= 2          # both styles present
       check vals.allIt(it == vals[0])
 
+suite "A-multiline — multi-line string group (dedent; plain + raw)":
+
+  test "value is the dedented content; lines is the semantic factor":
+    for row in coveringArray(multilineGroup()):
+      let want = (if lvl(row, "ml.lines") == "two": "ab\ncd" else: "ab")
+      check instantiateMultiline(row).value.s == want
+
+  test "surface opens with triple-quote (raw adds a hash)":
+    for row in coveringArray(multilineGroup()):
+      let t = instantiateMultiline(row).text
+      if lvl(row, "ml.style") == "raw": check t.startsWith("#\"\"\"")
+      else:                             check t.startsWith("\"\"\"")
+
+  test "each content line is indented by the dedent prefix":
+    for row in coveringArray(multilineGroup()):
+      if lvl(row, "ml.indent") == "four":
+        let t = instantiateMultiline(row).text
+        check "\n    ab" in t          # 4-space prefix before content
+
+  test "canonical is the quoted single-line string (multiline is surface-only)":
+    for row in coveringArray(multilineGroup()):
+      let s = instantiateMultiline(row)
+      let want = (if lvl(row, "ml.lines") == "two": "\"ab\\ncd\"" else: "\"ab\"")
+      check canonicalKdl(s.value) == want
+
+  test "metamorphic: same content via any indent/style denotes one value":
+    for lines in ["one", "two"]:
+      let vals = coveringArray(multilineGroup())
+        .filterIt(lvl(it, "ml.lines") == lines)
+        .mapIt(instantiateMultiline(it).value.s)
+      check vals.len >= 2
+      check vals.allIt(it == vals[0])
+
 suite "A-keyword — keyword value group (#true/#false/#null/#inf/#-inf/#nan)":
 
   test "each kind renders its keyword and denotes the right model":

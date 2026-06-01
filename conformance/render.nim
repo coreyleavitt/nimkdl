@@ -139,6 +139,20 @@ func renderStrEscaped*(s: string): string =
   ## (single source of truth) — a quoted-escaped surface IS the canonical form.
   canonicalQuoted(s)
 
+func renderMultiline*(value: string, indentWidth: int, raw: bool): string =
+  ## A multi-line string surface (§Multi-line String). The generation direction
+  ## of the dedent rule: every content line is indented by `indentWidth` spaces,
+  ## and the closing `"""` sits on its own line at that same indent — so a parser
+  ## that strips the closing line's whitespace prefix recovers exactly `value`.
+  ## `raw` wraps with a single `#` (raw multi-line — no escapes). Precondition
+  ## (generator's job): `value` has no blank lines and, when raw, no `"""#`.
+  let prefix = repeat(' ', indentWidth)
+  let h = (if raw: "#" else: "")
+  result = h & "\"\"\"\n"
+  for line in value.split('\n'):
+    result.add prefix & line & "\n"
+  result.add prefix & "\"\"\"" & h
+
 func renderRawString*(s: string, hashes: int): string =
   ## `#…#"…"#…#` raw form with `hashes` leading/trailing `#`. No escapes — the
   ## body is emitted verbatim. Precondition (the generator's job): `s` contains
