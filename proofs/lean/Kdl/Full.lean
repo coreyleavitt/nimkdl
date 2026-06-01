@@ -3,15 +3,15 @@
 
   The "full proof": one grammar, one parser, one round-trip theorem — combining
   the proven patterns into a coherent KDL core. A document is a list of nodes;
-  a node has an identifier name, a list of STRING-valued arguments, and recursive
-  children:  `name "arg1" "arg2" { children }`.
+  a node has a multi-char IDENTIFIER name, a list of MULTI-TYPE arguments
+  (bareword or quoted string), and recursive children:
+      `name bareword "string" { children }`.
 
-  This integrates: identifiers (name char), typed values (quoted strings, with
-  the takeStr run-lemma), a space-separated VALUE LIST (parseArgs), and the
-  recursive document structure (fuel-based mutual recursion) — all in one
-  end-to-end `parse (renderForest f) = some f` for every well-formed document.
-
-  (Single value kind = quoted string; numbers/barewords are the obvious widening.)
+  This integrates: multi-char identifiers (takeWord run-lemma), typed values
+  (quoted strings via takeStr, barewords via takeWord, dispatched by leading
+  char), a space-separated VALUE LIST (parseArgs), and the recursive document
+  structure (fuel-based mutual recursion) — all in one end-to-end
+  `parse (renderForest f) = some f` for every well-formed document.
 -/
 
 namespace Kdl.Full
@@ -93,7 +93,7 @@ theorem parseValue_render (v : Value) (rest : List Char) (h : valueWF v)
 
 mutual
   inductive Tree where
-    | node : Char → List Value → Forest → Tree
+    | node : List Char → List Value → Forest → Tree   -- multi-char identifier name
   inductive Forest where
     | nil  : Forest
     | cons : Tree → Forest → Forest
@@ -109,8 +109,8 @@ end
 
 mutual
   def treeWF : Tree → Prop
-    | .node c args f =>
-        c ≠ ' ' ∧ c ≠ '{' ∧ c ≠ '}' ∧ c ≠ '"' ∧ (∀ v ∈ args, valueWF v) ∧ forestWF f
+    | .node name args f =>
+        name ≠ [] ∧ (∀ c ∈ name, isSpecial c = false) ∧ (∀ v ∈ args, valueWF v) ∧ forestWF f
   def forestWF : Forest → Prop
     | .nil => True
     | .cons t f => treeWF t ∧ forestWF f
@@ -123,7 +123,7 @@ def renderArgs : List Value → List Char
 
 mutual
   def renderTree : Tree → List Char
-    | .node c args f => c :: (renderArgs args ++ ' ' :: '{' :: (renderForest f ++ ['}']))
+    | .node name args f => name ++ (renderArgs args ++ ' ' :: '{' :: (renderForest f ++ ['}']))
   def renderForest : Forest → List Char
     | .nil => []
     | .cons t f => renderTree t ++ renderForest f
@@ -189,16 +189,17 @@ theorem parseArgs_render (args : List Value) (Y : List Char) (F : Nat)
 mutual
   def parseTree : Nat → List Char → Option (Tree × List Char)
     | 0, _ => none
-    | _ + 1, [] => none
-    | fuel + 1, c :: rest =>
-        if c = ' ' ∨ c = '{' ∨ c = '}' ∨ c = '"' then none
-        else
-          match parseArgs (rest.length + 1) rest with
-          | some (args, ' ' :: '{' :: rest3) =>
-              match parseForest fuel rest3 with
-              | some (f, '}' :: rest4) => some (.node c args f, rest4)
-              | _ => none
-          | _ => none
+    | fuel + 1, toks =>
+        match takeWord toks with
+        | (name, rest) =>
+          if name = [] then none      -- a node must have a non-empty identifier
+          else
+            match parseArgs (rest.length + 1) rest with
+            | some (args, ' ' :: '{' :: rest3) =>
+                match parseForest fuel rest3 with
+                | some (f, '}' :: rest4) => some (.node name args f, rest4)
+                | _ => none
+            | _ => none
   def parseForest : Nat → List Char → Option (Forest × List Char)
     | 0, _ => none
     | _ + 1, [] => some (.nil, [])
@@ -251,21 +252,22 @@ theorem parseTree_render (t : Tree) (fuel : Nat) (rest : List Char)
     (hwf : treeWF t) (hf : sizeTree t < fuel) :
     parseTree fuel (renderTree t ++ rest) = some (t, rest) := by
   match t, fuel, hf with
-  | .node c args g, fuel + 1, hf =>
-    obtain ⟨h1, h2, h3, h4, hargs, hwfg⟩ := hwf
+  | .node name args g, fuel + 1, hf =>
+    obtain ⟨hne, hnsp, hargs, hwfg⟩ := hwf
     have hsub : sizeForest g < fuel := by simp only [sizeTree] at hf; omega
     have hforest := parseForest_render g fuel ('}' :: rest) hwfg hsub (Or.inr ⟨rest, rfl⟩)
-    have hns : ¬ (c = ' ' ∨ c = '{' ∨ c = '}' ∨ c = '"') := by
-      rintro (h | h | h | h)
-      · exact h1 h
-      · exact h2 h
-      · exact h3 h
-      · exact h4 h
+    -- the identifier name is read by takeWord; the tail begins with a space, so
+    -- the run stops exactly at the name's end
+    have htw : takeWord
+        (name ++ (renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)))
+        = (name, renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)) := by
+      obtain ⟨r0, hr0⟩ := renderArgs_append_cons args ('{' :: (renderForest g ++ '}' :: rest))
+      exact takeWord_app name _ hnsp (Or.inr ⟨' ', r0, hr0, by decide⟩)
     have hpa := parseArgs_render args (renderForest g ++ '}' :: rest)
       ((renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)).length + 1)
       hargs (by have := renderArgs_length args; simp only [List.length_append]; omega)
-    simp only [renderTree, List.cons_append, List.append_assoc, List.singleton_append,
-               List.nil_append, parseTree, if_neg hns, hpa, hforest]
+    simp only [renderTree, List.cons_append, List.append_assoc,
+               List.nil_append, parseTree, htw, if_neg hne, hpa, hforest]
 theorem parseForest_render (f : Forest) (fuel : Nat) (rest : List Char)
     (hwf : forestWF f) (hf : sizeForest f < fuel) (hr : rest = [] ∨ ∃ r, rest = '}' :: r) :
     parseForest fuel (renderForest f ++ rest) = some (f, rest) := by
@@ -280,12 +282,17 @@ theorem parseForest_render (f : Forest) (fuel : Nat) (rest : List Char)
     have hsf : sizeForest f < fuel := by omega
     have htree := parseTree_render t fuel (renderForest f ++ rest) hwft hst
     have hrest := parseForest_render f fuel rest hwff hsf hr
-    obtain ⟨c, args, g⟩ := t
-    obtain ⟨_, _, hc, _, _, _⟩ := hwft
-    simp only [renderForest, renderTree, List.append_assoc, List.cons_append,
-               List.singleton_append, List.nil_append] at htree ⊢
-    rw [parseForest_node _ _ _ hc, htree]
-    simp only [hrest]
+    obtain ⟨name, args, g⟩ := t
+    obtain ⟨hne, hnsp, _, _⟩ := hwft
+    -- the forest begins with the node's name; its head char is non-special (≠ '}')
+    match name, hnsp, htree with
+    | a :: as, hnsp, htree =>
+      have ha : a ≠ '}' := by
+        have := hnsp a (by simp); intro h; subst h; simp [isSpecial] at this
+      simp only [renderForest, renderTree, List.append_assoc, List.cons_append,
+                 List.nil_append] at htree ⊢
+      rw [parseForest_node _ _ _ ha, htree]
+      simp only [hrest]
 end
 
 def parse (s : List Char) : Option Forest :=
@@ -293,8 +300,9 @@ def parse (s : List Char) : Option Forest :=
   | some (f, []) => some f
   | _ => none
 
-/-- THE FULL PROOF: every well-formed document — nodes with identifier names,
-    string-valued argument lists, and recursive children — round-trips. -/
+/-- THE FULL PROOF: every well-formed document — nodes with multi-char identifier
+    names, multi-type argument lists (bareword | string), and recursive children
+    — round-trips. -/
 theorem parse_renderForest (f : Forest) (hwf : forestWF f) :
     parse (renderForest f) = some f := by
   unfold parse
