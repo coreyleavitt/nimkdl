@@ -76,14 +76,14 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
   some f` for every document. A document is a list of nodes; each node has an
   optional `(type)` ANNOTATION, a multi-char IDENTIFIER name, a list of ENTRIES —
   positional args (bareword, quoted string, **or** `(type)`-annotated) and
-  `key=value` PROPS — and recursive CHILDREN —
-  `(author)node (u8)bareword "string" key=val key2=(date)"v" { children }`.
+  `key=value` PROPS — and OPTIONAL `;`-terminated CHILDREN (a leaf is `node;`, a
+  parent `node { … };`) — `(author)node (u8)bareword key=val { child; }`.
   ONE grammar, ONE parser, ONE theorem, combining node + value `(type)`
   annotations (takeType run-lemma) + multi-char identifiers + typed values
   (dispatched by leading char) + the arg/prop entry split (`=` terminates a
-  bareword, so `key=value` divides cleanly) + a space-separated entry list
-  (`parseArgs`) + the recursive structure. Not the separate fragments — a
-  coherent recognizer. `propext, Quot.sound`.
+  bareword) + a terminator-generic entry list (`parseArgs` stops at ` {` or `;`)
+  + the recursive structure with optional children. Not the separate fragments —
+  a coherent recognizer. `propext, Quot.sound`.
 
 ## Run
 
