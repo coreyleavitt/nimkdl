@@ -3,10 +3,10 @@
 
   The "full proof": one grammar, one parser, one round-trip theorem — combining
   the proven patterns into a coherent KDL core. A document is a list of nodes;
-  a node has a multi-char IDENTIFIER name, a list of ENTRIES — positional args
-  (bareword, quoted string, or `(type)`-annotated) and `key=value` PROPS — and
-  recursive children:
-      `name (u8)bareword "string" key=val key2=(date)"v" { children }`.
+  a node has an optional `(type)` ANNOTATION, a multi-char IDENTIFIER name, a list
+  of ENTRIES — positional args (bareword, quoted string, or `(type)`-annotated)
+  and `key=value` PROPS — and recursive children:
+      `(author)name (u8)bareword "string" key=val key2=(date)"v" { children }`.
 
   This integrates: multi-char identifiers (takeWord run-lemma), typed values
   (quoted strings via takeStr, barewords via takeWord, dispatched by leading
@@ -247,12 +247,52 @@ theorem parseEntry_render (e : Entry) (rest : List Char) (h : entryWF e)
                  if_neg hsp, htw, hpv, Option.map_some]
 
 -- ===========================================================================
--- Document structure: nodes with name + entries + recursive children.
+-- Node `(type)` annotation: an optional prefix on a node, like on a value.
+-- ===========================================================================
+
+def renderNodeAnno : Option (List Char) → List Char
+  | none   => []
+  | some t => '(' :: (t ++ [')'])
+
+def nodeAnnoWF : Option (List Char) → Prop
+  | none   => True
+  | some t => t ≠ [] ∧ ∀ c ∈ t, c ≠ ')'
+
+/-- Read an optional `(type)` node annotation. Always succeeds: a non-`(` head
+    (or a malformed `(` with no `)`) yields no annotation. -/
+def parseNodeAnno : List Char → Option (List Char) × List Char
+  | [] => (none, [])
+  | c :: rest =>
+      if c = '(' then
+        match takeType rest with
+        | some (t, r) => (some t, r)
+        | none => (none, c :: rest)
+      else (none, c :: rest)
+
+theorem parseNodeAnno_render (anno : Option (List Char)) (rest : List Char)
+    (h : nodeAnnoWF anno) (hr : rest = [] ∨ ∃ c r, rest = c :: r ∧ c ≠ '(') :
+    parseNodeAnno (renderNodeAnno anno ++ rest) = (anno, rest) := by
+  cases anno with
+  | none =>
+    rcases hr with h | ⟨c, r, he, hcq⟩
+    · subst h; rfl
+    · subst he; simp only [renderNodeAnno, List.nil_append, parseNodeAnno, if_neg hcq]
+  | some t =>
+    obtain ⟨_, htnp⟩ := h
+    rw [show renderNodeAnno (some t) ++ rest = '(' :: (t ++ ')' :: rest) by
+          simp [renderNodeAnno, List.append_assoc]]
+    simp only [parseNodeAnno]
+    split
+    · rw [takeType_app t rest htnp]
+    · rename_i hcond; exact absurd trivial hcond
+
+-- ===========================================================================
+-- Document structure: nodes with annotation + name + entries + children.
 -- ===========================================================================
 
 mutual
   inductive Tree where
-    | node : List Char → List Entry → Forest → Tree   -- name + entries (args/props)
+    | node : Option (List Char) → List Char → List Entry → Forest → Tree
   inductive Forest where
     | nil  : Forest
     | cons : Tree → Forest → Forest
@@ -260,7 +300,7 @@ end
 
 mutual
   def sizeTree : Tree → Nat
-    | .node _ _ f => sizeForest f + 1
+    | .node _ _ _ f => sizeForest f + 1
   def sizeForest : Forest → Nat
     | .nil => 0
     | .cons t f => sizeTree t + sizeForest f + 1
@@ -268,8 +308,9 @@ end
 
 mutual
   def treeWF : Tree → Prop
-    | .node name args f =>
-        name ≠ [] ∧ (∀ c ∈ name, isSpecial c = false) ∧ (∀ e ∈ args, entryWF e) ∧ forestWF f
+    | .node anno name args f =>
+        nodeAnnoWF anno ∧ name ≠ [] ∧ (∀ c ∈ name, isSpecial c = false) ∧
+          (∀ e ∈ args, entryWF e) ∧ forestWF f
   def forestWF : Forest → Prop
     | .nil => True
     | .cons t f => treeWF t ∧ forestWF f
@@ -282,7 +323,8 @@ def renderArgs : List Entry → List Char
 
 mutual
   def renderTree : Tree → List Char
-    | .node name args f => name ++ (renderArgs args ++ ' ' :: '{' :: (renderForest f ++ ['}']))
+    | .node anno name args f =>
+        renderNodeAnno anno ++ (name ++ (renderArgs args ++ ' ' :: '{' :: (renderForest f ++ ['}'])))
   def renderForest : Forest → List Char
     | .nil => []
     | .cons t f => renderTree t ++ renderForest f
@@ -354,16 +396,18 @@ mutual
   def parseTree : Nat → List Char → Option (Tree × List Char)
     | 0, _ => none
     | fuel + 1, toks =>
-        match takeWord toks with
-        | (name, rest) =>
-          if name = [] then none      -- a node must have a non-empty identifier
-          else
-            match parseArgs (rest.length + 1) rest with
-            | some (args, ' ' :: '{' :: rest3) =>
-                match parseForest fuel rest3 with
-                | some (f, '}' :: rest4) => some (.node name args f, rest4)
-                | _ => none
-            | _ => none
+        match parseNodeAnno toks with
+        | (anno, toks1) =>
+          match takeWord toks1 with
+          | (name, rest) =>
+            if name = [] then none      -- a node must have a non-empty identifier
+            else
+              match parseArgs (rest.length + 1) rest with
+              | some (args, ' ' :: '{' :: rest3) =>
+                  match parseForest fuel rest3 with
+                  | some (f, '}' :: rest4) => some (.node anno name args f, rest4)
+                  | _ => none
+              | _ => none
   def parseForest : Nat → List Char → Option (Forest × List Char)
     | 0, _ => none
     | _ + 1, [] => some (.nil, [])
@@ -397,7 +441,7 @@ theorem renderArgs_length (args : List Entry) : args.length ≤ (renderArgs args
 
 mutual
 theorem sizeTree_le (t : Tree) : sizeTree t < (renderTree t).length := by
-  obtain ⟨c, args, f⟩ := t
+  obtain ⟨anno, name, args, f⟩ := t
   have := sizeForest_le f
   simp only [sizeTree, renderTree, List.length_cons, List.length_append]
   omega
@@ -416,22 +460,36 @@ theorem parseTree_render (t : Tree) (fuel : Nat) (rest : List Char)
     (hwf : treeWF t) (hf : sizeTree t < fuel) :
     parseTree fuel (renderTree t ++ rest) = some (t, rest) := by
   match t, fuel, hf with
-  | .node name args g, fuel + 1, hf =>
-    obtain ⟨hne, hnsp, hargs, hwfg⟩ := hwf
+  | .node anno name args g, fuel + 1, hf =>
+    obtain ⟨hanno, hne, hnsp, hargs, hwfg⟩ := hwf
     have hsub : sizeForest g < fuel := by simp only [sizeTree] at hf; omega
     have hforest := parseForest_render g fuel ('}' :: rest) hwfg hsub (Or.inr ⟨rest, rfl⟩)
-    -- the identifier name is read by takeWord; the tail begins with a space, so
-    -- the run stops exactly at the name's end
-    have htw : takeWord
-        (name ++ (renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)))
-        = (name, renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)) := by
-      obtain ⟨r0, hr0⟩ := renderArgs_append_cons args ('{' :: (renderForest g ++ '}' :: rest))
-      exact takeWord_app name _ hnsp (Or.inr ⟨' ', r0, hr0, by decide⟩)
     have hpa := parseArgs_render args (renderForest g ++ '}' :: rest)
       ((renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)).length + 1)
       hargs (by have := renderArgs_length args; simp only [List.length_append]; omega)
-    simp only [renderTree, List.cons_append, List.append_assoc,
-               List.nil_append, parseTree, htw, if_neg hne, hpa, hforest]
+    -- expose the name's head (nonempty, non-special ⇒ ≠ '(') for the annotation read
+    match name, hne, hnsp with
+    | a :: as, _, hnsp =>
+      have hah : isSpecial a = false := hnsp a (by simp)
+      have hap : a ≠ '(' := by intro h; subst h; simp [isSpecial] at hah
+      -- the entry tail after the name begins with a space
+      obtain ⟨r0, hr0⟩ := renderArgs_append_cons args ('{' :: (renderForest g ++ '}' :: rest))
+      -- the name is read by takeWord; tail is space-led so the run stops at the name's end
+      have htw : takeWord
+          ((a :: as) ++ (renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)))
+          = (a :: as, renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)) :=
+        takeWord_app (a :: as) _ hnsp (Or.inr ⟨' ', r0, hr0, by decide⟩)
+      -- the annotation is read first; the tail after it is name-led (head a ≠ '(')
+      have hpna := parseNodeAnno_render anno
+        ((a :: as) ++ (renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)))
+        hanno (Or.inr ⟨a, as ++ (renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)),
+          rfl, hap⟩)
+      -- normalize the input to exactly `renderNodeAnno anno ++ (name ++ entryTail)`
+      rw [show renderTree (.node anno (a :: as) args g) ++ rest
+            = renderNodeAnno anno ++
+                ((a :: as) ++ (renderArgs args ++ ' ' :: '{' :: (renderForest g ++ '}' :: rest)))
+            by simp [renderTree, List.append_assoc]]
+      simp only [parseTree, hpna, htw, if_neg (List.cons_ne_nil a as), hpa, hforest]
 theorem parseForest_render (f : Forest) (fuel : Nat) (rest : List Char)
     (hwf : forestWF f) (hf : sizeForest f < fuel) (hr : rest = [] ∨ ∃ r, rest = '}' :: r) :
     parseForest fuel (renderForest f ++ rest) = some (f, rest) := by
@@ -446,17 +504,34 @@ theorem parseForest_render (f : Forest) (fuel : Nat) (rest : List Char)
     have hsf : sizeForest f < fuel := by omega
     have htree := parseTree_render t fuel (renderForest f ++ rest) hwft hst
     have hrest := parseForest_render f fuel rest hwff hsf hr
-    obtain ⟨name, args, g⟩ := t
-    obtain ⟨hne, hnsp, _, _⟩ := hwft
-    -- the forest begins with the node's name; its head char is non-special (≠ '}')
-    match name, hnsp, htree with
-    | a :: as, hnsp, htree =>
-      have ha : a ≠ '}' := by
-        have := hnsp a (by simp); intro h; subst h; simp [isSpecial] at this
-      simp only [renderForest, renderTree, List.append_assoc, List.cons_append,
-                 List.nil_append] at htree ⊢
-      rw [parseForest_node _ _ _ ha, htree]
-      simp only [hrest]
+    obtain ⟨anno, name, args, g⟩ := t
+    obtain ⟨hanno, hne, hnsp, _, _⟩ := hwft
+    -- the forest begins with the node's rendering; its head char is never '}'
+    -- (either the annotation's '(' or the name's non-special head)
+    obtain ⟨hd, tl, hhd, hdq⟩ :
+        ∃ hd tl, renderTree (.node anno name args g) = hd :: tl ∧ hd ≠ '}' := by
+      cases anno with
+      | some t =>
+          exact ⟨'(', (t ++ [')']) ++ (name ++ (renderArgs args ++ ' ' :: '{' ::
+            (renderForest g ++ ['}']))), by simp [renderTree, renderNodeAnno, List.append_assoc],
+            by decide⟩
+      | none =>
+          match name, hne, hnsp with
+          | a :: as, _, hnsp =>
+            refine ⟨a, as ++ (renderArgs args ++ ' ' :: '{' :: (renderForest g ++ ['}'])),
+              by simp [renderTree, renderNodeAnno], ?_⟩
+            have := hnsp a (by simp); intro h; subst h; simp [isSpecial] at this
+    have htree' : parseTree fuel (hd :: (tl ++ (renderForest f ++ rest)))
+        = some (.node anno name args g, renderForest f ++ rest) := by
+      rw [show hd :: (tl ++ (renderForest f ++ rest))
+            = renderTree (.node anno name args g) ++ (renderForest f ++ rest) by
+            rw [hhd, List.cons_append]]
+      exact htree
+    have e : renderForest (.cons (.node anno name args g) f) ++ rest
+           = hd :: (tl ++ (renderForest f ++ rest)) := by
+      simp only [renderForest, hhd, List.cons_append, List.append_assoc]
+    rw [e, parseForest_node _ _ _ hdq, htree']
+    simp only [hrest]
 end
 
 def parse (s : List Char) : Option Forest :=
@@ -464,9 +539,10 @@ def parse (s : List Char) : Option Forest :=
   | some (f, []) => some f
   | _ => none
 
-/-- THE FULL PROOF: every well-formed document — nodes with multi-char identifier
-    names, entry lists of args (bareword | string | `(type)`-annotated) and
-    `key=value` props, and recursive children — round-trips. -/
+/-- THE FULL PROOF: every well-formed document — nodes with an optional `(type)`
+    annotation, multi-char identifier names, entry lists of args (bareword |
+    string | `(type)`-annotated) and `key=value` props, and recursive children —
+    round-trips. -/
 theorem parse_renderForest (f : Forest) (hwf : forestWF f) :
     parse (renderForest f) = some f := by
   unfold parse
