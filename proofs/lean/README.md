@@ -57,6 +57,13 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
   (`takeArgs` + `takeArgs_app`). Proved first try — the recursive-descent
   patterns transferred wholesale.
 
+`Kdl/RawStr.lean` — matched-hash RAW STRINGS (the first lexical hard piece):
+- **round-trip** (`parse_render`): `(∀ c ∈ content, c ≠ '"') → parse (render
+  content n) = some content`. A raw string `#…#"content"#…#` must close with
+  EXACTLY as many `#` as it opened — parse counts the opening hashes
+  (`countHashes`) and requires the trailing run to match. The verified property
+  is the delimiter count. `propext` only.
+
 ## Run
 
 ```
