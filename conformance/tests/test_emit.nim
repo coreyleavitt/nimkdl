@@ -62,6 +62,14 @@ suite "E1 — corpus emitter":
       s
     check "integer" in names and "float" in names
 
+  test "negative corpus is emitted with a production-tagged manifest":
+    check stats.negatives > 0
+    let man = parseJson(readFile(outDir / "negative" / "manifest.json"))
+    check man.len == stats.negatives
+    for f in man:
+      check fileExists(outDir / "negative" / "input" / f["name"].getStr & ".kdl")
+      check f["violates"].getStr.len > 0      # every fixture cites a rule
+
   test "re-emitting is byte-stable (deterministic corpus)":
     let a = readFile(outDir / "input" / "000.kdl")
     discard emitCorpus(outDir)

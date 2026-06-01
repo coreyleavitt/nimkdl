@@ -1,0 +1,54 @@
+[
+  {
+    "name": "bare-keyword-true",
+    "violates": "reserved-bareword"
+  },
+  {
+    "name": "bare-keyword-inf",
+    "violates": "reserved-bareword"
+  },
+  {
+    "name": "bare-keyword-null-prop",
+    "violates": "reserved-bareword"
+  },
+  {
+    "name": "ident-leading-dot-digit",
+    "violates": "ident-like-number"
+  },
+  {
+    "name": "number-then-letters",
+    "violates": "ident-like-number"
+  },
+  {
+    "name": "hex-underscore-before-digit",
+    "violates": "number-underscore-before-digit"
+  },
+  {
+    "name": "invalid-escape",
+    "violates": "invalid-escape"
+  },
+  {
+    "name": "unterminated-quoted",
+    "violates": "unterminated-string"
+  },
+  {
+    "name": "raw-hash-mismatch",
+    "violates": "raw-string-delimiter-mismatch"
+  },
+  {
+    "name": "multiline-no-leading-newline",
+    "violates": "multiline-missing-leading-newline"
+  },
+  {
+    "name": "prop-missing-value",
+    "violates": "property-missing-value"
+  },
+  {
+    "name": "unterminated-children",
+    "violates": "unterminated-children"
+  },
+  {
+    "name": "disallowed-literal-control",
+    "violates": "disallowed-literal-codepoint"
+  }
+]

@@ -19,6 +19,7 @@ import std/[os, json, strutils, sets]
 import ./model
 import ./coverage
 import ./groups
+import ./negative
 
 type
   Fixture* = object
@@ -35,7 +36,8 @@ type
     complete*: bool    ## do the chosen rows cover every target?
 
   CorpusStats* = object
-    fixtures*: int
+    fixtures*: int       ## positive (must-parse) fixtures
+    negatives*: int      ## negative (must-reject) fixtures
     groups*: seq[GroupCert]
 
 func nodeWitness(v: KValue): KDoc =
@@ -107,12 +109,24 @@ proc emitCorpus*(outDir: string): CorpusStats =
     }
   writeFile(outDir / "coverage-certificate.json", pretty(certJson) & "\n")
 
-  CorpusStats(fixtures: fixtures.len, groups: groups)
+  # Negative (must-reject) corpus: one input file per fixture + a manifest
+  # mapping each to the spec production it violates. No expected model —
+  # rejection IS the expectation (the kdl-org convention for invalid cases).
+  let negatives = negativeFixtures()
+  createDir(outDir / "negative" / "input")
+  var negMan = newJArray()
+  for f in negatives:
+    writeFile(outDir / "negative" / "input" / f.name & ".kdl", f.input)
+    negMan.add %*{"name": f.name, "violates": f.violates}
+  writeFile(outDir / "negative" / "manifest.json", pretty(negMan) & "\n")
+
+  CorpusStats(fixtures: fixtures.len, negatives: negatives.len, groups: groups)
 
 when isMainModule:
   let dir = "conformance/corpus"
   let stats = emitCorpus(dir)
-  echo "emitted ", stats.fixtures, " fixtures to ", dir
+  echo "emitted ", stats.fixtures, " positive + ", stats.negatives,
+       " negative fixtures to ", dir
   for gc in stats.groups:
     echo "  group ", gc.name, " t=", gc.strength,
          " targets=", gc.targets, " rows=", gc.rows,

@@ -10,7 +10,7 @@
 ## generator bug — investigate by probing nkdl directly, never by silently
 ## "fixing" the corpus.
 
-import std/[json, unittest, formatfloat]
+import std/[json, unittest, formatfloat, strutils]
 
 import proptest
 
@@ -18,6 +18,7 @@ import ../model
 import ../gen
 import ../coverage
 import ../groups
+import ../negative
 
 import ../../src/parser          # parse
 import ../../src/ast as nast      # KdlDoc/KdlNode/KdlEntry/KdlValue (aliased)
@@ -94,3 +95,14 @@ suite "conformance — nkdl runs the covering-array corpus (A4)":
         check r.isOk
         if r.isOk:
           check toJson(mapDoc(r.get)) == toJson(s.doc)
+
+  test "negative corpus: nkdl REJECTS every must-reject fixture":
+    # An acceptance here is a real finding — either an nkdl over-acceptance bug
+    # or a fixture that misreads the spec. Investigate by probing nkdl + the
+    # spec; never silently delete the fixture.
+    for f in negativeFixtures():
+      let r = parse(f.input)
+      check (not r.isOk)            # MUST be an error
+      if r.isOk:
+        checkpoint("nkdl WRONGLY ACCEPTED " & f.name & " (violates " &
+                   f.violates & "): " & escape(f.input))
