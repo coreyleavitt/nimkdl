@@ -16,6 +16,8 @@ import proptest
 
 import ../model
 import ../gen
+import ../coverage
+import ../groups
 
 import ../../src/parser          # parse
 import ../../src/ast as nast      # KdlDoc/KdlNode/KdlEntry/KdlValue (aliased)
@@ -68,3 +70,17 @@ suite "conformance — nkdl adapter (clean-room corpus vs nkdl)":
     let r = parse(ds.text)
     ensure r.isOk
     ensure toJson(mapDoc(r.get)) == toJson(ds.doc)
+
+suite "conformance — nkdl runs the covering-array corpus (A4)":
+  # The CURATED corpus (constrained covering array), not random generation:
+  # every covering-array row, instantiated to a witness, must parse to its
+  # expected model. This is the deterministic, production-complete check.
+
+  test "integer group: every covering-array witness parses to its model":
+    for row in coveringArray(integerGroup()):
+      let s = instantiateInteger(row)
+      let doc: model.KDoc = @[KNode(name: "node", entries: @[arg(s.value)])]
+      let r = parse("node " & s.text & "\n")
+      check r.isOk
+      if r.isOk:
+        check toJson(mapDoc(r.get)) == toJson(doc)

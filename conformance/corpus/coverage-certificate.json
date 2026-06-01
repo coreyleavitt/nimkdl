@@ -1,0 +1,20 @@
+{
+  "kdl_version": 2,
+  "format": "nkdl-conformance/1",
+  "fixtures": 15,
+  "groups": [
+    {
+      "name": "integer",
+      "strength": 2,
+      "factors": [
+        "int.base",
+        "int.hexcase",
+        "int.sign",
+        "int.underscore"
+      ],
+      "targets": 38,
+      "rows": 15,
+      "complete": true
+    }
+  ]
+}

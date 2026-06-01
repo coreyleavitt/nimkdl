@@ -171,10 +171,7 @@ func canonicalDecimal*(n: KNumber): string =
     result.add (if n.expNegative: '-' else: '+')
     result.add n.expDigits
 
-func canonicalKdl*(v: KValue): string =
-  ## The canonical-KDL text for a *value* (no type-annotation prefix yet — that
-  ## is assembled by the value-projection slice). For numbers this is the
-  ## decimal text; for the keyword values it is the `#`-prefixed keyword.
+func canonicalValueBody(v: KValue): string =
   case v.kind
   of kvNull: "#null"
   of kvBool: (if v.b: "#true" else: "#false")
@@ -186,6 +183,42 @@ func canonicalKdl*(v: KValue): string =
     of nkNan:    "#nan"
   of kvString:
     raise newException(Defect, "canonicalKdl(string) lands in the string-projection slice")
+
+func canonicalKdl*(v: KValue): string =
+  ## The canonical-KDL text for a *value*, including its `(type)` annotation
+  ## prefix when present (e.g. `(u16)80`). For numbers the body is the decimal
+  ## text; for the keyword values it is the `#`-prefixed keyword. (Annotation
+  ## strings that are not bare identifiers will gain quoting in the string
+  ## slice; the integer corpus uses none.)
+  let body = canonicalValueBody(v)
+  if v.typeAnno.len > 0: "(" & v.typeAnno & ")" & body else: body
+
+func canonicalKdlNode*(n: KNode, depth = 0): string =
+  ## Canonical-KDL for a node: `[indent](type)?name (entry)* ( { children } )?`.
+  ## Children are indented four spaces per level (the kdl-org canonical style).
+  ## The node name is assumed to be a bare identifier for now — quoted/escaped
+  ## identifiers arrive with the string/identifier slice.
+  var pad = ""
+  for _ in 0 ..< depth: pad.add "    "
+  result = pad
+  if n.typeAnno.len > 0: result.add "(" & n.typeAnno & ")"
+  result.add n.name
+  for e in n.entries:
+    result.add ' '
+    case e.kind
+    of keArg:  result.add canonicalKdl(e.val)
+    of keProp: result.add e.key & "=" & canonicalKdl(e.pval)
+  if n.children.len > 0:
+    result.add " {\n"
+    for c in n.children:
+      result.add canonicalKdlNode(c, depth + 1) & "\n"
+    result.add pad & "}"
+
+func canonicalKdlDoc*(doc: KDoc): string =
+  ## Canonical-KDL for a whole document — one node per line, trailing newline.
+  ## This is the kdl-org `expected_kdl` projection of the corpus.
+  for n in doc:
+    result.add canonicalKdlNode(n) & "\n"
 
 # ---------------------------------------------------------------------------
 # Neutral JSON serialization — the on-disk `expected.json` form.
