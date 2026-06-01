@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 28,
+  "fixtures": 37,
   "groups": [
     {
       "name": "integer",
@@ -28,6 +28,18 @@
       ],
       "targets": 62,
       "rows": 13,
+      "complete": true
+    },
+    {
+      "name": "string",
+      "strength": 2,
+      "factors": [
+        "str.content",
+        "str.style",
+        "str.hashes"
+      ],
+      "targets": 14,
+      "rows": 9,
       "complete": true
     }
   ]

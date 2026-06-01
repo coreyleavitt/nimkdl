@@ -97,3 +97,47 @@ suite "A-float — float group instantiation":
     check canonOf("frac").allIt(it == "1.25")
     check canonOf("exp").allIt(it == "1E+10")
     check canonOf("both").allIt(it == "1.25E+10")
+
+suite "A-string — string group instantiation (single-line quoted + raw)":
+
+  test "style controls the delimiter (quoted vs #-raw)":
+    for row in coveringArray(stringGroup()):
+      let t = instantiateString(row).text
+      case lvl(row, "str.style")
+      of "quoted": check t.startsWith("\"") and not t.startsWith("#")
+      of "raw":    check t.startsWith("#")
+      else: discard
+
+  test "content determines the decoded value, independent of style":
+    for row in coveringArray(stringGroup()):
+      let v = instantiateString(row).value.s
+      case lvl(row, "str.content")
+      of "simple":    check v == "abc"
+      of "quote":     check v == "ab\"cd"
+      of "backslash": check v == "ab\\cd"
+      else: discard
+
+  test "raw hash count matches the requested level":
+    for row in coveringArray(stringGroup()):
+      if lvl(row, "str.style") == "raw":
+        let t = instantiateString(row).text
+        let want = (if lvl(row, "str.hashes") == "two": 2 else: 1)
+        check t.startsWith(repeat('#', want) & "\"")
+        check not t.startsWith(repeat('#', want + 1))
+
+  test "canonical is the quoted-escaped form regardless of surface style":
+    for row in coveringArray(stringGroup()):
+      let s = instantiateString(row)
+      case lvl(row, "str.content")
+      of "simple":    check canonicalKdl(s.value) == "\"abc\""
+      of "quote":     check canonicalKdl(s.value) == "\"ab\\\"cd\""
+      of "backslash": check canonicalKdl(s.value) == "\"ab\\\\cd\""
+      else: discard
+
+  test "metamorphic: same content via quoted and raw denotes the same value":
+    for content in ["simple", "quote", "backslash"]:
+      let vals = coveringArray(stringGroup())
+        .filterIt(lvl(it, "str.content") == content)
+        .mapIt(instantiateString(it).value.s)
+      check vals.len >= 2          # both styles present
+      check vals.allIt(it == vals[0])

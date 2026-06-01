@@ -1,0 +1,15 @@
+[
+  {
+    "name": "node",
+    "type": null,
+    "args": [
+      {
+        "type": null,
+        "kind": "string",
+        "value": "ab\\cd"
+      }
+    ],
+    "props": [],
+    "children": []
+  }
+]

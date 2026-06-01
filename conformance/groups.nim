@@ -130,10 +130,57 @@ proc instantiateFloat*(row: Tagset): ValueSurface =
 # nkdl adapter iterate this so a new group is wired in one place.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# String  (grammar §String: single-line quoted + raw variants. Multi-line +
+# dedent, \u and escaped-whitespace escapes are the string-v2 slice — distinct
+# sub-grammars, tracked separately.)
+# ---------------------------------------------------------------------------
+
+proc stringContent(level: string): string =
+  ## Representative values, each expressible in BOTH quoted and raw single-line
+  ## form (no newline / disallowed-literal), chosen to exercise the escape↔raw
+  ## distinction: a bare `"` (quoted must escape, raw must not) and a bare `\`.
+  case level
+  of "quote":     "ab\"cd"
+  of "backslash": "ab\\cd"
+  else:           "abc"
+
+proc stringGroup*(): InteractionGroup =
+  ## content{simple,quote,backslash} × style{quoted,raw} × hashes{one,two,∅},
+  ## pairwise, constrained: the raw `#`-count exists ⇔ the style is raw.
+  ## `content` is SEMANTIC (it is the value); style and hash-count are surface.
+  InteractionGroup(
+    name: "string",
+    t: 2,
+    factors: @[
+      Factor(name: "str.content", levels: @["simple", "quote", "backslash"]),
+      Factor(name: "str.style",   levels: @["quoted", "raw"]),
+      Factor(name: "str.hashes",  levels: @["one", "two", ""]),   # "" = quoted
+    ],
+    valid: proc(c: Tagset): bool =
+      (lvl(c, "str.style") == "raw") == (lvl(c, "str.hashes") != ""))
+
+proc instantiateString*(row: Tagset): ValueSurface =
+  ## Render one string covering-array row to a witness. `content` is the decoded
+  ## value (semantic); `style`/`hashes` shape only the surface text.
+  let value = stringContent(lvl(row, "str.content"))
+  let text =
+    if lvl(row, "str.style") == "raw":
+      renderRawString(value, if lvl(row, "str.hashes") == "two": 2 else: 1)
+    else:
+      renderStrEscaped(value)
+  ValueSurface(text: text, value: kStr(value))
+
+# ---------------------------------------------------------------------------
+# Registry — every value-level group with its instantiator. emit.nim and the
+# nkdl adapter iterate this so a new group is wired in one place.
+# ---------------------------------------------------------------------------
+
 type
   Instantiator* = proc(row: Tagset): ValueSurface {.nimcall.}
   ValueGroup* = tuple[group: InteractionGroup, instantiate: Instantiator]
 
 proc valueGroups*(): seq[ValueGroup] =
   @[(integerGroup(), Instantiator(instantiateInteger)),
-    (floatGroup(),   Instantiator(instantiateFloat))]
+    (floatGroup(),   Instantiator(instantiateFloat)),
+    (stringGroup(),  Instantiator(instantiateString))]

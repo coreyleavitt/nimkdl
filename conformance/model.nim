@@ -171,6 +171,30 @@ func canonicalDecimal*(n: KNumber): string =
     result.add (if n.expNegative: '-' else: '+')
     result.add n.expDigits
 
+func canonicalQuoted*(s: string): string =
+  ## The canonical KDL quoted-string form of a value `s` (UTF-8 bytes). Named
+  ## escapes for `" \ \n \r \t` + backspace/form-feed, `\u{hh}` for the
+  ## disallowed-literal C0 controls and DEL; space and all other printables stay
+  ## literal. Transcribed from the kdl-org `all_escapes` canonical case. This is
+  ## the single source of truth for both `canonicalKdl(string)` and the
+  ## generator's quoted surface renderer.
+  result = "\""
+  for ch in s:
+    case ch
+    of '"':    result.add "\\\""
+    of '\\':   result.add "\\\\"
+    of '\n':   result.add "\\n"
+    of '\t':   result.add "\\t"
+    of '\r':   result.add "\\r"
+    of '\x08': result.add "\\b"
+    of '\x0C': result.add "\\f"
+    else:
+      if ord(ch) < 0x20 or ord(ch) == 0x7F:
+        result.add "\\u{" & toLowerAscii(toHex(ord(ch), 2)) & "}"
+      else:
+        result.add ch
+  result.add "\""
+
 func canonicalValueBody(v: KValue): string =
   case v.kind
   of kvNull: "#null"
@@ -182,7 +206,7 @@ func canonicalValueBody(v: KValue): string =
     of nkNegInf: "#-inf"
     of nkNan:    "#nan"
   of kvString:
-    raise newException(Defect, "canonicalKdl(string) lands in the string-projection slice")
+    canonicalQuoted(v.s)
 
 func canonicalKdl*(v: KValue): string =
   ## The canonical-KDL text for a *value*, including its `(type)` annotation

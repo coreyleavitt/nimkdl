@@ -125,25 +125,17 @@ func renderKeywordValue*(v: KValue): string =
 # ---------------------------------------------------------------------------
 
 func renderStrEscaped*(s: string): string =
-  ## `"…"` with named escapes for the special chars and `\u{HH}` for the
-  ## disallowed-literal C0 controls + DEL. Works for ANY ASCII string (no
-  ## precondition). Input is treated as bytes; multi-byte UTF-8 passes through.
-  result = "\""
-  for ch in s:
-    case ch
-    of '"':    result.add "\\\""
-    of '\\':   result.add "\\\\"
-    of '\n':   result.add "\\n"
-    of '\t':   result.add "\\t"
-    of '\r':   result.add "\\r"
-    of '\b':   result.add "\\b"
-    of '\x0C': result.add "\\f"
-    else:
-      if ord(ch) < 0x20 or ord(ch) == 0x7F:   # disallowed-literal ⇒ must escape
-        result.add "\\u{" & toLowerAscii(toHex(ord(ch), 2)) & "}"
-      else:
-        result.add ch
-  result.add "\""
+  ## The canonical quoted-string surface. Delegates to `model.canonicalQuoted`
+  ## (single source of truth) — a quoted-escaped surface IS the canonical form.
+  canonicalQuoted(s)
+
+func renderRawString*(s: string, hashes: int): string =
+  ## `#…#"…"#…#` raw form with `hashes` leading/trailing `#`. No escapes — the
+  ## body is emitted verbatim. Precondition (the generator's job): `s` contains
+  ## neither a disallowed-literal code point nor the closing delimiter `"` +
+  ## `hashes`×`#`, and is single-line.
+  let pounds = repeat('#', hashes)
+  pounds & "\"" & s & "\"" & pounds
 
 # ---------------------------------------------------------------------------
 # Type annotation + value dispatch
