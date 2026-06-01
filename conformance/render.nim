@@ -59,15 +59,16 @@ func renderFloat*(f: float, plus: bool): string =
 
 func renderKeywordValue*(v: KValue): string =
   ## `#true|#false|#null|#inf|#-inf|#nan`. Precondition: v is bool/null, or a
-  ## non-finite float.
+  ## non-finite number (one of the inf/-inf/nan specials).
   case v.kind
   of kvBool: (if v.b: "#true" else: "#false")
   of kvNull: "#null"
-  of kvFloat:
-    if v.f != v.f: "#nan"
-    elif v.f == Inf: "#inf"
-    elif v.f == NegInf: "#-inf"
-    else: "#" & "?"          # unreachable given the precondition
+  of kvNumber:
+    case v.num.kind
+    of nkInf:    "#inf"
+    of nkNegInf: "#-inf"
+    of nkNan:    "#nan"
+    of nkFinite: "#?"        # unreachable given the precondition
   else: "#?"                 # unreachable
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,6 @@ when isMainModule:
   # Clean-room proof: neutral values → surface text, stdlib only.
   echo renderInt(16, IntStyle(base: 16, upperHex: true, signMode: 1, underscores: @[0, 1]))
   echo renderFloat(1.5, plus = true)
-  echo renderKeywordValue(kFloat(NegInf))
+  echo renderKeywordValue(kNegInf())
   echo annoPrefix("u16") & renderInt(80, IntStyle(base: 10))
   echo renderStrEscaped("a\tb\"c\x01")

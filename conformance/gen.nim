@@ -53,9 +53,15 @@ proc intSurfaces*(): Strategy[ValueSurface] =
 # ---------------------------------------------------------------------------
 
 proc floatSurfaces*(): Strategy[ValueSurface] =
+  ## A finite float surface. The value is the EXACT decimal of the rendered
+  ## text (parsed back via `numFromText`), not a re-stored double — so the
+  ## oracle never depends on float representation. The adapter maps nkdl's
+  ## parsed number through the same `numFromText`, so the two agree iff nkdl
+  ## recovers the same number.
   map(floats(-1e12, 1e12, allowNan = false), booleans(),
       proc(f: float, plus: bool): ValueSurface =
-        ValueSurface(text: renderFloat(f, plus), value: kFloat(f)))
+        let t = renderFloat(f, plus)
+        ValueSurface(text: t, value: numFromText(t)))
 
 # ---------------------------------------------------------------------------
 # Keyword values  (#true #false #null #inf #-inf #nan)
@@ -63,7 +69,7 @@ proc floatSurfaces*(): Strategy[ValueSurface] =
 
 proc keywordSurfaces*(): Strategy[ValueSurface] =
   sampledFrom(@[kBool(true), kBool(false), kNull(),
-                kFloat(Inf), kFloat(NegInf), kFloat(NaN)])
+                kInf(), kNegInf(), kNan()])
     .map(proc(v: KValue): ValueSurface =
       ValueSurface(text: renderKeywordValue(v), value: v))
 

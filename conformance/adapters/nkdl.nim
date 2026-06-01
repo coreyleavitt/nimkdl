@@ -10,7 +10,7 @@
 ## generator bug — investigate by probing nkdl directly, never by silently
 ## "fixing" the corpus.
 
-import std/[json, unittest]
+import std/[json, unittest, formatfloat]
 
 import proptest
 
@@ -30,7 +30,18 @@ proc mapVal(v: nast.KdlValue, ig: Interner): model.KValue =
   case v.kind
   of nast.kvString: kStr(v.strVal, anno)
   of nast.kvInt:    kInt(v.intVal, anno)
-  of nast.kvFloat:  kFloat(v.floatVal, anno)
+  of nast.kvFloat:
+    # Map nkdl's double onto the exact-decimal oracle. Specials are the inf/nan
+    # keyword numbers; finite doubles re-render to decimal (stdlib Schubfach)
+    # and parse via the SAME `numFromText` the generator uses, so agreement
+    # means nkdl recovered the same number — not that both trust one double.
+    if v.floatVal != v.floatVal: kNan(anno)
+    elif v.floatVal == Inf:      kInf(anno)
+    elif v.floatVal == NegInf:   kNegInf(anno)
+    else:
+      var s = ""
+      s.addFloatRoundtrip(v.floatVal)
+      numFromText(s, anno)
   of nast.kvBool:   kBool(v.boolVal, anno)
   of nast.kvNull:   kNull(anno)
   of nast.kvBigInt: kStr("<bigint>", anno)   # generator never emits these yet
