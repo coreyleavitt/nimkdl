@@ -50,6 +50,13 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
   `treeWF`/`forestWF`, threaded through the mutual induction. The step from the
   brace-only skeleton toward real KDL nodes.
 
+`Kdl/ArgsDoc.lean` — node name + ARGS + children:
+- **round-trip** (`parse_renderForest`): `forestWF f → parse (renderForest f) =
+  some f`, where each node renders `name args… { children }` (e.g. `axy{b{}}`).
+  New ingredient: a variable-length content list parsed as a run up to `{`
+  (`takeArgs` + `takeArgs_app`). Proved first try — the recursive-descent
+  patterns transferred wholesale.
+
 ## Run
 
 ```
