@@ -173,6 +173,40 @@ proc instantiateString*(row: Tagset): ValueSurface =
   ValueSurface(text: text, value: kStr(value))
 
 # ---------------------------------------------------------------------------
+# Keyword values  (§Boolean #true/#false, §Null #null, §Keyword Numbers
+# #inf/#-inf/#nan). Each keyword has a single spelling, so the only surface
+# variation is an optional type annotation — paired here so the group exercises
+# the keyword × annotation interaction (annotation immediately before a keyword).
+# ---------------------------------------------------------------------------
+
+proc keywordValue(kind, anno: string): KValue =
+  case kind
+  of "true":    kBool(true, anno)
+  of "false":   kBool(false, anno)
+  of "null":    kNull(anno)
+  of "inf":     kInf(anno)
+  of "neg-inf": kNegInf(anno)
+  else:         kNan(anno)
+
+proc keywordGroup*(): InteractionGroup =
+  ## kind{true,false,null,inf,-inf,nan} × annotated{yes,no}, pairwise.
+  InteractionGroup(
+    name: "keyword",
+    t: 2,
+    factors: @[
+      Factor(name: "kw.kind",
+             levels: @["true", "false", "null", "inf", "neg-inf", "nan"]),
+      Factor(name: "kw.annotated", levels: @["yes", "no"]),
+    ])
+
+proc instantiateKeyword*(row: Tagset): ValueSurface =
+  ## `(type)? #keyword`. The keyword's spelling is fixed; the annotation is the
+  ## only surface variation. inf/-inf/nan map to the model's number specials.
+  let anno = (if lvl(row, "kw.annotated") == "yes": "type" else: "")
+  let value = keywordValue(lvl(row, "kw.kind"), anno)
+  ValueSurface(text: annoPrefix(anno) & renderKeywordValue(value), value: value)
+
+# ---------------------------------------------------------------------------
 # Type annotation  (grammar §Type Annotation: `(` ws? string ws? `)` prefix on a
 # value, separable from its target by whitespace; the string may be bareword or
 # quoted). All surface variants denote the SAME tag → metamorphic. Canonical is
@@ -269,6 +303,7 @@ proc valueGroups*(): seq[ValueGroup] =
   @[(integerGroup(),    Instantiator(instantiateInteger)),
     (floatGroup(),      Instantiator(instantiateFloat)),
     (stringGroup(),     Instantiator(instantiateString)),
+    (keywordGroup(),    Instantiator(instantiateKeyword)),
     (annotationGroup(), Instantiator(instantiateAnnotation))]
 
 proc docGroups*(): seq[DocGroup] =

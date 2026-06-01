@@ -142,6 +142,31 @@ suite "A-string — string group instantiation (single-line quoted + raw)":
       check vals.len >= 2          # both styles present
       check vals.allIt(it == vals[0])
 
+suite "A-keyword — keyword value group (#true/#false/#null/#inf/#-inf/#nan)":
+
+  test "each kind renders its keyword and denotes the right model":
+    for row in coveringArray(keywordGroup()):
+      let s = instantiateKeyword(row)
+      let body = (if "type" in s.text: s.text[s.text.find(')') + 1 .. ^1] else: s.text)
+      case lvl(row, "kw.kind")
+      of "true":    check body == "#true"  and canonicalKdl(s.value) in ["#true", "(type)#true"]
+      of "false":   check body == "#false"
+      of "null":    check body == "#null"
+      of "inf":     check body == "#inf"
+      of "neg-inf": check body == "#-inf"
+      of "nan":     check body == "#nan"
+      else: discard
+
+  test "annotation present iff annotated=yes":
+    for row in coveringArray(keywordGroup()):
+      let s = instantiateKeyword(row)
+      check ("(type)" in s.text) == (lvl(row, "kw.annotated") == "yes")
+      check (s.value.typeAnno == "type") == (lvl(row, "kw.annotated") == "yes")
+
+  test "all six keyword kinds appear in the covering array":
+    let kinds = coveringArray(keywordGroup()).mapIt(lvl(it, "kw.kind")).deduplicate
+    check kinds.len == 6
+
 suite "A-anno — value type-annotation group":
 
   test "every witness value carries the type annotation 'type'":

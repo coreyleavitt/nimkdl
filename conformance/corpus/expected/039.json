@@ -5,8 +5,8 @@
     "args": [
       {
         "type": "type",
-        "kind": "string",
-        "value": "s"
+        "kind": "bool",
+        "value": false
       }
     ],
     "props": [],

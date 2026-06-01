@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 49,
+  "fixtures": 61,
   "groups": [
     {
       "name": "integer",
@@ -40,6 +40,17 @@
       ],
       "targets": 14,
       "rows": 9,
+      "complete": true
+    },
+    {
+      "name": "keyword",
+      "strength": 2,
+      "factors": [
+        "kw.kind",
+        "kw.annotated"
+      ],
+      "targets": 12,
+      "rows": 12,
       "complete": true
     },
     {

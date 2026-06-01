@@ -5,24 +5,11 @@
     "args": [
       {
         "type": null,
-        "kind": "int",
-        "value": "1"
-      },
-      {
-        "type": null,
-        "kind": "int",
-        "value": "2"
+        "kind": "real",
+        "value": "nan"
       }
     ],
     "props": [],
-    "children": [
-      {
-        "name": "child",
-        "type": null,
-        "args": [],
-        "props": [],
-        "children": []
-      }
-    ]
+    "children": []
   }
 ]

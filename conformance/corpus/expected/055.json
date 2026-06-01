@@ -1,0 +1,33 @@
+[
+  {
+    "name": "node",
+    "type": null,
+    "args": [],
+    "props": [
+      [
+        "k",
+        {
+          "type": null,
+          "kind": "int",
+          "value": "3"
+        }
+      ]
+    ],
+    "children": [
+      {
+        "name": "child",
+        "type": null,
+        "args": [],
+        "props": [],
+        "children": []
+      }
+    ]
+  },
+  {
+    "name": "node2",
+    "type": null,
+    "args": [],
+    "props": [],
+    "children": []
+  }
+]

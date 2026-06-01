@@ -5,17 +5,10 @@
     "args": [
       {
         "type": null,
-        "kind": "int",
-        "value": "1"
+        "kind": "real",
+        "value": "-inf"
       }
     ],
-    "props": [],
-    "children": []
-  },
-  {
-    "name": "node2",
-    "type": null,
-    "args": [],
     "props": [],
     "children": []
   }
