@@ -42,6 +42,13 @@ task test, "Run unit tests":
   exec cmd & " tests/test_embed.nim"
   exec cmd & " tests/test_kdl_block.nim"
   exec cmd & " tests/test_api.nim"
+  # Clean-room conformance corpus (GH #27): the model/renderer/covering-array/
+  # emitter are pure stdlib (no src/, no proptest), so they run in the default
+  # suite. Only the nkdl ADAPTER needs proptest, and it is gated below.
+  exec cmd & " conformance/tests/test_model.nim"
+  exec cmd & " conformance/tests/test_coverage.nim"
+  exec cmd & " conformance/tests/test_groups.nim"
+  exec cmd & " conformance/tests/test_emit.nim"
   # Property tests via proptest. Opt-in via NKDL_PROPTEST=1 so the
   # default `nimble test` (incl. CI) stays self-contained — proptest
   # is currently a local-path dep resolved through milpa and not yet
@@ -56,6 +63,7 @@ task test, "Run unit tests":
     exec cmd & " tests/test_cat2_properties.nim"
     exec cmd & " tests/test_cat3_properties.nim"
     exec cmd & " tests/test_spec_coverage.nim"
+    exec cmd & " conformance/adapters/nkdl.nim"   # corpus ↔ nkdl agreement
   else:
     echo "[skip] property suites — being rebuilt as P1-P12 in Stages A-F"
 
