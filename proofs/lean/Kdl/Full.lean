@@ -10,7 +10,8 @@
       `(author)name (u8)bareword key=val { child; }`  and  `leaf;`.
 
   This integrates: multi-char identifiers (takeWord run-lemma), typed values
-  (quoted strings via takeStr, barewords via takeWord, dispatched by leading
+  (quoted strings WITH ESCAPES via parseStrBody — `\"`/`\\` round-trip so a string
+  may contain any character — barewords via takeWord, dispatched by leading
   char), `(type)` ANNOTATIONS (takeType run-lemma in front of a base value), the
   arg/prop ENTRY split (`=` terminates a bareword, so `key=value` divides
   cleanly), a space-separated ENTRY LIST (parseArgs), and the recursive document
@@ -35,14 +36,19 @@ inductive Value where
   | word : List Char → Value          -- bareword (nonempty run of non-special chars)
   | anno : List Char → Value → Value  -- (type) annotation on a base value
 
+/-- Escape one character for a quoted string: `"` and `\` must be escaped. -/
+def escapeChar (c : Char) : List Char :=
+  if c = '"' then ['\\', '"'] else if c = '\\' then ['\\', '\\'] else [c]
+
 def renderValue : Value → List Char
-  | .str s    => '"' :: (s ++ ['"'])
+  | .str s    => '"' :: (s.flatMap escapeChar ++ ['"'])
   | .word w   => w
   | .anno t v => '(' :: (t ++ ')' :: renderValue v)
 
-/-- A base value (no annotation) — the body an annotation may wrap. -/
+/-- A base value (no annotation) — the body an annotation may wrap. Strings have
+    NO content restriction: `"` and `\` round-trip through escaping. -/
 def baseWF : Value → Prop
-  | .str s   => ∀ c ∈ s, c ≠ '"'
+  | .str _   => True
   | .word w  => w ≠ [] ∧ ∀ c ∈ w, isSpecial c = false
   | .anno .. => False                 -- KDL allows at most one annotation: no nesting
 
@@ -50,18 +56,28 @@ def valueWF : Value → Prop
   | .anno t v => t ≠ [] ∧ (∀ c ∈ t, c ≠ ')') ∧ baseWF v
   | v         => baseWF v
 
-/-- Read up to the first `"`. -/
-def takeStr : List Char → Option (List Char × List Char)
+/-- Read a quoted-string body up to the closing `"`, decoding `\"` and `\\`;
+    returns the decoded content and the remainder after the quote. -/
+def parseStrBody : List Char → Option (List Char × List Char)
   | [] => none
-  | c :: rest => if c = '"' then some ([], rest) else (takeStr rest).map (fun p => (c :: p.1, p.2))
+  | '"' :: rest => some ([], rest)
+  | '\\' :: c :: rest =>
+      if c = '"' ∨ c = '\\' then (parseStrBody rest).map (fun p => (c :: p.1, p.2)) else none
+  | '\\' :: [] => none
+  | c :: rest => (parseStrBody rest).map (fun p => (c :: p.1, p.2))
 
-theorem takeStr_app (s rest : List Char) (h : ∀ c ∈ s, c ≠ '"') :
-    takeStr (s ++ '"' :: rest) = some (s, rest) := by
+/-- The escaped body then the closing quote parses back to the string + remainder. -/
+theorem parseStrBody_escape (s rest : List Char) :
+    parseStrBody (s.flatMap escapeChar ++ '"' :: rest) = some (s, rest) := by
   induction s with
-  | nil => simp [takeStr]
+  | nil => rfl
   | cons c cs ih =>
-    have hc : c ≠ '"' := h c (by simp)
-    simp [takeStr, hc, ih (fun a ha => h a (by simp [ha]))]
+    simp only [List.flatMap_cons, escapeChar, List.append_assoc]
+    split
+    · next h => subst h; simp [parseStrBody, ih]
+    · split
+      · next h => subst h; simp [parseStrBody, ih]
+      · next h1 h2 => simp [parseStrBody, ih, h2]
 
 /-- Read a `(type)` annotation's name: up to the first `)`. -/
 def takeType : List Char → Option (List Char × List Char)
@@ -99,7 +115,7 @@ theorem takeWord_app (w rest : List Char) (hw : ∀ c ∈ w, isSpecial c = false
 def parseBase : List Char → Option (Value × List Char)
   | [] => none
   | c :: rest =>
-      if c = '"' then (takeStr rest).map (fun p => (Value.str p.1, p.2))
+      if c = '"' then (parseStrBody rest).map (fun p => (Value.str p.1, p.2))
       else if isSpecial c then none
       else let p := takeWord (c :: rest); some (.word p.1, p.2)
 
@@ -118,7 +134,7 @@ theorem parseBase_render (v : Value) (rest : List Char) (h : baseWF v)
     parseBase (renderValue v ++ rest) = some (v, rest) := by
   match v, h with
   | .str s, h =>
-    simp [renderValue, parseBase, takeStr_app s rest h]
+    simp [renderValue, parseBase, parseStrBody_escape s rest]
   | .word (c :: cs), ⟨_, hw⟩ =>
     have hc : isSpecial c = false := hw c (by simp)
     have hcq : c ≠ '"' := by intro h; subst h; simp [isSpecial] at hc
@@ -146,7 +162,8 @@ theorem parseValue_render (v : Value) (rest : List Char) (h : valueWF v)
   match v, h with
   | .str s, h =>
     have hpb := parseBase_render (.str s) rest h hr
-    rw [show renderValue (.str s) ++ rest = '"' :: (s ++ ['"'] ++ rest) from rfl] at hpb ⊢
+    rw [show renderValue (.str s) ++ rest = '"' :: (s.flatMap escapeChar ++ ['"'] ++ rest)
+          from rfl] at hpb ⊢
     rw [parseValue_not_paren _ _ (by decide), hpb]
   | .word (a :: as), h =>
     have hw : ∀ c ∈ (a :: as), isSpecial c = false := h.2
@@ -210,7 +227,8 @@ theorem parseEntry_render (e : Entry) (rest : List Char) (h : entryWF e)
   | .arg (.str s), h =>
       have hpv := parseValue_render (.str s) rest h hr'
       show parseEntry (renderValue (.str s) ++ rest) = some (Entry.arg (.str s), rest)
-      rw [show renderValue (.str s) ++ rest = '"' :: (s ++ ['"'] ++ rest) from rfl] at hpv ⊢
+      rw [show renderValue (.str s) ++ rest = '"' :: (s.flatMap escapeChar ++ ['"'] ++ rest)
+            from rfl] at hpv ⊢
       rw [parseEntry_value _ _ (Or.inl rfl), hpv, Option.map_some]
   | .arg (.anno t v), h =>
       have hpv := parseValue_render (.anno t v) rest h hr'
@@ -394,7 +412,7 @@ theorem parseArgs_render (args : List Entry) (term : List Char) (F : Nat)
       -- renderEntry v = c :: tail with c ≠ '{', so parseArgs takes the entry branch
       obtain ⟨c, tl, hvr, hc⟩ : ∃ c tl, renderEntry v = c :: tl ∧ c ≠ '{' := by
         match v, hv with
-        | .arg (.str s), _ => exact ⟨'"', s ++ ['"'], rfl, by decide⟩
+        | .arg (.str s), _ => exact ⟨'"', s.flatMap escapeChar ++ ['"'], rfl, by decide⟩
         | .arg (.word (a :: as)), ⟨_, hw⟩ =>
             refine ⟨a, as, rfl, ?_⟩
             have := hw a (by simp); simp only [isSpecial, Bool.or_eq_false_iff] at this

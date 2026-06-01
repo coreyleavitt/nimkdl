@@ -80,7 +80,8 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
   parent `node { … };`) — `(author)node (u8)bareword key=val { child; }`.
   ONE grammar, ONE parser, ONE theorem, combining node + value `(type)`
   annotations (takeType run-lemma) + multi-char identifiers + typed values
-  (dispatched by leading char) + the arg/prop entry split (`=` terminates a
+  (dispatched by leading char) + quoted strings WITH ESCAPES (`\"`/`\\`, so a
+  string may hold any character) + the arg/prop entry split (`=` terminates a
   bareword) + a terminator-generic entry list (`parseArgs` stops at ` {` or `;`)
   + the recursive structure with optional children. Not the separate fragments —
   a coherent recognizer. `propext, Quot.sound`.
