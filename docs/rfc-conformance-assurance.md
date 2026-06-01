@@ -24,13 +24,30 @@ random sampleN (seeded)                            ── statistical breadth
 fuzz / symex on a specific parser                  ── per-impl over-acceptance → pins
 ```
 
-### Tier 0 — Lean formal proof (north star)
+### Tier 0 — Lean formal proof (STARTED — `proofs/lean/`)
 
 Formalize KDL's grammar + data model in Lean4 as **ground truth**, then prove a
 reference recognizer/parser **sound** (`parse s = Ok t → t` derives `s`),
 **complete** (`s ∈ L → parse s` succeeds), and **denotation-correct** (decoded
 value = spec denotation). This is `∀`-proof, not statistics — it *replaces* the
 corpus argument *for the proven artifact*.
+
+**Foundation proven (4 fragments, all axiom-clean — `propext`/`Quot.sound`, no
+`sorryAx`; `proofs/lean/run.sh`):**
+- `Value.lean` — keyword values: soundness + completeness.
+- `Number.lean` — decimal numbers: digit faithfulness (`ofDigits_toDigits`, by
+  induction) + char round-trip + full surface round-trip `parse (render n) = some n` ∀ n.
+- `Str.lean` — quoted strings with escapes: `parse (render s) = some s` ∀ s.
+- `Doc.lean` — **recursion**: brace-nested trees, `parse (renderForest f) = some f`
+  ∀ f — a verified recursive-descent parser (fuel-based for structural
+  termination; mutual induction; `size ≤ render-length` supplies fuel).
+
+So the toolchain, the render/parse/round-trip shape, induction, finite-type
+`decide`, and *genuine recursion* are all demonstrated. **Remaining (research-
+grade):** combine the fragments into the full node grammar (name + args +
+children together), then the hard spec machinery — multiline **dedent**,
+matched-hash raw strings, **Unicode** property tables, the ident-vs-number
+disambiguation. Those are the sinks; the skeleton is in place.
 
 Precedent (it's expressible): CompCert's verified LR(1) parser, EverParse/3D
 (F*, shipping binary parsers), Narcissus, Verbatim/Verbatim++ (verified lexer).
@@ -101,9 +118,12 @@ model feeding all tiers.
 
 ## Relationship to what's built
 
-`conformance/` realizes Tiers 2 (+ the by-construction generators that power
-Tier 3). `model.nim` is the hand-rolled stand-in for what Tier 0 would make a
-Lean formal spec. Tiers 0 and 1 are research tracks; this RFC records them so
-the north stars are not lost. Negative corpus (the must-reject floor) is the
-Tier-2 analogue on the complement side; its systematic upgrade (grammar-aware
-mutation) and Tier-4 feeding are tracked separately.
+`conformance/` realizes Tier 2 (covering arrays, 11 groups, cross-certified
+against kdl-rs) + the by-construction generators that power Tier 3 (`emit_random`).
+`model.nim` is the hand-rolled stand-in for what Tier 0's Lean formal spec would
+make rigorous. **Tier 0 is STARTED** — `proofs/lean/` has four axiom-clean
+verified fragments (values + recursion); the remaining grammar-combination +
+Unicode/dedent is research-grade but the skeleton is proven. Tier 1 (z3/k-path)
+remains a research track. Negative corpus (the must-reject floor) is the Tier-2
+analogue on the complement side; its systematic upgrade (grammar-aware mutation)
+and Tier-4 feeding are tracked separately.
