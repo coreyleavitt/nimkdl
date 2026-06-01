@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 61,
+  "fixtures": 69,
   "groups": [
     {
       "name": "integer",
@@ -77,6 +77,17 @@
       ],
       "targets": 30,
       "rows": 6,
+      "complete": true
+    },
+    {
+      "name": "slashdash",
+      "strength": 2,
+      "factors": [
+        "sd.pos",
+        "sd.ws"
+      ],
+      "targets": 8,
+      "rows": 8,
       "complete": true
     }
   ]

@@ -288,6 +288,47 @@ proc instantiateStructural*(row: Tagset): DocSurface =
   DocSurface(text: t, doc: doc)
 
 # ---------------------------------------------------------------------------
+# Slashdash  (§Slashdash comments: `/-` discards the following component — node,
+# argument, property, or children block — treating it as whitespace; it may be
+# followed by whitespace before the element). NODE-shaped witnesses where the
+# slashdashed component is ABSENT from the model. This is the historical
+# interaction-bug home (slashdash × the parser's component checkpoint).
+# ---------------------------------------------------------------------------
+
+proc slashdashGroup*(): InteractionGroup =
+  ## pos{node,arg,prop,children} × ws{tight,spaced}, pairwise. `ws` is the
+  ## optional whitespace the spec allows between `/-` and its target.
+  InteractionGroup(
+    name: "slashdash",
+    t: 2,
+    factors: @[
+      Factor(name: "sd.pos", levels: @["node", "arg", "prop", "children"]),
+      Factor(name: "sd.ws",  levels: @["tight", "spaced"]),
+    ])
+
+proc instantiateSlashdash*(row: Tagset): DocSurface =
+  ## Emit a document where one component is slashdashed, and a model that OMITS
+  ## it. Each position keeps a real neighbour so "the discarded one is gone" is
+  ## observable (not just "empty").
+  let sd = "/-" & (if lvl(row, "sd.ws") == "spaced": " " else: "")
+  case lvl(row, "sd.pos")
+  of "node":
+    # an entire node is discarded; a sibling survives
+    DocSurface(text: sd & "gone 1 2\nkept\n", doc: @[KNode(name: "kept")])
+  of "arg":
+    # the first argument is discarded; the second remains
+    DocSurface(text: "node " & sd & "1 2\n",
+               doc: @[KNode(name: "node", entries: @[arg(kInt(2))])])
+  of "prop":
+    # the whole property (key=value) is discarded; an argument remains
+    DocSurface(text: "node " & sd & "k=1 2\n",
+               doc: @[KNode(name: "node", entries: @[arg(kInt(2))])])
+  else:  # children
+    # the children block is discarded; the node keeps its argument
+    DocSurface(text: "node 1 " & sd & "{\n    x\n}\n",
+               doc: @[KNode(name: "node", entries: @[arg(kInt(1))])])
+
+# ---------------------------------------------------------------------------
 # Registry — every group with its instantiator. emit.nim and the nkdl adapter
 # iterate these so a new group is wired in one place. Value groups wrap their
 # witness as `node <value>`; doc groups produce a whole document directly.
@@ -307,4 +348,5 @@ proc valueGroups*(): seq[ValueGroup] =
     (annotationGroup(), Instantiator(instantiateAnnotation))]
 
 proc docGroups*(): seq[DocGroup] =
-  @[(structuralGroup(), NodeInstantiator(instantiateStructural))]
+  @[(structuralGroup(), NodeInstantiator(instantiateStructural)),
+    (slashdashGroup(),  NodeInstantiator(instantiateSlashdash))]

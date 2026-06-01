@@ -9,7 +9,7 @@
 ##   • presentation-only factors (base/case/underscore) do NOT change the model
 ##     value — the metamorphic invariant that justifies calling them "surface".
 
-import std/[unittest, sequtils, strutils]
+import std/[unittest, sequtils, strutils, json]
 import ../model
 import ../coverage
 import ../groups
@@ -239,3 +239,33 @@ suite "A-struct — structural group instantiation (node-shaped witnesses)":
     let hit = coveringArray(structuralGroup()).anyIt(
       lvl(it, "struct.children") == "yes" and lvl(it, "struct.second") == "yes")
     check hit
+
+suite "A-slashdash — slashdash /- discards a component (node/arg/prop/children)":
+
+  test "surface carries /- (with trailing space iff ws=spaced)":
+    for row in coveringArray(slashdashGroup()):
+      let t = instantiateSlashdash(row).text
+      check "/-" in t
+      check ("/- " in t) == (lvl(row, "sd.ws") == "spaced")
+
+  test "the slashdashed component is absent from the model":
+    for row in coveringArray(slashdashGroup()):
+      let doc = instantiateSlashdash(row).doc
+      case lvl(row, "sd.pos")
+      of "node":     # only the kept sibling survives
+        check doc.len == 1 and doc[0].name == "kept"
+      of "arg":      # discarded arg gone; one real arg remains, no props
+        check doc[0].entries.len == 1 and doc[0].entries[0].kind == keArg
+      of "prop":     # discarded property gone; one real arg remains
+        check doc[0].entries.len == 1 and doc[0].entries[0].kind == keArg
+      of "children": # discarded block gone; node keeps its arg, no children
+        check doc[0].children.len == 0
+      else: discard
+
+  test "metamorphic: tight vs spaced slashdash denote the same model":
+    for pos in ["node", "arg", "prop", "children"]:
+      let docs = coveringArray(slashdashGroup())
+        .filterIt(lvl(it, "sd.pos") == pos)
+        .mapIt($toJson(instantiateSlashdash(it).doc))
+      check docs.len >= 2
+      check docs.allIt(it == docs[0])
