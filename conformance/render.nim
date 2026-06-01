@@ -12,6 +12,13 @@
 import std/[strutils, formatfloat]
 import ./model
 
+type ValueSurface* = object
+  ## A rendered value paired with the exact model value it denotes — an oracle
+  ## by construction. Produced by `gen.nim` (random) and `groups.nim`
+  ## (covering-array instantiation); both share this shape.
+  text*:  string
+  value*: KValue
+
 # ---------------------------------------------------------------------------
 # Numbers   (grammar: number / decimal / hex / octal / binary / integer)
 # ---------------------------------------------------------------------------

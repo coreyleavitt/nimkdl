@@ -12,9 +12,9 @@ import proptest/datasource  # newDataSource
 import ./model
 import ./render
 
-type ValueSurface* = object
-  text*:  string
-  value*: KValue
+# `ValueSurface` (text paired with its exact model value) now lives in
+# `render.nim` so the covering-array instantiator can share it without pulling
+# in proptest.
 
 # ---------------------------------------------------------------------------
 # Standalone sampling (the corpus emitter generates rather than asserts)

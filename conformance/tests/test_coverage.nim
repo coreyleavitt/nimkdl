@@ -10,23 +10,7 @@
 
 import std/[unittest, algorithm, sequtils]
 import ../coverage
-
-proc integerGroup(): InteractionGroup =
-  ## base{dec,hex,oct,bin} × hexcase{lower,upper,∅} × sign{none,plus,minus}
-  ## × underscore{yes,no}, t=2, constrained: hexcase present ⇔ base=hex.
-  InteractionGroup(
-    name: "integer",
-    t: 2,
-    factors: @[
-      Factor(name: "int.base",       levels: @["dec", "hex", "oct", "bin"]),
-      Factor(name: "int.hexcase",    levels: @["lower", "upper", ""]),  # "" = absent
-      Factor(name: "int.sign",       levels: @["none", "plus", "minus"]),
-      Factor(name: "int.underscore", levels: @["yes", "no"]),
-    ],
-    valid: proc(c: Tagset): bool =
-      let hex = lvl(c, "int.base") == "hex"
-      let caseSet = lvl(c, "int.hexcase") != ""
-      hex == caseSet)
+import ../groups   # canonical integerGroup() — single source of truth
 
 proc target(pairs: varargs[Assignment]): string =
   canon(@pairs)
