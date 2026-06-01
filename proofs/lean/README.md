@@ -43,6 +43,13 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
   **mutual induction** on the tree/forest with a `size ≤ render-length` fuel bound.
   All theorems axiom-clean (`propext, Quot.sound`).
 
+`Kdl/NamedDoc.lean` — recursion + node CONTENT (the "combine" step):
+- **round-trip** (`parse_renderForest`): `forestWF f → parse (renderForest f) =
+  some f`. Each node carries a name char and renders `name { children }` (e.g.
+  `a{b{}c{}}`). Names must avoid `{`/`}` — the well-formedness predicate
+  `treeWF`/`forestWF`, threaded through the mutual induction. The step from the
+  brace-only skeleton toward real KDL nodes.
+
 ## Run
 
 ```
