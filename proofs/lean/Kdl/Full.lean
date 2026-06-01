@@ -4,14 +4,16 @@
   The "full proof": one grammar, one parser, one round-trip theorem — combining
   the proven patterns into a coherent KDL core. A document is a list of nodes;
   a node has a multi-char IDENTIFIER name, a list of ENTRIES — positional args
-  (bareword or quoted string) and `key=value` PROPS — and recursive children:
-      `name bareword "string" key=val key2="v" { children }`.
+  (bareword, quoted string, or `(type)`-annotated) and `key=value` PROPS — and
+  recursive children:
+      `name (u8)bareword "string" key=val key2=(date)"v" { children }`.
 
   This integrates: multi-char identifiers (takeWord run-lemma), typed values
   (quoted strings via takeStr, barewords via takeWord, dispatched by leading
-  char), the arg/prop ENTRY split (`=` terminates a bareword, so `key=value`
-  divides cleanly), a space-separated ENTRY LIST (parseArgs), and the recursive
-  document structure (fuel-based mutual recursion) — all in one end-to-end
+  char), `(type)` ANNOTATIONS (takeType run-lemma in front of a base value), the
+  arg/prop ENTRY split (`=` terminates a bareword, so `key=value` divides
+  cleanly), a space-separated ENTRY LIST (parseArgs), and the recursive document
+  structure (fuel-based mutual recursion) — all in one end-to-end
   `parse (renderForest f) = some f` for every well-formed document.
 -/
 
@@ -21,21 +23,31 @@ namespace Kdl.Full
 -- Values: quoted strings.
 -- ===========================================================================
 
-/-- A delimiter that ends a bareword: space, brace, quote, or `=` (the latter so
-    `key=value` splits — `=` is not a valid identifier char in KDL). -/
-def isSpecial (c : Char) : Bool := c = ' ' || c = '{' || c = '}' || c = '"' || c = '='
+/-- A delimiter that ends a bareword: space, brace, quote, `=` (so `key=value`
+    splits), or `(`/`)` (so type annotations are unambiguous). None of these are
+    valid identifier chars in KDL. -/
+def isSpecial (c : Char) : Bool :=
+  c = ' ' || c = '{' || c = '}' || c = '"' || c = '=' || c = '(' || c = ')'
 
 inductive Value where
-  | str  : List Char → Value     -- quoted string
-  | word : List Char → Value     -- bareword (nonempty run of non-special chars)
+  | str  : List Char → Value          -- quoted string
+  | word : List Char → Value          -- bareword (nonempty run of non-special chars)
+  | anno : List Char → Value → Value  -- (type) annotation on a base value
 
 def renderValue : Value → List Char
-  | .str s  => '"' :: (s ++ ['"'])
-  | .word w => w
+  | .str s    => '"' :: (s ++ ['"'])
+  | .word w   => w
+  | .anno t v => '(' :: (t ++ ')' :: renderValue v)
+
+/-- A base value (no annotation) — the body an annotation may wrap. -/
+def baseWF : Value → Prop
+  | .str s   => ∀ c ∈ s, c ≠ '"'
+  | .word w  => w ≠ [] ∧ ∀ c ∈ w, isSpecial c = false
+  | .anno .. => False                 -- KDL allows at most one annotation: no nesting
 
 def valueWF : Value → Prop
-  | .str s  => ∀ c ∈ s, c ≠ '"'
-  | .word w => w ≠ [] ∧ ∀ c ∈ w, isSpecial c = false
+  | .anno t v => t ≠ [] ∧ (∀ c ∈ t, c ≠ ')') ∧ baseWF v
+  | v         => baseWF v
 
 /-- Read up to the first `"`. -/
 def takeStr : List Char → Option (List Char × List Char)
@@ -49,6 +61,19 @@ theorem takeStr_app (s rest : List Char) (h : ∀ c ∈ s, c ≠ '"') :
   | cons c cs ih =>
     have hc : c ≠ '"' := h c (by simp)
     simp [takeStr, hc, ih (fun a ha => h a (by simp [ha]))]
+
+/-- Read a `(type)` annotation's name: up to the first `)`. -/
+def takeType : List Char → Option (List Char × List Char)
+  | [] => none
+  | c :: rest => if c = ')' then some ([], rest) else (takeType rest).map (fun p => (c :: p.1, p.2))
+
+theorem takeType_app (t rest : List Char) (h : ∀ c ∈ t, c ≠ ')') :
+    takeType (t ++ ')' :: rest) = some (t, rest) := by
+  induction t with
+  | nil => simp [takeType]
+  | cons c cs ih =>
+    have hc : c ≠ ')' := h c (by simp)
+    simp [takeType, hc, ih (fun a ha => h a (by simp [ha]))]
 
 /-- Read a bareword: a run of non-special chars, stopping at the first delimiter. -/
 def takeWord : List Char → List Char × List Char
@@ -69,25 +94,71 @@ theorem takeWord_app (w rest : List Char) (hw : ∀ c ∈ w, isSpecial c = false
     have ih' := ih (fun a ha => hw a (by simp [ha]))
     simp [takeWord, hc, ih']
 
-def parseValue : List Char → Option (Value × List Char)
+/-- Parse a base value: a quoted string or a bareword. -/
+def parseBase : List Char → Option (Value × List Char)
   | [] => none
   | c :: rest =>
       if c = '"' then (takeStr rest).map (fun p => (Value.str p.1, p.2))
       else if isSpecial c then none
       else let p := takeWord (c :: rest); some (.word p.1, p.2)
 
-theorem parseValue_render (v : Value) (rest : List Char) (h : valueWF v)
+/-- Parse a value: an optional `(type)` annotation in front of a base value. -/
+def parseValue : List Char → Option (Value × List Char)
+  | [] => none
+  | c :: rest =>
+      if c = '(' then
+        match takeType rest with
+        | some (t, r) => (parseBase r).map (fun p => (Value.anno t p.1, p.2))
+        | none => none
+      else parseBase (c :: rest)
+
+theorem parseBase_render (v : Value) (rest : List Char) (h : baseWF v)
     (hr : rest = [] ∨ ∃ c r, rest = c :: r ∧ isSpecial c = true) :
-    parseValue (renderValue v ++ rest) = some (v, rest) := by
+    parseBase (renderValue v ++ rest) = some (v, rest) := by
   match v, h with
   | .str s, h =>
-    simp [renderValue, parseValue, takeStr_app s rest h]
+    simp [renderValue, parseBase, takeStr_app s rest h]
   | .word (c :: cs), ⟨_, hw⟩ =>
     have hc : isSpecial c = false := hw c (by simp)
     have hcq : c ≠ '"' := by intro h; subst h; simp [isSpecial] at hc
     have htw : takeWord (c :: (cs ++ rest)) = (c :: cs, rest) :=
       takeWord_app (c :: cs) rest hw hr
-    simp [renderValue, parseValue, hcq, hc, htw]
+    simp [renderValue, parseBase, hcq, hc, htw]
+
+-- A non-`(`-led input is parsed as a base value (no annotation).
+theorem parseValue_not_paren (c : Char) (rest : List Char) (hc : c ≠ '(') :
+    parseValue (c :: rest) = parseBase (c :: rest) := by
+  simp only [parseValue, if_neg hc]
+
+-- A `(type)`-led input parses the annotation then the base after `)`.
+theorem parseValue_paren (t r : List Char) (h : ∀ c ∈ t, c ≠ ')') :
+    parseValue ('(' :: (t ++ ')' :: r)) =
+      (parseBase r).map (fun p => (Value.anno t p.1, p.2)) := by
+  simp only [parseValue]
+  split
+  · rw [takeType_app t r h]
+  · rename_i hcond; exact absurd trivial hcond
+
+theorem parseValue_render (v : Value) (rest : List Char) (h : valueWF v)
+    (hr : rest = [] ∨ ∃ c r, rest = c :: r ∧ isSpecial c = true) :
+    parseValue (renderValue v ++ rest) = some (v, rest) := by
+  match v, h with
+  | .str s, h =>
+    have hpb := parseBase_render (.str s) rest h hr
+    rw [show renderValue (.str s) ++ rest = '"' :: (s ++ ['"'] ++ rest) from rfl] at hpb ⊢
+    rw [parseValue_not_paren _ _ (by decide), hpb]
+  | .word (a :: as), h =>
+    have hw : ∀ c ∈ (a :: as), isSpecial c = false := h.2
+    have hc : isSpecial a = false := hw a (by simp)
+    have hcp : a ≠ '(' := by intro h; subst h; simp [isSpecial] at hc
+    have hpb := parseBase_render (.word (a :: as)) rest h hr
+    rw [show renderValue (.word (a :: as)) ++ rest = a :: (as ++ rest) from rfl] at hpb ⊢
+    rw [parseValue_not_paren _ _ hcp, hpb]
+  | .anno t v, ⟨_, htnp, hbv⟩ =>
+    have hbase := parseBase_render v rest hbv hr
+    rw [show renderValue (.anno t v) ++ rest = '(' :: (t ++ ')' :: (renderValue v ++ rest)) by
+          simp [renderValue, List.append_assoc],
+        parseValue_paren t (renderValue v ++ rest) htnp, hbase, Option.map_some]
 
 -- ===========================================================================
 -- Entries: a node's child entries are positional ARGS or `key=value` PROPS.
@@ -105,19 +176,24 @@ def entryWF : Entry → Prop
   | .arg v    => valueWF v
   | .prop k v => k ≠ [] ∧ (∀ c ∈ k, isSpecial c = false) ∧ valueWF v
 
-/-- Parse one entry: a quoted string is a value arg; otherwise read a bareword —
-    if `=` follows it is a prop key (parse the value after `=`), else it is a
-    bareword arg. -/
+/-- Parse one entry: a quoted-string or `(type)`-annotated value is an arg
+    (no key); otherwise read a bareword — if `=` follows it is a prop key (parse
+    the value after `=`), else it is a bareword arg. -/
 def parseEntry : List Char → Option (Entry × List Char)
   | [] => none
   | c :: rest =>
-      if c = '"' then (takeStr rest).map (fun p => (Entry.arg (.str p.1), p.2))
+      if c = '"' ∨ c = '(' then (parseValue (c :: rest)).map (fun p => (Entry.arg p.1, p.2))
       else if isSpecial c then none
       else
         let (w, r) := takeWord (c :: rest)
         match r with
         | '=' :: r2 => (parseValue r2).map (fun p => (Entry.prop w p.1, p.2))
         | _         => some (Entry.arg (.word w), r)
+
+-- A `"`- or `(`-led input is parsed as a value arg (no key).
+theorem parseEntry_value (c : Char) (rest : List Char) (hc : c = '"' ∨ c = '(') :
+    parseEntry (c :: rest) = (parseValue (c :: rest)).map (fun p => (Entry.arg p.1, p.2)) := by
+  simp only [parseEntry, if_pos hc]
 
 /-- An entry round-trips, provided the trailing input is led by a delimiter that
     is NOT `=` (so a bareword arg is not mistaken for a prop key). -/
@@ -131,10 +207,20 @@ theorem parseEntry_render (e : Entry) (rest : List Char) (h : entryWF e)
     · exact Or.inr ⟨c, r, he, hs⟩
   match e, h with
   | .arg (.str s), h =>
-      simp [renderEntry, renderValue, parseEntry, takeStr_app s rest h]
+      have hpv := parseValue_render (.str s) rest h hr'
+      show parseEntry (renderValue (.str s) ++ rest) = some (Entry.arg (.str s), rest)
+      rw [show renderValue (.str s) ++ rest = '"' :: (s ++ ['"'] ++ rest) from rfl] at hpv ⊢
+      rw [parseEntry_value _ _ (Or.inl rfl), hpv, Option.map_some]
+  | .arg (.anno t v), h =>
+      have hpv := parseValue_render (.anno t v) rest h hr'
+      show parseEntry (renderValue (.anno t v) ++ rest) = some (Entry.arg (.anno t v), rest)
+      rw [show renderValue (.anno t v) ++ rest = '(' :: (t ++ ')' :: (renderValue v ++ rest)) by
+            simp [renderValue, List.append_assoc]] at hpv ⊢
+      rw [parseEntry_value _ _ (Or.inr rfl), hpv, Option.map_some]
   | .arg (.word (a :: as)), ⟨_, hw⟩ =>
       have ha : isSpecial a = false := hw a (by simp)
-      have haq : a ≠ '"' := by intro h; subst h; simp [isSpecial] at ha
+      have haq : ¬ (a = '"' ∨ a = '(') := by
+        rintro (h | h) <;> (subst h; simp [isSpecial] at ha)
       have hsp : ¬ (isSpecial a = true) := by rw [ha]; decide
       have htw : takeWord (a :: (as ++ rest)) = (a :: as, rest) :=
         takeWord_app (a :: as) rest hw hr'
@@ -149,7 +235,8 @@ theorem parseEntry_render (e : Entry) (rest : List Char) (h : entryWF e)
         · rfl
   | .prop (a :: as) v, ⟨_, hk, hv⟩ =>
       have ha : isSpecial a = false := hk a (by simp)
-      have haq : a ≠ '"' := by intro h; subst h; simp [isSpecial] at ha
+      have haq : ¬ (a = '"' ∨ a = '(') := by
+        rintro (h | h) <;> (subst h; simp [isSpecial] at ha)
       have hsp : ¬ (isSpecial a = true) := by rw [ha]; decide
       have htw : takeWord (a :: (as ++ '=' :: (renderValue v ++ rest)))
           = (a :: as, '=' :: (renderValue v ++ rest)) :=
@@ -254,6 +341,7 @@ theorem parseArgs_render (args : List Entry) (Y : List Char) (F : Nat)
             refine ⟨a, as, rfl, ?_⟩
             have := hw a (by simp); simp only [isSpecial, Bool.or_eq_false_iff] at this
             intro h; simp_all
+        | .arg (.anno t w), _ => exact ⟨'(', t ++ ')' :: renderValue w, rfl, by decide⟩
         | .prop (a :: as) w, ⟨_, hk, _⟩ =>
             refine ⟨a, as ++ '=' :: renderValue w, rfl, ?_⟩
             have := hk a (by simp); simp only [isSpecial, Bool.or_eq_false_iff] at this
@@ -377,8 +465,8 @@ def parse (s : List Char) : Option Forest :=
   | _ => none
 
 /-- THE FULL PROOF: every well-formed document — nodes with multi-char identifier
-    names, entry lists of args (bareword | string) and `key=value` props, and
-    recursive children — round-trips. -/
+    names, entry lists of args (bareword | string | `(type)`-annotated) and
+    `key=value` props, and recursive children — round-trips. -/
 theorem parse_renderForest (f : Forest) (hwf : forestWF f) :
     parse (renderForest f) = some f := by
   unfold parse
