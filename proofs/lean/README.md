@@ -20,11 +20,15 @@ about the value.
 
 `Kdl/Number.lean` — the NUMBER fragment (first requiring real INDUCTION):
 - **faithfulness** (`ofDigits_toDigits`): `ofDigits (toDigits n) = n` — the
-  decimal digits of a natural number denote it exactly (`propext, Quot.sound`).
+  decimal digits of a natural number denote it exactly.
+- **char round-trip** (`charDigit_digitChar`): each digit's character decodes back.
+- **full round-trip** (`parse_render`): `parseChars (renderChars n) = some n` —
+  parsing the decimal rendering of any natural number recovers it, ∀ n.
 
-The arithmetic heart of a verified decimal recognizer. The string surface
-(char ↔ digit, big-endian reverse, the `0` case) layers on top — the next
-increment, deferred only so `Char.ofNat` plumbing doesn't crowd out the math.
+A verified decimal recognizer. Proved over `List Char` (the character sequence
+the recognizer sees); the `List Char ↔ String` UTF-8 packing is a trivial
+boundary, deferred only because Lean 4's `String` is now `ByteArray`-backed.
+All three: `propext, Quot.sound` (core; no `sorryAx`).
 
 ## Run
 
