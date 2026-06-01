@@ -286,3 +286,16 @@ suite "A-trivia — comments + escline are whitespace (discarded from the model)
     let docs = coveringArray(triviaGroup()).mapIt($toJson(instantiateTrivia(it).doc))
     check docs.len == 4                # all four forms covered
     check docs.allIt(it == docs[0])   # and all denote the same model
+
+suite "A-node-anno — type annotation on a node name ((type)node)":
+
+  test "every witness is a node named 'node' annotated 'type'":
+    for row in coveringArray(nodeAnnotationGroup()):
+      let doc = instantiateNodeAnnotation(row).doc
+      check doc.len == 1 and doc[0].name == "node" and doc[0].typeAnno == "type"
+
+  test "surface brackets the annotation before the node name":
+    for row in coveringArray(nodeAnnotationGroup()):
+      let t = instantiateNodeAnnotation(row).text
+      check t.startsWith("(") and "node" in t
+      check ("\"type\"" in t) == (lvl(row, "nanno.style") == "quoted")

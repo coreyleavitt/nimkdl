@@ -238,6 +238,27 @@ proc instantiateAnnotation*(row: Tagset): ValueSurface =
     else: ("1", kInt(1, "type"))
   ValueSurface(text: "(" & pad & inner & pad & ")" & gap & valText, value: value)
 
+proc nodeAnnotationGroup*(): InteractionGroup =
+  ## The same annotation surface, but on a NODE NAME (`(type)node`). Node-shaped
+  ## witness. style{bareword,quoted} × innerWs{none,spaced} × gapWs{none,spaced}.
+  InteractionGroup(
+    name: "node-annotation",
+    t: 2,
+    factors: @[
+      Factor(name: "nanno.style",   levels: @["bareword", "quoted"]),
+      Factor(name: "nanno.innerWs", levels: @["none", "spaced"]),
+      Factor(name: "nanno.gapWs",   levels: @["none", "spaced"]),
+    ])
+
+proc instantiateNodeAnnotation*(row: Tagset): DocSurface =
+  ## `(` ws? type ws? `)` ws? node — all denoting a node named `node` with
+  ## `typeAnno = "type"`.
+  let inner = (if lvl(row, "nanno.style") == "quoted": "\"type\"" else: "type")
+  let pad = (if lvl(row, "nanno.innerWs") == "spaced": " " else: "")
+  let gap = (if lvl(row, "nanno.gapWs") == "spaced": " " else: "")
+  DocSurface(text: "(" & pad & inner & pad & ")" & gap & "node\n",
+             doc: @[KNode(name: "node", typeAnno: "type")])
+
 # ---------------------------------------------------------------------------
 # Structural  (grammar: base-node := type? string (node-prop-or-arg)*
 # node-children?  + the document being a list of nodes). NODE-SHAPED witnesses,
@@ -379,4 +400,5 @@ proc valueGroups*(): seq[ValueGroup] =
 proc docGroups*(): seq[DocGroup] =
   @[(structuralGroup(), NodeInstantiator(instantiateStructural)),
     (slashdashGroup(),  NodeInstantiator(instantiateSlashdash)),
-    (triviaGroup(),     NodeInstantiator(instantiateTrivia))]
+    (triviaGroup(),     NodeInstantiator(instantiateTrivia)),
+    (nodeAnnotationGroup(), NodeInstantiator(instantiateNodeAnnotation))]

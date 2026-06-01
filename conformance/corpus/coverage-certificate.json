@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 73,
+  "fixtures": 77,
   "groups": [
     {
       "name": "integer",
@@ -97,6 +97,18 @@
         "tr.kind"
       ],
       "targets": 4,
+      "rows": 4,
+      "complete": true
+    },
+    {
+      "name": "node-annotation",
+      "strength": 2,
+      "factors": [
+        "nanno.style",
+        "nanno.innerWs",
+        "nanno.gapWs"
+      ],
+      "targets": 12,
       "rows": 4,
       "complete": true
     }

@@ -51,7 +51,7 @@ suite "E1 — corpus emitter":
     let cert = parseJson(readFile(outDir / "coverage-certificate.json"))
     var totalRows = 0
     for g in cert["groups"]:
-      check g["strength"].getInt == 2
+      check g["strength"].getInt >= 1     # most are pairwise; single-factor groups are t=1
       check g["targets"].getInt > 0
       check g["complete"].getBool          # gap-finder: rows cover every target
       totalRows += g["rows"].getInt
