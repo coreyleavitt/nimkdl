@@ -64,3 +64,7 @@ tests/p6probe
 
 # Rust cross-impl adapter build artifacts
 conformance/adapters/kdl-rs/target/
+
+# Lean build artifacts
+proofs/lean/.lake/
+proofs/lean/build/

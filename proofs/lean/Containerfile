@@ -1,0 +1,11 @@
+# Lean 4 toolchain for the KDL formal-proof track (Tier 0; see
+# docs/rfc-conformance-assurance.md). Bakes the EXACT toolchain (matching
+# lean-toolchain) so proof checks are fast and offline after the first build.
+FROM docker.io/library/debian:trixie-slim
+ENV HOME=/root
+RUN apt-get update -qq && apt-get install -y -qq curl ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -sSf https://elan.lean-lang.org/elan-init.sh \
+    | sh -s -- -y --default-toolchain leanprover/lean4:v4.30.0
+ENV PATH="/root/.elan/bin:${PATH}"
+RUN lean --version    # force-materialize + verify the toolchain is in the image
