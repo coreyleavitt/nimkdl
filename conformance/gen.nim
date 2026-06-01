@@ -48,7 +48,51 @@ proc intSurfaces*(): Strategy[ValueSurface] =
                           signMode: signMode, underscores: us)
         ValueSurface(text: renderInt(value, st), value: kInt(value))))
 
+# ---------------------------------------------------------------------------
+# Floats  (decimal with fraction/exponent; finite — inf/nan are keywords)
+# ---------------------------------------------------------------------------
+
+proc floatSurfaces*(): Strategy[ValueSurface] =
+  map(floats(-1e12, 1e12, allowNan = false), booleans(),
+      proc(f: float, plus: bool): ValueSurface =
+        ValueSurface(text: renderFloat(f, plus), value: kFloat(f)))
+
+# ---------------------------------------------------------------------------
+# Keyword values  (#true #false #null #inf #-inf #nan)
+# ---------------------------------------------------------------------------
+
+proc keywordSurfaces*(): Strategy[ValueSurface] =
+  sampledFrom(@[kBool(true), kBool(false), kNull(),
+                kFloat(Inf), kFloat(NegInf), kFloat(NaN)])
+    .map(proc(v: KValue): ValueSurface =
+      ValueSurface(text: renderKeywordValue(v), value: v))
+
+# ---------------------------------------------------------------------------
+# Strings  (escaped form; raw/multiline styles are follow-ups with their
+# content preconditions). Alphabet: ASCII (controls/quote/backslash/DEL — all
+# escaped) + gap-free safe Unicode (no surrogates/bidi/BOM, passed verbatim).
+# ---------------------------------------------------------------------------
+
+proc stringSurfaces*(): Strategy[ValueSurface] =
+  strings(intervals([
+    (0x00'i32,    0x7F'i32),
+    (0x00A0'i32,  0x024F'i32),
+    (0x0370'i32,  0x1FFF'i32),
+    (0x2030'i32,  0x205F'i32),
+    (0x3000'i32,  0xD7FF'i32),
+    (0xE000'i32,  0xFDFF'i32),
+    (0x10000'i32, 0x10FFFF'i32),
+  ]), 0, 16).map(proc(s: string): ValueSurface =
+    ValueSurface(text: renderStrEscaped(s), value: kStr(s)))
+
+# ---------------------------------------------------------------------------
+# Any value
+# ---------------------------------------------------------------------------
+
+proc valueSurfaces*(): Strategy[ValueSurface] =
+  oneOf([intSurfaces(), floatSurfaces(), keywordSurfaces(), stringSurfaces()])
+
 when isMainModule:
   # Clean-room proof: sample (text, expected-json) pairs, proptest+stdlib only.
-  for vs in intSurfaces().sampleN(10):
+  for vs in valueSurfaces().sampleN(12):
     echo vs.text, "   =>   ", $toJson(vs.value)
