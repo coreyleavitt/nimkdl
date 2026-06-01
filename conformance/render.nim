@@ -16,7 +16,7 @@ import ./model
 # Numbers   (grammar: number / decimal / hex / octal / binary / integer)
 # ---------------------------------------------------------------------------
 
-func magnitudeDigits(mag: uint64, base: int, upperHex: bool): string =
+func magnitudeDigits*(mag: uint64, base: int, upperHex: bool): string =
   let ds = if upperHex: "0123456789ABCDEF" else: "0123456789abcdef"
   if mag == 0'u64: return "0"
   var m = mag
