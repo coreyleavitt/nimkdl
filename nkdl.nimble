@@ -63,7 +63,8 @@ task test, "Run unit tests":
     exec cmd & " tests/test_cat2_properties.nim"
     exec cmd & " tests/test_cat3_properties.nim"
     exec cmd & " tests/test_spec_coverage.nim"
-    exec cmd & " conformance/adapters/nkdl.nim"   # corpus ↔ nkdl agreement
+    exec cmd & " conformance/adapters/nkdl.nim"          # corpus ↔ nkdl agreement
+    exec cmd & " conformance/tests/test_emit_random.nim" # Tier-3 reproducibility
   else:
     echo "[skip] property suites — being rebuilt as P1-P12 in Stages A-F"
 

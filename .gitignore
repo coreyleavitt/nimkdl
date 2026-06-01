@@ -16,6 +16,11 @@ conformance/emit
 !conformance/emit.nim
 conformance/gen
 !conformance/gen.nim
+conformance/emit_random
+!conformance/emit_random.nim
+# Tier-3 random corpus is regenerated on demand from a seed (portable by seed) —
+# do not commit the bulk output.
+conformance/corpus/random/
 
 # Conformance failure log (regenerated)
 tests/.last-conformance-failures.log
