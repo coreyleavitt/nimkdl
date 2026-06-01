@@ -3,14 +3,15 @@
 
   The "full proof": one grammar, one parser, one round-trip theorem — combining
   the proven patterns into a coherent KDL core. A document is a list of nodes;
-  a node has a multi-char IDENTIFIER name, a list of MULTI-TYPE arguments
-  (bareword or quoted string), and recursive children:
-      `name bareword "string" { children }`.
+  a node has a multi-char IDENTIFIER name, a list of ENTRIES — positional args
+  (bareword or quoted string) and `key=value` PROPS — and recursive children:
+      `name bareword "string" key=val key2="v" { children }`.
 
   This integrates: multi-char identifiers (takeWord run-lemma), typed values
   (quoted strings via takeStr, barewords via takeWord, dispatched by leading
-  char), a space-separated VALUE LIST (parseArgs), and the recursive document
-  structure (fuel-based mutual recursion) — all in one end-to-end
+  char), the arg/prop ENTRY split (`=` terminates a bareword, so `key=value`
+  divides cleanly), a space-separated ENTRY LIST (parseArgs), and the recursive
+  document structure (fuel-based mutual recursion) — all in one end-to-end
   `parse (renderForest f) = some f` for every well-formed document.
 -/
 
@@ -20,8 +21,9 @@ namespace Kdl.Full
 -- Values: quoted strings.
 -- ===========================================================================
 
-/-- A delimiter that ends a bareword: space, brace, or quote. -/
-def isSpecial (c : Char) : Bool := c = ' ' || c = '{' || c = '}' || c = '"'
+/-- A delimiter that ends a bareword: space, brace, quote, or `=` (the latter so
+    `key=value` splits — `=` is not a valid identifier char in KDL). -/
+def isSpecial (c : Char) : Bool := c = ' ' || c = '{' || c = '}' || c = '"' || c = '='
 
 inductive Value where
   | str  : List Char → Value     -- quoted string
@@ -88,12 +90,82 @@ theorem parseValue_render (v : Value) (rest : List Char) (h : valueWF v)
     simp [renderValue, parseValue, hcq, hc, htw]
 
 -- ===========================================================================
--- Document structure: nodes with name + args + recursive children.
+-- Entries: a node's child entries are positional ARGS or `key=value` PROPS.
+-- ===========================================================================
+
+inductive Entry where
+  | arg  : Value → Entry                 -- positional value
+  | prop : List Char → Value → Entry     -- key=value (key is a bareword)
+
+def renderEntry : Entry → List Char
+  | .arg v    => renderValue v
+  | .prop k v => k ++ '=' :: renderValue v
+
+def entryWF : Entry → Prop
+  | .arg v    => valueWF v
+  | .prop k v => k ≠ [] ∧ (∀ c ∈ k, isSpecial c = false) ∧ valueWF v
+
+/-- Parse one entry: a quoted string is a value arg; otherwise read a bareword —
+    if `=` follows it is a prop key (parse the value after `=`), else it is a
+    bareword arg. -/
+def parseEntry : List Char → Option (Entry × List Char)
+  | [] => none
+  | c :: rest =>
+      if c = '"' then (takeStr rest).map (fun p => (Entry.arg (.str p.1), p.2))
+      else if isSpecial c then none
+      else
+        let (w, r) := takeWord (c :: rest)
+        match r with
+        | '=' :: r2 => (parseValue r2).map (fun p => (Entry.prop w p.1, p.2))
+        | _         => some (Entry.arg (.word w), r)
+
+/-- An entry round-trips, provided the trailing input is led by a delimiter that
+    is NOT `=` (so a bareword arg is not mistaken for a prop key). -/
+theorem parseEntry_render (e : Entry) (rest : List Char) (h : entryWF e)
+    (hr : rest = [] ∨ ∃ c r, rest = c :: r ∧ isSpecial c = true ∧ c ≠ '=') :
+    parseEntry (renderEntry e ++ rest) = some (e, rest) := by
+  -- weaken to the parseValue precondition (drops the `≠ '='` clause)
+  have hr' : rest = [] ∨ ∃ c r, rest = c :: r ∧ isSpecial c = true := by
+    rcases hr with h | ⟨c, r, he, hs, _⟩
+    · exact Or.inl h
+    · exact Or.inr ⟨c, r, he, hs⟩
+  match e, h with
+  | .arg (.str s), h =>
+      simp [renderEntry, renderValue, parseEntry, takeStr_app s rest h]
+  | .arg (.word (a :: as)), ⟨_, hw⟩ =>
+      have ha : isSpecial a = false := hw a (by simp)
+      have haq : a ≠ '"' := by intro h; subst h; simp [isSpecial] at ha
+      have hsp : ¬ (isSpecial a = true) := by rw [ha]; decide
+      have htw : takeWord (a :: (as ++ rest)) = (a :: as, rest) :=
+        takeWord_app (a :: as) rest hw hr'
+      simp only [renderEntry, renderValue, List.cons_append, parseEntry, if_neg haq,
+                 if_neg hsp, htw]
+      -- rest is not `=`-led, so the prop branch does not fire
+      rcases hr with h | ⟨x, r, he, _, hxq⟩
+      · subst h; rfl
+      · subst he
+        split
+        · next heq => injection heq with h1 _; exact absurd h1 hxq
+        · rfl
+  | .prop (a :: as) v, ⟨_, hk, hv⟩ =>
+      have ha : isSpecial a = false := hk a (by simp)
+      have haq : a ≠ '"' := by intro h; subst h; simp [isSpecial] at ha
+      have hsp : ¬ (isSpecial a = true) := by rw [ha]; decide
+      have htw : takeWord (a :: (as ++ '=' :: (renderValue v ++ rest)))
+          = (a :: as, '=' :: (renderValue v ++ rest)) :=
+        takeWord_app (a :: as) ('=' :: (renderValue v ++ rest)) hk
+          (Or.inr ⟨'=', renderValue v ++ rest, rfl, by decide⟩)
+      have hpv := parseValue_render v rest hv hr'
+      simp only [renderEntry, List.cons_append, List.append_assoc, parseEntry, if_neg haq,
+                 if_neg hsp, htw, hpv, Option.map_some]
+
+-- ===========================================================================
+-- Document structure: nodes with name + entries + recursive children.
 -- ===========================================================================
 
 mutual
   inductive Tree where
-    | node : List Char → List Value → Forest → Tree   -- multi-char identifier name
+    | node : List Char → List Entry → Forest → Tree   -- name + entries (args/props)
   inductive Forest where
     | nil  : Forest
     | cons : Tree → Forest → Forest
@@ -110,16 +182,16 @@ end
 mutual
   def treeWF : Tree → Prop
     | .node name args f =>
-        name ≠ [] ∧ (∀ c ∈ name, isSpecial c = false) ∧ (∀ v ∈ args, valueWF v) ∧ forestWF f
+        name ≠ [] ∧ (∀ c ∈ name, isSpecial c = false) ∧ (∀ e ∈ args, entryWF e) ∧ forestWF f
   def forestWF : Forest → Prop
     | .nil => True
     | .cons t f => treeWF t ∧ forestWF f
 end
 
-/-- Each arg is ` "…"` (space then the value). -/
-def renderArgs : List Value → List Char
+/-- Each entry is ` <entry>` (space then the rendered arg/prop). -/
+def renderArgs : List Entry → List Char
   | [] => []
-  | v :: vs => ' ' :: (renderValue v ++ renderArgs vs)
+  | v :: vs => ' ' :: (renderEntry v ++ renderArgs vs)
 
 mutual
   def renderTree : Tree → List Char
@@ -131,33 +203,33 @@ end
 
 /-- Parse the space-separated arg list, stopping before the ` {` that begins the
     children block. Fuel = arg-list length bound. -/
-def parseArgs : Nat → List Char → Option (List Value × List Char)
+def parseArgs : Nat → List Char → Option (List Entry × List Char)
   | 0, _ => none
   | fuel + 1, ' ' :: c :: rest =>
       if c = '{' then some ([], ' ' :: '{' :: rest)
       else
-        match parseValue (c :: rest) with
+        match parseEntry (c :: rest) with
         | some (v, rest2) => (parseArgs fuel rest2).map (fun p => (v :: p.1, p.2))
         | none => none
   | _ + 1, toks => some ([], toks)
 
--- One-step reduction of parseArgs on ` c…` where `c ≠ '{'` (a value, not ` {`).
+-- One-step reduction of parseArgs on ` c…` where `c ≠ '{'` (an entry, not ` {`).
 theorem parseArgs_step (fuel : Nat) (c : Char) (rest : List Char) (hc : c ≠ '{') :
     parseArgs (fuel + 1) (' ' :: c :: rest) =
-      (match parseValue (c :: rest) with
+      (match parseEntry (c :: rest) with
        | some (v, rest2) => (parseArgs fuel rest2).map (fun p => (v :: p.1, p.2))
        | none => none) := by
   simp only [parseArgs, if_neg hc]
 
-theorem renderArgs_append_cons (vs : List Value) (Z : List Char) :
+theorem renderArgs_append_cons (vs : List Entry) (Z : List Char) :
     ∃ r, renderArgs vs ++ ' ' :: Z = ' ' :: r := by
   cases vs with
   | nil => exact ⟨Z, rfl⟩
-  | cons v vs => exact ⟨renderValue v ++ renderArgs vs ++ ' ' :: Z, by
+  | cons v vs => exact ⟨renderEntry v ++ renderArgs vs ++ ' ' :: Z, by
       simp [renderArgs, List.append_assoc]⟩
 
-theorem parseArgs_render (args : List Value) (Y : List Char) (F : Nat)
-    (hwf : ∀ v ∈ args, valueWF v) (hF : args.length < F) :
+theorem parseArgs_render (args : List Entry) (Y : List Char) (F : Nat)
+    (hwf : ∀ e ∈ args, entryWF e) (hF : args.length < F) :
     parseArgs F (renderArgs args ++ ' ' :: '{' :: Y) = some (args, ' ' :: '{' :: Y) := by
   induction args generalizing F with
   | nil =>
@@ -166,21 +238,25 @@ theorem parseArgs_render (args : List Value) (Y : List Char) (F : Nat)
   | cons v vs ih =>
     match F with
     | F + 1 =>
-      have hv : valueWF v := hwf _ (by simp)
-      have hvs : ∀ w ∈ vs, valueWF w := fun w hw => hwf w (by simp [hw])
+      have hv : entryWF v := hwf _ (by simp)
+      have hvs : ∀ w ∈ vs, entryWF w := fun w hw => hwf w (by simp [hw])
       have hF' : vs.length < F := by simp only [List.length_cons] at hF; omega
-      -- the trailing input after this value is space-led, so it ends a bareword
+      -- the trailing input after this entry is space-led (and not `=`-led)
       obtain ⟨r0, hr0⟩ := renderArgs_append_cons vs ('{' :: Y)
-      have hpv := parseValue_render v (renderArgs vs ++ ' ' :: '{' :: Y) hv
-        (Or.inr ⟨' ', r0, hr0, by decide⟩)
+      have hpv := parseEntry_render v (renderArgs vs ++ ' ' :: '{' :: Y) hv
+        (Or.inr ⟨' ', r0, hr0, by decide, by decide⟩)
       have hia := ih F hvs hF'
-      -- renderValue v = c :: tail with c ≠ '{', so parseArgs takes the value branch
-      obtain ⟨c, tl, hvr, hc⟩ : ∃ c tl, renderValue v = c :: tl ∧ c ≠ '{' := by
+      -- renderEntry v = c :: tail with c ≠ '{', so parseArgs takes the entry branch
+      obtain ⟨c, tl, hvr, hc⟩ : ∃ c tl, renderEntry v = c :: tl ∧ c ≠ '{' := by
         match v, hv with
-        | .str s, _ => exact ⟨'"', s ++ ['"'], rfl, by decide⟩
-        | .word (a :: as), ⟨_, hw⟩ =>
+        | .arg (.str s), _ => exact ⟨'"', s ++ ['"'], rfl, by decide⟩
+        | .arg (.word (a :: as)), ⟨_, hw⟩ =>
             refine ⟨a, as, rfl, ?_⟩
             have := hw a (by simp); simp only [isSpecial, Bool.or_eq_false_iff] at this
+            intro h; simp_all
+        | .prop (a :: as) w, ⟨_, hk, _⟩ =>
+            refine ⟨a, as ++ '=' :: renderValue w, rfl, ?_⟩
+            have := hk a (by simp); simp only [isSpecial, Bool.or_eq_false_iff] at this
             intro h; simp_all
       simp only [renderArgs, hvr, List.cons_append, List.append_assoc] at hpv ⊢
       rw [parseArgs_step _ _ _ hc, hpv]
@@ -224,7 +300,7 @@ theorem parseForest_node (fuel : Nat) (c : Char) (rest : List Char) (hc : c ≠ 
        | none => none) := by
   simp only [parseForest, if_neg hc]
 
-theorem renderArgs_length (args : List Value) : args.length ≤ (renderArgs args).length := by
+theorem renderArgs_length (args : List Entry) : args.length ≤ (renderArgs args).length := by
   induction args with
   | nil => simp [renderArgs]
   | cons v vs ih =>
@@ -301,8 +377,8 @@ def parse (s : List Char) : Option Forest :=
   | _ => none
 
 /-- THE FULL PROOF: every well-formed document — nodes with multi-char identifier
-    names, multi-type argument lists (bareword | string), and recursive children
-    — round-trips. -/
+    names, entry lists of args (bareword | string) and `key=value` props, and
+    recursive children — round-trips. -/
 theorem parse_renderForest (f : Forest) (hwf : forestWF f) :
     parse (renderForest f) = some f := by
   unfold parse

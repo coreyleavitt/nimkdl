@@ -73,13 +73,15 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
 
 `Kdl/Full.lean` — **THE FULL PROOF**: one integrated KDL-core recognizer:
 - **round-trip** (`parse_renderForest`): `forestWF f → parse (renderForest f) =
-  some f` for every document. A document is a list of nodes; each node has an
-  IDENTIFIER name, a list of MULTI-TYPE args (bareword **or** quoted string),
-  and recursive CHILDREN — `node bareword "string" { children }`. ONE grammar,
-  ONE parser, ONE theorem, combining identifiers + typed values (dispatched by
-  leading char) + a space-separated value list (`parseArgs`) + the recursive
-  structure. Not the separate fragments — a coherent recognizer. `propext,
-  Quot.sound`.
+  some f` for every document. A document is a list of nodes; each node has a
+  multi-char IDENTIFIER name, a list of ENTRIES — positional args (bareword
+  **or** quoted string) and `key=value` PROPS — and recursive CHILDREN —
+  `node bareword "string" key=val key2="v" { children }`. ONE grammar, ONE
+  parser, ONE theorem, combining multi-char identifiers + typed values
+  (dispatched by leading char) + the arg/prop entry split (`=` terminates a
+  bareword, so `key=value` divides cleanly) + a space-separated entry list
+  (`parseArgs`) + the recursive structure. Not the separate fragments — a
+  coherent recognizer. `propext, Quot.sound`.
 
 ## Run
 
