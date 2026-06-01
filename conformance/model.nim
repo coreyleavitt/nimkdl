@@ -22,7 +22,7 @@
 ## canonicalization depends on it; radix (hex/oct/bin) is purely a surface
 ## concern handled by the renderer — the model always holds decimal.
 
-import std/json
+import std/[json, strutils]
 
 type
   KNumKind* = enum
@@ -214,6 +214,46 @@ func canonicalKdlNode*(n: KNode, depth = 0): string =
       result.add canonicalKdlNode(c, depth + 1) & "\n"
     result.add pad & "}"
 
+func valueNormal*(n: KNumber): string =
+  ## The representation-INDEPENDENT canonical VALUE of a number — the equality
+  ## oracle. A KDL number denotes a value, not a spelling (spec §Number: "no
+  ## logical distinction… up to implementations to represent"), so `12E-56`,
+  ## `1.2E-55` and `10000000000`/`1E+10` must all map to one string.
+  ##
+  ## Integers → plain decimal (already canonical). Finite reals → exact
+  ## normalized scientific: one nonzero leading digit, trailing zeros stripped,
+  ## explicit signed exponent — computed symbolically on the digit strings, so
+  ## no precision is lost. Specials → inf/-inf/nan.
+  case n.kind
+  of nkInf:    return "inf"
+  of nkNegInf: return "-inf"
+  of nkNan:    return "nan"
+  of nkFinite: discard
+  if not isReal(n):
+    return canonicalDecimal(n)                 # integer: plain decimal
+  # value = (intDigits & fracDigits) × 10^(writtenExp − fracLen)
+  var digits = n.intDigits & n.fracDigits
+  # exponent stays a BiggestInt; corpus exponents are tiny, and even 1.23E+1000
+  # fits — only absurd (>18-digit) exponents would exceed it.
+  var e10: BiggestInt = -n.fracDigits.len
+  if n.hasExp:
+    let w = parseBiggestInt(n.expDigits)
+    e10 += (if n.expNegative: -w else: w)
+  # strip leading zeros
+  var lo = 0
+  while lo < digits.len - 1 and digits[lo] == '0': inc lo
+  digits = digits[lo .. ^1]
+  # strip trailing zeros (each one bumps the exponent)
+  var hi = digits.len
+  while hi > 1 and digits[hi - 1] == '0': dec hi; inc e10
+  digits = digits[0 ..< hi]
+  if digits == "0": return "0"                 # exact zero
+  let e = e10 + (digits.len - 1)               # exponent of the leading digit
+  var mant = $digits[0]
+  if digits.len > 1: mant.add "." & digits[1 .. ^1]
+  result = (if n.negative: "-" else: "") & mant &
+           "E" & (if e < 0: "-" else: "+") & $abs(e)
+
 func canonicalKdlDoc*(doc: KDoc): string =
   ## Canonical-KDL for a whole document — one node per line, trailing newline.
   ## This is the kdl-org `expected_kdl` projection of the corpus.
@@ -239,12 +279,11 @@ func toJson*(v: KValue): JsonNode =
   of kvBool:   result["kind"] = %"bool";   result["value"] = %v.b
   of kvString: result["kind"] = %"string"; result["value"] = %v.s
   of kvNumber:
+    # `value` is the representation-INDEPENDENT canonical value (so equality is
+    # exact value-equality, not spelling-equality). `kind` is the int/real
+    # surface category.
     result["kind"] = %(if isReal(v.num): "real" else: "int")
-    case v.num.kind
-    of nkFinite: result["value"] = %canonicalDecimal(v.num)
-    of nkInf:    result["value"] = %"inf"
-    of nkNegInf: result["value"] = %"-inf"
-    of nkNan:    result["value"] = %"nan"
+    result["value"] = %valueNormal(v.num)
 
 func toJson*(n: KNode): JsonNode =
   result = newJObject()

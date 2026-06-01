@@ -45,3 +45,28 @@ suite "M1 — exact-decimal number model + canonical-KDL projection":
     # sci_notation_small: 1.23E-1000 => 1.23E-1000
     check canonicalKdl(num(false, "1", fracDigits = "23",
                            hasExp = true, expNegative = true, expDigits = "1000")) == "1.23E-1000"
+
+suite "M-value — representation-independent value equality (valueNormal)":
+
+  test "equivalent real spellings collapse to one canonical value":
+    # 1E+10 == 10000000000.0 ; 12E-56 == 1.2E-55 ; a double-based impl that
+    # normalizes mantissa/exponent must still compare equal to our exact oracle.
+    check num(false, "1", hasExp = true, expDigits = "10").num.valueNormal == "1E+10"
+    check num(false, "10000000000", fracDigits = "0").num.valueNormal == "1E+10"
+    check num(false, "12", hasExp = true, expNegative = true, expDigits = "56").num.valueNormal == "1.2E-55"
+    check num(false, "1", fracDigits = "2",
+              hasExp = true, expNegative = true, expDigits = "55").num.valueNormal == "1.2E-55"
+
+  test "trailing zeros in the fraction are not significant to the value":
+    check num(false, "1", fracDigits = "50").num.valueNormal == "1.5E+0"
+    check num(false, "1", fracDigits = "5").num.valueNormal == "1.5E+0"
+
+  test "exact zero, integers, and specials":
+    check num(false, "0", fracDigits = "0").num.valueNormal == "0"
+    check kInt(42).num.valueNormal == "42"          # integers stay plain decimal
+    check kInt(-10).num.valueNormal == "-10"
+    check kInf().num.valueNormal == "inf"
+    check kNan().num.valueNormal == "nan"
+
+  test "magnitude beyond IEEE-754 double still normalizes exactly":
+    check num(false, "123", hasExp = true, expDigits = "998").num.valueNormal == "1.23E+1000"

@@ -56,3 +56,44 @@ suite "A3 — integer group instantiation":
       .filterIt(lvl(it, "int.sign") != "minus")
       .mapIt(canonicalKdl(instantiateInteger(it).value))
     check positives.allIt(it == "42")
+
+suite "A-float — float group instantiation":
+
+  test "shape controls fraction/exponent presence in the surface":
+    for row in coveringArray(floatGroup()):
+      let t = instantiateFloat(row).text
+      let hasDot = "." in t
+      let hasE = ('e' in t) or ('E' in t)
+      case lvl(row, "float.shape")
+      of "frac": check hasDot and not hasE
+      of "exp":  check hasE and not hasDot
+      of "both": check hasDot and hasE
+      else: discard
+
+  test "every float witness is a real number (never an integer)":
+    for row in coveringArray(floatGroup()):
+      check isReal(instantiateFloat(row).value.num)
+
+  test "leading sign is semantic (minus negates the magnitude)":
+    for row in coveringArray(floatGroup()):
+      let canon = canonicalKdl(instantiateFloat(row).value)
+      check (canon.startsWith("-")) == (lvl(row, "float.sign") == "minus")
+
+  test "exponent sign is semantic (minus → E- in canonical)":
+    for row in coveringArray(floatGroup()):
+      if lvl(row, "float.shape") in ["exp", "both"]:
+        let canon = canonicalKdl(instantiateFloat(row).value)
+        check ("E-" in canon) == (lvl(row, "float.expsign") == "minus")
+
+  test "metamorphic: positive presentation variants per shape agree on value":
+    # Fix the value-affecting factors to positive; vary expcase / leading-plus /
+    # underscore. Each shape then denotes exactly one canonical real.
+    proc canonOf(shape: string): seq[string] =
+      coveringArray(floatGroup())
+        .filterIt(lvl(it, "float.shape") == shape and
+                  lvl(it, "float.sign") != "minus" and
+                  lvl(it, "float.expsign") != "minus")
+        .mapIt(canonicalKdl(instantiateFloat(it).value))
+    check canonOf("frac").allIt(it == "1.25")
+    check canonOf("exp").allIt(it == "1E+10")
+    check canonOf("both").allIt(it == "1.25E+10")

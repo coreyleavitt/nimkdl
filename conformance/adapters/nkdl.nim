@@ -76,11 +76,12 @@ suite "conformance — nkdl runs the covering-array corpus (A4)":
   # every covering-array row, instantiated to a witness, must parse to its
   # expected model. This is the deterministic, production-complete check.
 
-  test "integer group: every covering-array witness parses to its model":
-    for row in coveringArray(integerGroup()):
-      let s = instantiateInteger(row)
-      let doc: model.KDoc = @[KNode(name: "node", entries: @[arg(s.value)])]
-      let r = parse("node " & s.text & "\n")
-      check r.isOk
-      if r.isOk:
-        check toJson(mapDoc(r.get)) == toJson(doc)
+  test "every value group: each covering-array witness parses to its model":
+    for (g, instantiate) in valueGroups():
+      for row in coveringArray(g):
+        let s = instantiate(row)
+        let doc: model.KDoc = @[KNode(name: "node", entries: @[arg(s.value)])]
+        let r = parse("node " & s.text & "\n")
+        check r.isOk
+        if r.isOk:
+          check toJson(mapDoc(r.get)) == toJson(doc)

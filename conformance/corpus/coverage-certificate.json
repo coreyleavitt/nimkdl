@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 15,
+  "fixtures": 28,
   "groups": [
     {
       "name": "integer",
@@ -14,6 +14,20 @@
       ],
       "targets": 38,
       "rows": 15,
+      "complete": true
+    },
+    {
+      "name": "float",
+      "strength": 2,
+      "factors": [
+        "float.shape",
+        "float.sign",
+        "float.expcase",
+        "float.expsign",
+        "float.underscore"
+      ],
+      "targets": 62,
+      "rows": 13,
       "complete": true
     }
   ]

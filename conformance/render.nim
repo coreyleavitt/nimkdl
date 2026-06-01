@@ -64,6 +64,48 @@ func renderFloat*(f: float, plus: bool): string =
   if '.' notin body and 'e' notin body and 'E' notin body: body.add ".0"
   result = (if plus and body.len > 0 and body[0] notin {'-', '+'}: "+" else: "") & body
 
+type FloatStyle* = object
+  ## Explicit decimal-float surface choices. Built from digit STRINGS, never a
+  ## Nim float — so the rendered text and the model value share exact digits and
+  ## no precision is ever lost (`1.23E+1000` renders as written).
+  negative*, plus*: bool      ## leading sign; at most one true
+  intDigits*: string          ## integer part (≥ 1 digit)
+  fracDigits*: string         ## fraction digits, `""` == no fraction
+  hasExp*: bool
+  expUpper*: bool             ## `E` vs `e`
+  expPlus*: bool              ## explicit `+` on a positive exponent
+  expNegative*: bool          ## `-` exponent (mutually exclusive with expPlus)
+  expDigits*: string          ## exponent digits (when hasExp)
+  underscore*: bool           ## insert one `_` inside the integer part
+
+func withUnderscore(digits: string): string =
+  ## Insert one `_` after the first digit (`"25" -> "2_5"`). Precondition: ≥ 2 digits.
+  digits[0] & "_" & digits[1 .. ^1]
+
+func renderFloatSurface*(st: FloatStyle): string =
+  ## `sign? intDigits ('.' frac)? ((e|E) sign? exp)?`. The optional single `_`
+  ## lands in the first multi-digit component (fraction if present, else
+  ## exponent) — the integer part is a single digit here. Precondition: a float
+  ## must carry a fraction or an exponent (the generator enforces it).
+  if st.negative: result.add '-'
+  elif st.plus:   result.add '+'
+  result.add st.intDigits
+  var usLeft = st.underscore
+  if st.fracDigits.len > 0:
+    result.add '.'
+    if usLeft and st.fracDigits.len >= 2:
+      result.add withUnderscore(st.fracDigits); usLeft = false
+    else:
+      result.add st.fracDigits
+  if st.hasExp:
+    result.add (if st.expUpper: 'E' else: 'e')
+    if st.expNegative: result.add '-'
+    elif st.expPlus:   result.add '+'
+    if usLeft and st.expDigits.len >= 2:
+      result.add withUnderscore(st.expDigits); usLeft = false
+    else:
+      result.add st.expDigits
+
 func renderKeywordValue*(v: KValue): string =
   ## `#true|#false|#null|#inf|#-inf|#nan`. Precondition: v is bool/null, or a
   ## non-finite number (one of the inf/-inf/nan specials).

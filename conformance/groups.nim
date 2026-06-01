@@ -66,3 +66,74 @@ proc instantiateInteger*(row: Tagset): ValueSurface =
   let st = IntStyle(base: base, upperHex: upperHex,
                     signMode: signMode, underscores: underscores)
   ValueSurface(text: renderInt(value, st), value: kInt(value))
+
+# ---------------------------------------------------------------------------
+# Float  (grammar §Number decimal: intDigits ('.' frac)? ((e|E) sign? exp)?)
+# ---------------------------------------------------------------------------
+
+const
+  # Single-digit mantissa (kdl-org canonical discipline) and few-significant-
+  # digit, double-EXACT magnitudes (1.25, 1e10, 1.25e10 are all < 2^53 and
+  # dyadic-friendly), so a double-based impl reproduces the exact value and the
+  # value normal form matches. The underscore lives in the fraction or exponent.
+  fIntDigits  = "1"
+  fFracDigits = "25"   ## 1.25 exact
+  fExpDigits  = "10"   ## 1e10 / 1.25e10 exact, and ≥ 2 digits to host a `_`
+
+proc floatGroup*(): InteractionGroup =
+  ## shape{frac,exp,both} × sign{none,plus,minus} × expcase{e,E,∅}
+  ## × expsign{none,plus,minus,∅} × underscore{yes,no}, pairwise.
+  ## A float must carry a fraction or an exponent, so `shape` is SEMANTIC; the
+  ## exponent marker case and sign exist ⇔ the shape has an exponent.
+  InteractionGroup(
+    name: "float",
+    t: 2,
+    factors: @[
+      Factor(name: "float.shape",      levels: @["frac", "exp", "both"]),
+      Factor(name: "float.sign",       levels: @["none", "plus", "minus"]),
+      Factor(name: "float.expcase",    levels: @["e", "E", ""]),          # "" = no exponent
+      Factor(name: "float.expsign",    levels: @["none", "plus", "minus", ""]),
+      Factor(name: "float.underscore", levels: @["yes", "no"]),
+    ],
+    valid: proc(c: Tagset): bool =
+      let hasExp = lvl(c, "float.shape") in ["exp", "both"]
+      (lvl(c, "float.expcase") != "") == hasExp and
+      (lvl(c, "float.expsign") != "") == hasExp)
+
+proc instantiateFloat*(row: Tagset): ValueSurface =
+  ## Render one float covering-array row to a witness. Presentation factors
+  ## (exponent case, explicit `+`, underscore) shape only the text; the leading
+  ## sign and the exponent sign are semantic and flow into the model value.
+  let shape = lvl(row, "float.shape")
+  let hasFrac = shape in ["frac", "both"]
+  let hasExp  = shape in ["exp", "both"]
+  let negative = lvl(row, "float.sign") == "minus"
+  let expNeg = lvl(row, "float.expsign") == "minus"
+  let st = FloatStyle(
+    negative: negative,
+    plus: lvl(row, "float.sign") == "plus",
+    intDigits: fIntDigits,
+    fracDigits: (if hasFrac: fFracDigits else: ""),
+    hasExp: hasExp,
+    expUpper: lvl(row, "float.expcase") == "E",
+    expPlus: lvl(row, "float.expsign") == "plus",
+    expNegative: expNeg,
+    expDigits: (if hasExp: fExpDigits else: ""),
+    underscore: lvl(row, "float.underscore") == "yes")
+  let value = num(negative, fIntDigits,
+                  (if hasFrac: fFracDigits else: ""),
+                  hasExp, expNeg, (if hasExp: fExpDigits else: ""))
+  ValueSurface(text: renderFloatSurface(st), value: value)
+
+# ---------------------------------------------------------------------------
+# Registry — every value-level group with its instantiator. emit.nim and the
+# nkdl adapter iterate this so a new group is wired in one place.
+# ---------------------------------------------------------------------------
+
+type
+  Instantiator* = proc(row: Tagset): ValueSurface {.nimcall.}
+  ValueGroup* = tuple[group: InteractionGroup, instantiate: Instantiator]
+
+proc valueGroups*(): seq[ValueGroup] =
+  @[(integerGroup(), Instantiator(instantiateInteger)),
+    (floatGroup(),   Instantiator(instantiateFloat))]

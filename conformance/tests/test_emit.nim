@@ -19,7 +19,8 @@ suite "E1 — corpus emitter":
   let stats = emitCorpus(outDir)
 
   test "one fixture per covering-array row, written in all three projections":
-    let n = coveringArray(integerGroup()).len
+    var n = 0
+    for (g, _) in valueGroups(): n += coveringArray(g).len
     check stats.fixtures == n
     var inputFiles = 0
     for _ in walkFiles(outDir / "input" / "*.kdl"): inc inputFiles
@@ -45,15 +46,20 @@ suite "E1 — corpus emitter":
     let doc: model.KDoc = @[KNode(name: "node", entries: @[arg(s.value)])]
     check readFile(outDir / "expected_kdl" / "000.kdl") == canonicalKdlDoc(doc)
 
-  test "coverage certificate records the integer group at pairwise strength":
+  test "coverage certificate records each group at pairwise strength, complete":
     let cert = parseJson(readFile(outDir / "coverage-certificate.json"))
-    let g = cert["groups"][0]
-    check g["name"].getStr == "integer"
-    check g["strength"].getInt == 2
-    check g["targets"].getInt > 0
-    check g["rows"].getInt == stats.fixtures
-    # gap-finder: the chosen rows cover every required target.
-    check g["complete"].getBool
+    var totalRows = 0
+    for g in cert["groups"]:
+      check g["strength"].getInt == 2
+      check g["targets"].getInt > 0
+      check g["complete"].getBool          # gap-finder: rows cover every target
+      totalRows += g["rows"].getInt
+    check totalRows == stats.fixtures        # every row becomes one fixture
+    let names = block:
+      var s: seq[string]
+      for g in cert["groups"]: s.add g["name"].getStr
+      s
+    check "integer" in names and "float" in names
 
   test "re-emitting is byte-stable (deterministic corpus)":
     let a = readFile(outDir / "input" / "000.kdl")

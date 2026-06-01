@@ -61,15 +61,16 @@ proc certify(g: InteractionGroup): GroupCert =
             targets: targets.len, rows: rows.len, complete: complete)
 
 proc buildFixtures*(): seq[Fixture] =
-  ## The full corpus as in-memory fixtures. Currently the integer group; further
-  ## groups append their witnesses here as they land.
+  ## The full corpus as in-memory fixtures: every value group's covering array,
+  ## each row wrapped as `node <value>`. New groups join via `valueGroups()`.
   var idx = 0
-  for row in coveringArray(integerGroup()):
-    let s = instantiateInteger(row)
-    result.add Fixture(name: intToStr(idx, 3),
-                       input: "node " & s.text & "\n",
-                       doc: nodeWitness(s.value))
-    inc idx
+  for (g, instantiate) in valueGroups():
+    for row in coveringArray(g):
+      let s = instantiate(row)
+      result.add Fixture(name: intToStr(idx, 3),
+                         input: "node " & s.text & "\n",
+                         doc: nodeWitness(s.value))
+      inc idx
 
 proc emitCorpus*(outDir: string): CorpusStats =
   ## Write the corpus to `outDir`, overwriting any prior contents. Returns stats
@@ -85,7 +86,8 @@ proc emitCorpus*(outDir: string): CorpusStats =
     writeFile(outDir / "expected" / f.name & ".json", pretty(toJson(f.doc)) & "\n")
     writeFile(outDir / "expected_kdl" / f.name & ".kdl", canonicalKdlDoc(f.doc))
 
-  let groups = @[certify(integerGroup())]
+  var groups: seq[GroupCert]
+  for (g, _) in valueGroups(): groups.add certify(g)
   var certJson = %*{
     "kdl_version": 2,
     "format": "nkdl-conformance/1",
