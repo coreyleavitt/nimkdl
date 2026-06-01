@@ -8,4 +8,4 @@ RUNTIME="${CONTAINER_RUNTIME:-podman}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$RUNTIME" image exists localhost/lean-nkdl 2>/dev/null || "$RUNTIME" build -t localhost/lean-nkdl "$DIR"
 "$RUNTIME" run --rm -v "$DIR:/work:Z" -w /work localhost/lean-nkdl \
-  sh -c 'for f in Kdl/Value.lean Kdl/Number.lean Kdl/Str.lean; do echo "== $f =="; lean "$f"; done'
+  sh -c 'for f in Kdl/Value.lean Kdl/Number.lean Kdl/Str.lean Kdl/Doc.lean; do echo "== $f =="; lean "$f"; done'

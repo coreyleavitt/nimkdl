@@ -35,6 +35,14 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
   `"` and `\` are escaped as `\"` / `\\`; parse strips the quotes and decodes the
   escapes. Proved by induction over the content with the escape-character cases.
 
+`Kdl/Doc.lean` — the RECURSIVE document fragment (the deep end):
+- **round-trip** (`parse_renderForest`): `parse (renderForest f) = some f` for
+  every forest — a tree of brace-nested nodes (`{}`, `{{}}`, `{{}{}}`, …), the
+  essential recursive skeleton (names/args/Unicode come later). A verified
+  recursive-descent parser: FUEL-based (so termination is structural), proved by
+  **mutual induction** on the tree/forest with a `size ≤ render-length` fuel bound.
+  All theorems axiom-clean (`propext, Quot.sound`).
+
 ## Run
 
 ```
