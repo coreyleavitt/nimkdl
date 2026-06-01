@@ -1,9 +1,35 @@
 # RFC: Spec-coverage testing — generate from the grammar, not from a peer
 
-**Status**: Proposed. Supersedes the ad-hoc, corpus-anchored testing posture
-for conformance. Extends the Stage-F property catalog (P1–P12) and the
-`grammar.nim` "grammar is data" design. Does **not** change any shipping code
-— it adds a test layer.
+**Status**: In progress — the design below evolved during implementation; the
+**corrected, built architecture lives in `conformance/README.md`** and is
+canonical where the two differ. Extends the Stage-F property catalog (P1–P12).
+Does **not** change any shipping code — it adds a test/tooling layer.
+
+> ## ⚠ Architecture correction (read `conformance/README.md`)
+>
+> The body below frames this as nkdl's *internal* PBT (paired generator checked
+> against nkdl's `parse()`, completeness via gcov-on-nkdl). That was wrong, and
+> was corrected during the build:
+>
+> 1. **The conformance corpus must be implementation-INDEPENDENT** — zero `src/`
+>    imports. A corpus you test nkdl against can't be produced with nkdl, or
+>    "nkdl passes" is circular. (Even `referenceInterpret` is disqualified: it
+>    shares `lexer.nim`+`numlit.nim`, so it's independent only at the structural
+>    level, not the lexical.) It lives in a top-level `conformance/` dir; nkdl is
+>    one *adapter* (`conformance/adapters/nkdl.nim`), as are other impls.
+> 2. **generation < parsing** — a paired generator knows the answer by
+>    construction, so no parser/reference/audit/shared-lexer is needed; that's
+>    what keeps it independent AND simpler.
+> 3. **Completeness = grammar-production coverage of the generator**, NOT
+>    gcov-on-nkdl (which measures *our* branches — meaningless for a spec corpus;
+>    gcov stays only as an internal nkdl-QA convenience).
+> 4. nkdl's internal PBT (`tests/kdlgen.nim` + `tests/test_spec_coverage.nim`,
+>    which DO import `src/`) is legitimate but separate; the corpus + adapters
+>    supersede it once complete.
+>
+> The lexical-layer reasoning below (paired generator, spec-first transcription,
+> the float round-trip / disallowed-literal lessons) is all still correct — it's
+> the *coupling to nkdl* that was the error.
 
 ## TL;DR
 
