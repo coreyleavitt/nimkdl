@@ -173,6 +173,38 @@ proc instantiateString*(row: Tagset): ValueSurface =
   ValueSurface(text: text, value: kStr(value))
 
 # ---------------------------------------------------------------------------
+# Type annotation  (grammar §Type Annotation: `(` ws? string ws? `)` prefix on a
+# value, separable from its target by whitespace; the string may be bareword or
+# quoted). All surface variants denote the SAME tag → metamorphic. Canonical is
+# a tight bareword annotation. (Node annotations are a small follow-up.)
+# ---------------------------------------------------------------------------
+
+proc annotationGroup*(): InteractionGroup =
+  ## style{bareword,quoted} × innerWs{none,spaced} × gapWs{none,spaced}
+  ## × valueKind{int,string}, pairwise, unconstrained. The annotated value is
+  ## the semantic content; everything else is surface that canonicalizes away.
+  InteractionGroup(
+    name: "annotation",
+    t: 2,
+    factors: @[
+      Factor(name: "anno.style",     levels: @["bareword", "quoted"]),
+      Factor(name: "anno.innerWs",   levels: @["none", "spaced"]),
+      Factor(name: "anno.gapWs",     levels: @["none", "spaced"]),
+      Factor(name: "anno.valueKind", levels: @["int", "string"]),
+    ])
+
+proc instantiateAnnotation*(row: Tagset): ValueSurface =
+  ## `(` ws? type ws? `)` ws? value. The tag is always `type`; innerWs/gapWs/
+  ## style shape only the surface. The value carries `typeAnno = "type"`.
+  let inner = (if lvl(row, "anno.style") == "quoted": "\"type\"" else: "type")
+  let pad = (if lvl(row, "anno.innerWs") == "spaced": " " else: "")
+  let gap = (if lvl(row, "anno.gapWs") == "spaced": " " else: "")
+  let (valText, value) =
+    if lvl(row, "anno.valueKind") == "string": ("\"s\"", kStr("s", "type"))
+    else: ("1", kInt(1, "type"))
+  ValueSurface(text: "(" & pad & inner & pad & ")" & gap & valText, value: value)
+
+# ---------------------------------------------------------------------------
 # Structural  (grammar: base-node := type? string (node-prop-or-arg)*
 # node-children?  + the document being a list of nodes). NODE-SHAPED witnesses,
 # not value-wrapped. The factors interact — `children × second` is the
@@ -234,9 +266,10 @@ type
   DocGroup* = tuple[group: InteractionGroup, instantiate: NodeInstantiator]
 
 proc valueGroups*(): seq[ValueGroup] =
-  @[(integerGroup(), Instantiator(instantiateInteger)),
-    (floatGroup(),   Instantiator(instantiateFloat)),
-    (stringGroup(),  Instantiator(instantiateString))]
+  @[(integerGroup(),    Instantiator(instantiateInteger)),
+    (floatGroup(),      Instantiator(instantiateFloat)),
+    (stringGroup(),     Instantiator(instantiateString)),
+    (annotationGroup(), Instantiator(instantiateAnnotation))]
 
 proc docGroups*(): seq[DocGroup] =
   @[(structuralGroup(), NodeInstantiator(instantiateStructural))]

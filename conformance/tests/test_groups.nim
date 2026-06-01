@@ -142,6 +142,41 @@ suite "A-string — string group instantiation (single-line quoted + raw)":
       check vals.len >= 2          # both styles present
       check vals.allIt(it == vals[0])
 
+suite "A-anno — value type-annotation group":
+
+  test "every witness value carries the type annotation 'type'":
+    for row in coveringArray(annotationGroup()):
+      check instantiateAnnotation(row).value.typeAnno == "type"
+
+  test "surface always brackets the annotation":
+    for row in coveringArray(annotationGroup()):
+      let t = instantiateAnnotation(row).text
+      check "(" in t and ")" in t
+
+  test "annotation style: quoted iff style=quoted":
+    for row in coveringArray(annotationGroup()):
+      let t = instantiateAnnotation(row).text
+      check ("\"type\"" in t) == (lvl(row, "anno.style") == "quoted")
+
+  test "inner whitespace appears iff innerWs=spaced":
+    for row in coveringArray(annotationGroup()):
+      let t = instantiateAnnotation(row).text
+      check ("( " in t) == (lvl(row, "anno.innerWs") == "spaced")
+
+  test "canonical normalizes to a tight bareword annotation regardless of surface":
+    for row in coveringArray(annotationGroup()):
+      let s = instantiateAnnotation(row)
+      let want = (if lvl(row, "anno.valueKind") == "string": "(type)\"s\"" else: "(type)1")
+      check canonicalKdl(s.value) == want
+
+  test "metamorphic: all surface variants of a value+anno denote one model":
+    for vk in ["int", "string"]:
+      let canons = coveringArray(annotationGroup())
+        .filterIt(lvl(it, "anno.valueKind") == vk)
+        .mapIt(canonicalKdl(instantiateAnnotation(it).value))
+      check canons.len >= 2
+      check canons.allIt(it == canons[0])
+
 suite "A-struct — structural group instantiation (node-shaped witnesses)":
 
   proc argCount(n: KNode): int =

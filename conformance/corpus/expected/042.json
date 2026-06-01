@@ -4,25 +4,12 @@
     "type": null,
     "args": [
       {
-        "type": null,
+        "type": "type",
         "kind": "int",
         "value": "1"
-      },
-      {
-        "type": null,
-        "kind": "int",
-        "value": "2"
       }
     ],
     "props": [],
-    "children": [
-      {
-        "name": "child",
-        "type": null,
-        "args": [],
-        "props": [],
-        "children": []
-      }
-    ]
+    "children": []
   }
 ]

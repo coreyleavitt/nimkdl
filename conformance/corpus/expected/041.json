@@ -4,32 +4,11 @@
     "type": null,
     "args": [
       {
-        "type": null,
+        "type": "type",
         "kind": "int",
         "value": "1"
-      },
-      {
-        "type": null,
-        "kind": "int",
-        "value": "2"
       }
     ],
-    "props": [
-      [
-        "k",
-        {
-          "type": null,
-          "kind": "int",
-          "value": "3"
-        }
-      ]
-    ],
-    "children": []
-  },
-  {
-    "name": "node2",
-    "type": null,
-    "args": [],
     "props": [],
     "children": []
   }
