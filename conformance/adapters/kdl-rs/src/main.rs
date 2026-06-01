@@ -119,9 +119,6 @@ fn main() {
     let mut pass = 0usize;
     let mut fail = 0usize;
     let mut diffs: Vec<String> = Vec::new();
-    let mut canon_pass = 0usize;
-    let mut canon_fail = 0usize;
-    let mut canon_diffs: Vec<String> = Vec::new();
     let mut inputs: Vec<_> = fs::read_dir(format!("{corpus}/input"))
         .expect("corpus/input")
         .map(|e| e.unwrap().path())
@@ -142,29 +139,6 @@ fn main() {
                     fail += 1;
                     if diffs.len() < 8 {
                         diffs.push(format!("  {name}: GOT {got}\n         EXP {expected}"));
-                    }
-                }
-                // Canonical-text cross-check (INFORMATIONAL): our expected_kdl vs
-                // kdl-rs `autoformat`. Note autoformat is NOT the kdl-org canonical
-                // serializer for FLOATS — it expands exponents and lowercases `e`
-                // (`1E+10` → `10000000000.0`), whereas the kdl-org expected_kdl
-                // (which our canonical follows: `1e10 => 1E+10`) keeps the exponent
-                // form. So float mismatches here are an autoformat-style difference,
-                // not an oracle bug; the VALUE cert above is authoritative.
-                if let Ok(exp_kdl) = fs::read_to_string(format!("{corpus}/expected_kdl/{name}.kdl")) {
-                    let mut fmt = doc.clone();
-                    fmt.autoformat();
-                    if fmt.to_string().trim_end() == exp_kdl.trim_end() {
-                        canon_pass += 1;
-                    } else {
-                        canon_fail += 1;
-                        if canon_diffs.len() < 8 {
-                            canon_diffs.push(format!(
-                                "  {name}: OURS {:?}  KDL-RS {:?}",
-                                exp_kdl.trim_end(),
-                                fmt.to_string().trim_end()
-                            ));
-                        }
                     }
                 }
             }
@@ -202,10 +176,6 @@ fn main() {
     println!("=== kdl-rs cross-impl certification ===");
     println!("positive (value): {pass} pass, {fail} fail");
     for d in &diffs {
-        println!("{d}");
-    }
-    println!("canonical (INFO: expected_kdl vs kdl-rs autoformat — float style differs by design): {canon_pass} match, {canon_fail} differ");
-    for d in &canon_diffs {
         println!("{d}");
     }
     println!("negative: {npass} reject-ok, {nfail} wrongly-accepted");
