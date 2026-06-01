@@ -8,6 +8,14 @@ nim.cfg
 tests/test_*
 !tests/test_*.nim
 !tests/test_*/
+conformance/tests/test_*
+!conformance/tests/test_*.nim
+conformance/adapters/nkdl
+!conformance/adapters/nkdl.nim
+conformance/emit
+!conformance/emit.nim
+conformance/gen
+!conformance/gen.nim
 
 # Conformance failure log (regenerated)
 tests/.last-conformance-failures.log
