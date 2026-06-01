@@ -195,6 +195,30 @@ func canonicalQuoted*(s: string): string =
         result.add ch
   result.add "\""
 
+func isBarewordIdent*(s: string): bool =
+  ## Is `s` a valid KDL identifier string (§Identifier String) — i.e. writable
+  ## as a bareword? Used to decide whether the canonical form quotes a string,
+  ## node name, property key, or annotation. The kdl-org canonical form barewords
+  ## whenever possible (`"arg"` → `arg`, `(type)"str"` → `(type)str`).
+  if s.len == 0: return false
+  if s in ["true", "false", "null", "inf", "-inf", "nan"]: return false
+  for ch in s:           # no non-identifier characters anywhere
+    if ch in {'(', ')', '{', '}', '[', ']', '/', '\\', '"', '#', ';', '=',
+              ' ', '\t', '\n', '\r'} or ord(ch) < 0x20 or ord(ch) == 0x7F:
+      return false
+  if s[0] in {'0' .. '9'}: return false        # may not start like a number
+  # sign/dot initial rules: must not look like a number
+  if s[0] in {'+', '-'}:
+    if s.len >= 2 and s[1] in {'0' .. '9'}: return false
+    if s.len >= 3 and s[1] == '.' and s[2] in {'0' .. '9'}: return false
+  if s[0] == '.' and s.len >= 2 and s[1] in {'0' .. '9'}: return false
+  true
+
+func canonicalIdent*(s: string): string =
+  ## The canonical KDL spelling of an identifier-position string: a bareword when
+  ## it is a valid identifier, otherwise a quoted string.
+  if isBarewordIdent(s): s else: canonicalQuoted(s)
+
 func canonicalValueBody(v: KValue): string =
   case v.kind
   of kvNull: "#null"
@@ -206,16 +230,15 @@ func canonicalValueBody(v: KValue): string =
     of nkNegInf: "#-inf"
     of nkNan:    "#nan"
   of kvString:
-    canonicalQuoted(v.s)
+    canonicalIdent(v.s)            # bareword when a valid identifier, else quoted
 
 func canonicalKdl*(v: KValue): string =
   ## The canonical-KDL text for a *value*, including its `(type)` annotation
   ## prefix when present (e.g. `(u16)80`). For numbers the body is the decimal
-  ## text; for the keyword values it is the `#`-prefixed keyword. (Annotation
-  ## strings that are not bare identifiers will gain quoting in the string
-  ## slice; the integer corpus uses none.)
+  ## text; for the keyword values it is the `#`-prefixed keyword. Strings and
+  ## annotations are barewords when they are valid identifiers, else quoted.
   let body = canonicalValueBody(v)
-  if v.typeAnno.len > 0: "(" & v.typeAnno & ")" & body else: body
+  if v.typeAnno.len > 0: "(" & canonicalIdent(v.typeAnno) & ")" & body else: body
 
 func canonicalKdlNode*(n: KNode, depth = 0): string =
   ## Canonical-KDL for a node: `[indent](type)?name (entry)* ( { children } )?`.
@@ -225,13 +248,13 @@ func canonicalKdlNode*(n: KNode, depth = 0): string =
   var pad = ""
   for _ in 0 ..< depth: pad.add "    "
   result = pad
-  if n.typeAnno.len > 0: result.add "(" & n.typeAnno & ")"
-  result.add n.name
+  if n.typeAnno.len > 0: result.add "(" & canonicalIdent(n.typeAnno) & ")"
+  result.add canonicalIdent(n.name)
   for e in n.entries:
     result.add ' '
     case e.kind
     of keArg:  result.add canonicalKdl(e.val)
-    of keProp: result.add e.key & "=" & canonicalKdl(e.pval)
+    of keProp: result.add canonicalIdent(e.key) & "=" & canonicalKdl(e.pval)
   if n.children.len > 0:
     result.add " {\n"
     for c in n.children:

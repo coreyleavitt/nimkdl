@@ -125,13 +125,13 @@ suite "A-string — string group instantiation (single-line quoted + raw)":
         check t.startsWith(repeat('#', want) & "\"")
         check not t.startsWith(repeat('#', want + 1))
 
-  test "canonical is the quoted-escaped form regardless of surface style":
+  test "canonical barewords valid identifiers, quotes the rest":
     for row in coveringArray(stringGroup()):
       let s = instantiateString(row)
       case lvl(row, "str.content")
-      of "simple":    check canonicalKdl(s.value) == "\"abc\""
-      of "quote":     check canonicalKdl(s.value) == "\"ab\\\"cd\""
-      of "backslash": check canonicalKdl(s.value) == "\"ab\\\\cd\""
+      of "simple":    check canonicalKdl(s.value) == "abc"            # bareword
+      of "quote":     check canonicalKdl(s.value) == "\"ab\\\"cd\""   # has " ⇒ quoted
+      of "backslash": check canonicalKdl(s.value) == "\"ab\\\\cd\""   # has \ ⇒ quoted
       else: discard
 
   test "metamorphic: same content via quoted and raw denotes the same value":
@@ -156,7 +156,7 @@ suite "A-escape — \\u{} + escaped-whitespace quoted-string escapes":
   test "canonical re-emits the decoded value literally":
     for row in coveringArray(escapeGroup()):
       let s = instantiateEscape(row)
-      check canonicalKdl(s.value) == (if lvl(row, "esc.kind") == "unicode": "\"A\"" else: "\"ab\"")
+      check canonicalKdl(s.value) == (if lvl(row, "esc.kind") == "unicode": "A" else: "ab")
 
   test "all three escape forms are covered":
     check coveringArray(escapeGroup()).mapIt(lvl(it, "esc.kind")).deduplicate.len == 3
@@ -183,7 +183,7 @@ suite "A-multiline — multi-line string group (dedent; plain + raw)":
   test "canonical is the quoted single-line string (multiline is surface-only)":
     for row in coveringArray(multilineGroup()):
       let s = instantiateMultiline(row)
-      let want = (if lvl(row, "ml.lines") == "two": "\"ab\\ncd\"" else: "\"ab\"")
+      let want = (if lvl(row, "ml.lines") == "two": "\"ab\\ncd\"" else: "ab")  # newline ⇒ quoted; "ab" ⇒ bareword
       check canonicalKdl(s.value) == want
 
   test "metamorphic: same content via any indent/style denotes one value":
@@ -243,7 +243,7 @@ suite "A-anno — value type-annotation group":
   test "canonical normalizes to a tight bareword annotation regardless of surface":
     for row in coveringArray(annotationGroup()):
       let s = instantiateAnnotation(row)
-      let want = (if lvl(row, "anno.valueKind") == "string": "(type)\"s\"" else: "(type)1")
+      let want = (if lvl(row, "anno.valueKind") == "string": "(type)s" else: "(type)1")  # "s" ⇒ bareword
       check canonicalKdl(s.value) == want
 
   test "metamorphic: all surface variants of a value+anno denote one model":
