@@ -1,7 +1,7 @@
 {
   "kdl_version": 2,
   "format": "nkdl-conformance/1",
-  "fixtures": 69,
+  "fixtures": 73,
   "groups": [
     {
       "name": "integer",
@@ -88,6 +88,16 @@
       ],
       "targets": 8,
       "rows": 8,
+      "complete": true
+    },
+    {
+      "name": "trivia",
+      "strength": 1,
+      "factors": [
+        "tr.kind"
+      ],
+      "targets": 4,
+      "rows": 4,
       "complete": true
     }
   ]

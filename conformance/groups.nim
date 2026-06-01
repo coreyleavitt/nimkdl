@@ -329,6 +329,35 @@ proc instantiateSlashdash*(row: Tagset): DocSurface =
                doc: @[KNode(name: "node", entries: @[arg(kInt(1))])])
 
 # ---------------------------------------------------------------------------
+# Trivia  (§Whitespace: single-line `//`…newline, multi-line `/* */` (nestable),
+# and Line Continuation `\`+newline). All are whitespace — they MUST vanish from
+# the model. Single factor at t=1: each form is exercised once, placed where it
+# is legal, all denoting the SAME node `node 1 2` (the metamorphic invariant).
+# ---------------------------------------------------------------------------
+
+proc triviaGroup*(): InteractionGroup =
+  ## kind{line, block, block-nested, escline}, strength 1 (each form covered;
+  ## there is no interaction to pair — every form is independently whitespace).
+  InteractionGroup(
+    name: "trivia",
+    t: 1,
+    factors: @[
+      Factor(name: "tr.kind", levels: @["line", "block", "block-nested", "escline"]),
+    ])
+
+proc instantiateTrivia*(row: Tagset): DocSurface =
+  ## Each form is placed in a legal position and discarded, leaving `node 1 2`.
+  ## (Line comments sit at end-of-node before the newline; block comments and
+  ## esclines sit between the two arguments.)
+  let model = @[KNode(name: "node", entries: @[arg(kInt(1)), arg(kInt(2))])]
+  let text = case lvl(row, "tr.kind")
+    of "line":         "node 1 2 // trailing comment\n"
+    of "block":        "node 1 /* mid */ 2\n"
+    of "block-nested": "node 1 /* a /* b */ c */ 2\n"
+    else:              "node 1 \\\n2\n"        # escline (line continuation)
+  DocSurface(text: text, doc: model)
+
+# ---------------------------------------------------------------------------
 # Registry — every group with its instantiator. emit.nim and the nkdl adapter
 # iterate these so a new group is wired in one place. Value groups wrap their
 # witness as `node <value>`; doc groups produce a whole document directly.
@@ -349,4 +378,5 @@ proc valueGroups*(): seq[ValueGroup] =
 
 proc docGroups*(): seq[DocGroup] =
   @[(structuralGroup(), NodeInstantiator(instantiateStructural)),
-    (slashdashGroup(),  NodeInstantiator(instantiateSlashdash))]
+    (slashdashGroup(),  NodeInstantiator(instantiateSlashdash)),
+    (triviaGroup(),     NodeInstantiator(instantiateTrivia))]

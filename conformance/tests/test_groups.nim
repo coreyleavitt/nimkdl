@@ -269,3 +269,20 @@ suite "A-slashdash — slashdash /- discards a component (node/arg/prop/children
         .mapIt($toJson(instantiateSlashdash(it).doc))
       check docs.len >= 2
       check docs.allIt(it == docs[0])
+
+suite "A-trivia — comments + escline are whitespace (discarded from the model)":
+
+  test "every trivia form's surface carries its marker":
+    for row in coveringArray(triviaGroup()):
+      let t = instantiateTrivia(row).text
+      case lvl(row, "tr.kind")
+      of "line":         check "//" in t
+      of "block":        check "/*" in t and "*/" in t
+      of "block-nested": check t.count("/*") == 2 and t.count("*/") == 2
+      of "escline":      check "\\\n" in t
+      else: discard
+
+  test "every trivia form denotes the same node (it is whitespace)":
+    let docs = coveringArray(triviaGroup()).mapIt($toJson(instantiateTrivia(it).doc))
+    check docs.len == 4                # all four forms covered
+    check docs.allIt(it == docs[0])   # and all denote the same model
