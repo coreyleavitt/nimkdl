@@ -64,6 +64,13 @@ All three: `propext, Quot.sound` (core; no `sorryAx`).
   (`countHashes`) and requires the trailing run to match. The verified property
   is the delimiter count. `propext` only.
 
+`Kdl/Dedent.lean` — multiline DEDENT core (the hardest algorithm):
+- **dedent round-trip** (`dedent_render`): `dedent p (lines.map (p ++ ·)) =
+  some lines` for every prefix `p` and body — indenting every line by `p` then
+  dedenting by `p` recovers the lines. This is the genuinely novel multi-line
+  string operation; the `"""`-framing (discover `p` from the closing line, split
+  the body on newlines) is plumbing around this core. `propext` only.
+
 ## Run
 
 ```
