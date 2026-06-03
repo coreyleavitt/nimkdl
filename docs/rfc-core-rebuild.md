@@ -16,11 +16,12 @@ in #39, landed on `core-rebuild`):** `ckRef` (ref object as user-facing decode/e
 type — `cbded0b`, closes #9); leaf-field-path enrichment (`outer.inner.port` —
 `22afb3c`); type-alias→base-primitive dispatch (`baseTypeName`, decode+encode — closes
 #39 item 5); `ckOption` (Option[object] as `kdlChild`, peel-before-`nodeNameOf` +
-new `ckOption` ChildKind — `e12f161`, closes #39 item 1).
-**Remaining (#39 — both need design, not mechanical fixes):** `kdlScalar` + mixin
-`kdlDecodeValue`/`kdlEncodeValue` (item 3 — new public hook protocol, durable spec
-surface); partial-splice preserve under mutation (item 6 — extension of the typed
-byte-preserve subsystem #31, RFC-scale).
+new `ckOption` ChildKind — `e12f161`, closes #39 item 1); `kdlScalar` custom-scalar
+hook protocol (`kdlEncodeValue`/`kdlDecodeValue`, `scalar` flag threaded through
+arg/prop dispatch, macro owns ParseError lift — `d385019`, closes #39 item 3).
+**Remaining (1 item, RFC-scale):** partial-splice preserve under mutation (item 6) —
+extension of the typed byte-preserve subsystem #31; needs per-node span sidecar §5.5.
+Track under #31. All mechanical/derive §8.7 hardening is now done.
 **Date:** 2026-06-03 (R3 review folded)
 **Supersedes:** the *substrate* sections of `rfc-api-v0.2-hardening.md` (F.0–F.6,
 §2.5 C0-x, the `ownerDocument`/`adopt`/ref-vs-arena material). That RFC's **API
