@@ -171,12 +171,19 @@ proc baseTypeName(t: NimNode): string =
   $cur
 
 proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
-                       fieldType: NimNode, annoLit: NimNode) =
+                       fieldType: NimNode, annoLit: NimNode,
+                       scalar: bool = false) =
   ## Inner of the arg-push dispatch: emit the typed push for an
   ## already-resolved value expression. `annoLit` is a string literal
   ## node ("" for "no annotation", non-empty for kdlReserved tags) —
   ## inlined at macro time so the emitter's bareword/quoted decider
   ## runs once per push call site, not per encode call.
+  if scalar:
+    # kdlScalar: render via the user's `kdlEncodeValue(x): string` hook and
+    # push as a string scalar (symmetric with the decode hook).
+    pushBody.add quote do:
+      `eSym`.pushArgString(kdlEncodeValue(`valueExpr`), `annoLit`)
+    return
   case baseTypeName(fieldType)
   of "string":
     pushBody.add quote do:
@@ -203,7 +210,8 @@ proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
             "bool/enum)")
 
 proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
-                 fieldName: string, fieldType: NimNode, annoLit: NimNode) =
+                 fieldName: string, fieldType: NimNode, annoLit: NimNode,
+                 scalar: bool = false) =
   ## Append a `pushArg*` call appropriate to the field's static type.
   ## For Option[T], wrap in `if v.field.isSome:` and push the inner
   ## value; None means the field is absent and emits nothing.
@@ -212,15 +220,19 @@ proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
     let inner = innerOfOption(fieldType)
     var inner_body = newStmtList()
     let getExpr = quote do: get(`vSym`.`fieldIdent`)
-    emitArgPushDirect(inner_body, eSym, getExpr, inner, annoLit)
+    emitArgPushDirect(inner_body, eSym, getExpr, inner, annoLit, scalar)
     let cond = quote do: isSome(`vSym`.`fieldIdent`)
     pushBody.add newIfStmt((cond, inner_body))
   else:
     let fullExpr = quote do: `vSym`.`fieldIdent`
-    emitArgPushDirect(pushBody, eSym, fullExpr, fieldType, annoLit)
+    emitArgPushDirect(pushBody, eSym, fullExpr, fieldType, annoLit, scalar)
 
 proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
-                        fieldType, annoLit: NimNode) =
+                        fieldType, annoLit: NimNode, scalar: bool = false) =
+  if scalar:
+    pushBody.add quote do:
+      `eSym`.pushPropString(`keyLit`, kdlEncodeValue(`valueExpr`), `annoLit`)
+    return
   case baseTypeName(fieldType)
   of "string":
     pushBody.add quote do:
@@ -248,7 +260,7 @@ proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
 
 proc emitPropPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
                   fieldName: string, wireKey: string,
-                  fieldType: NimNode, annoLit: NimNode) =
+                  fieldType: NimNode, annoLit: NimNode, scalar: bool = false) =
   ## Append a `pushProp*` call appropriate to the field's static type.
   ## `wireKey` is the bytes used on the wire — `fieldName` by default,
   ## or the kdlRename pragma value when present. Key bytes inline at
@@ -259,12 +271,13 @@ proc emitPropPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
     let inner = innerOfOption(fieldType)
     var inner_body = newStmtList()
     let getExpr = quote do: get(`vSym`.`fieldIdent`)
-    emitPropPushDirect(inner_body, eSym, keyLit, getExpr, inner, annoLit)
+    emitPropPushDirect(inner_body, eSym, keyLit, getExpr, inner, annoLit, scalar)
     let cond = quote do: isSome(`vSym`.`fieldIdent`)
     pushBody.add newIfStmt((cond, inner_body))
   else:
     let fullExpr = quote do: `vSym`.`fieldIdent`
-    emitPropPushDirect(pushBody, eSym, keyLit, fullExpr, fieldType, annoLit)
+    emitPropPushDirect(pushBody, eSym, keyLit, fullExpr, fieldType, annoLit,
+                       scalar)
 
 macro deriveEncode*(T: typedesc): untyped =
   ## Emit `proc kdlEncode*(v: T; e: var BufferEmitter)` specialized to
@@ -303,11 +316,15 @@ macro deriveEncode*(T: typedesc): untyped =
         renameArg.strVal
       else:
         fieldName
+    let scalar = hasPragma(pragmas, "kdlScalar")
     if hasPragma(pragmas, "kdlArg"):
-      emitArgPush(targetBody, vSym, eSym, fieldName, fieldType, annoLit)
-    elif hasPragma(pragmas, "kdlProp"):
+      emitArgPush(targetBody, vSym, eSym, fieldName, fieldType, annoLit, scalar)
+    elif hasPragma(pragmas, "kdlProp") or
+         (scalar and not hasPragma(pragmas, "kdlChild")):
+      # bare kdlScalar defaults to a prop (key = field name), symmetric
+      # with the decode classifier.
       emitPropPush(targetBody, vSym, eSym, fieldName, wireKey, fieldType,
-                   annoLit)
+                   annoLit, scalar)
     elif hasPragma(pragmas, "kdlChild"):
       if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
         childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq))

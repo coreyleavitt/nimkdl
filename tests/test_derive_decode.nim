@@ -714,3 +714,39 @@ suite "derive_decode — ckOption: Option[object] child (#39 item 1)":
     let r = kdlDecode(p, f.cursor)
     check r.isOk
     check p.sect.isNone
+
+import std/strutils
+
+suite "derive_decode — kdlScalar custom hook (#39 item3)":
+
+  type Color = object
+    r, g, b: uint8
+
+  proc kdlDecodeValue(s: string, T: typedesc[Color]): Result[Color, string] =
+    if s.len == 7 and s[0] == '#':
+      try:
+        ok[Color, string](Color(r: uint8(parseHexInt(s[1..2])),
+                                 g: uint8(parseHexInt(s[3..4])),
+                                 b: uint8(parseHexInt(s[5..6]))))
+      except CatchableError:
+        err[Color, string]("invalid hex color")
+    else:
+      err[Color, string]("expected #rrggbb")
+
+  type Paint {.kdlNode: "paint".} = object
+    color {.kdlScalar.}: Color
+
+  deriveDecode(Paint)
+
+  test "kdlScalar prop decodes via hook":
+    let f = mkCursor("paint color=\"#ff8000\"")
+    var p: Paint
+    let r = kdlDecode(p, f.cursor)
+    check r.isOk
+    check p.color == Color(r: 255, g: 128, b: 0)
+
+  test "hook error surfaces as decode error":
+    let f = mkCursor("paint color=\"nope\"")
+    var p: Paint
+    let r = kdlDecode(p, f.cursor)
+    check r.isErr

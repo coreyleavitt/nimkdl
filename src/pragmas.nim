@@ -19,6 +19,16 @@ template kdlChild*() {.pragma.}
 template kdlSkip*() {.pragma.}
   ## Field-level: do not parse — keep Nim's default.
 
+template kdlScalar*() {.pragma.}
+  ## Field-level: encode/decode this field as a single KDL scalar via the
+  ## user-provided hook pair, instead of the built-in primitive/child
+  ## dispatch. The user defines, in scope before the type's `kdl:` block:
+  ##   proc kdlEncodeValue(x: T): string
+  ##   proc kdlDecodeValue(s: string; T: typedesc): Result[T, string]
+  ## The macro owns the wire framing (string scalar) + lifts a decode
+  ## error string into a `ParseError` with the value's span. Defaults to a
+  ## property (key = field name); combine with `{.kdlArg.}` for positional.
+
 template kdlRename*(name: string) {.pragma.}
   ## Field-level: KDL name differs from Nim field name.
 

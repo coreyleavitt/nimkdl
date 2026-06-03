@@ -207,11 +207,31 @@ proc baseTypeName(t: NimNode): string =
   $cur
 
 proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
-                     fieldType: NimNode, cSym: NimNode): NimNode =
+                     fieldType: NimNode, cSym: NimNode,
+                     scalar: bool = false): NimNode =
   ## Emit the typed decode of a token at `tokIndexExpr` into
   ## `targetIdent`. Used by both arg-positional dispatch and
   ## prop-by-key dispatch. For Option[T], decode the inner T and
   ## wrap the result in `some(...)`. For plain T, assign directly.
+  if scalar:
+    # kdlScalar: read the token as a string and route through the user's
+    # `kdlDecodeValue(s, T): Result[T, string]` hook. The macro owns the
+    # ParseError construction — the hook's error string is lifted with the
+    # value's span so users never touch span/ParseErrorCode plumbing.
+    return quote do:
+      let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
+      case tok.kind
+      of tkString, tkRawString, tkIdent:
+        let s = tokenAsString(tok, `cSym`.stream[], `cSym`.source)
+        let hookRes = kdlDecodeValue(s, typeof(`targetIdent`))
+        if hookRes.isErr:
+          return err[void, ParseError](
+            initError(peTypeMismatch, tok.span, hookRes.getErr))
+        `targetIdent` = hookRes.get
+      else:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span,
+                    "expected string scalar for kdlScalar field"))
   if isOptionType(fieldType):
     let inner = innerOfOption(fieldType)
     let tmpSym = genSym(nskVar, "decoded")
@@ -347,9 +367,10 @@ macro deriveDecode*(T: typedesc): untyped =
 
   # Collect kdlArg + kdlProp + kdlChild fields by pragma role.
   type ChildKind = enum ckSingle, ckSeq, ckOption
-  type ArgField = tuple[name: string, typ: NimNode, reservedTag: string]
+  type ArgField = tuple[name: string, typ: NimNode, reservedTag: string,
+                        scalar: bool]
   type PropField = tuple[name: string, typ: NimNode, wireKey: string,
-                         reservedTag: string]
+                         reservedTag: string, scalar: bool]
   type ChildField = tuple[name: string, elemType: NimNode,
                           kind: ChildKind, wireName: string]
   var argFields: seq[ArgField]
@@ -373,16 +394,23 @@ macro deriveDecode*(T: typedesc): untyped =
       if reservedArg != nil and reservedArg.kind == nnkStrLit:
         reservedArg.strVal
       else: ""
+    # kdlScalar: the value is encoded/decoded via the user hook pair rather
+    # than the built-in primitive dispatch. It's a slot MODIFIER, not a slot
+    # selector — it still lands in an arg or prop. With no explicit kdlArg/
+    # kdlProp it defaults to a prop (key = field name).
+    let scalar = hasPragma(pragmas, "kdlScalar")
     if hasPragma(pragmas, "kdlArg"):
-      argSink.add((name: fieldName, typ: fieldType, reservedTag: reservedTag))
-    elif hasPragma(pragmas, "kdlProp"):
+      argSink.add((name: fieldName, typ: fieldType, reservedTag: reservedTag,
+                   scalar: scalar))
+    elif hasPragma(pragmas, "kdlProp") or (scalar and
+         not hasPragma(pragmas, "kdlChild")):
       let renameArg = pragmaArg(pragmas, "kdlRename")
       let wireKey =
         if renameArg != nil and renameArg.kind == nnkStrLit:
           renameArg.strVal
         else: fieldName
       propSink.add((name: fieldName, typ: fieldType, wireKey: wireKey,
-                    reservedTag: reservedTag))
+                    reservedTag: reservedTag, scalar: scalar))
     elif hasPragma(pragmas, "kdlChild"):
       var kind: ChildKind
       var elemType: NimNode
@@ -422,7 +450,7 @@ macro deriveDecode*(T: typedesc): untyped =
       else:
         # primitive / enum (incl. Option[primitive]) → prop; key = field name.
         propSink.add((name: fieldName, typ: fieldType, wireKey: fieldName,
-                      reservedTag: reservedTag))
+                      reservedTag: reservedTag, scalar: false))
 
   let recList = objectRecList(typeSym)
   for (fieldName, fieldType, pragmas) in regularFields(recList):
@@ -491,13 +519,13 @@ macro deriveDecode*(T: typedesc): untyped =
   # discriminator is set; the cursor either provided it or the decode
   # already errored at the type level.
   var argSlots: seq[int]
-  for (fName, fType, _) in argFields:
+  for (fName, fType, _, _) in argFields:
     if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
       argSlots.add(-1)
     else:
       argSlots.add(claimSlot())
   var propSlots: seq[int]
-  for (fName, fType, _, _) in propFields:
+  for (fName, fType, _, _, _) in propFields:
     if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
       propSlots.add(-1)
     else:
@@ -519,12 +547,12 @@ macro deriveDecode*(T: typedesc): untyped =
 
   # Build the per-arg dispatch.
   var argCase = newTree(nnkCaseStmt, argIdxSym)
-  for i, (fName, fType, reservedTag) in argFields:
+  for i, (fName, fType, reservedTag, argScalar) in argFields:
     let fIdent = ident(fName)
     let idxLit = newIntLitNode(i)
     let tokIndexExpr = quote do: `evSym2`.argTok
     let target = quote do: `vSym`.`fIdent`
-    var branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+    var branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym, argScalar)
     enrichLeafErrors(branchBody, newLit(fName))
     if hasVariant and fName == discName:
       let bodyCopy = branchBody
@@ -584,7 +612,8 @@ macro deriveDecode*(T: typedesc): untyped =
       let fIdent = ident(fName)
       let tokIndexExpr = quote do: `evSym2`.propValueTok
       let target = quote do: `vSym`.`fIdent`
-      let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+      let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym,
+                                       fields[i].scalar)
       enrichLeafErrors(decodeBody, newLit(fName))
       let mark = markSlot(slots[i])
       var reservedCheck = newStmtList()
