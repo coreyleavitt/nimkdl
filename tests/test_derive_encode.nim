@@ -464,3 +464,49 @@ suite "deriveEncode — type aliases resolve to base primitive (#39 item 5)":
     var e = newBufferEmitter()
     kdlEncode(h, e)
     check e.finish() == "ahost \"web\" port=8\n"
+
+suite "derive_encode — S0c: no-pragma field inference (mirrors decode classify)":
+
+  # A primitive field with NO routing pragma must infer to a prop (key =
+  # field name), symmetric with decode's classify inference. Before S0c,
+  # encode's dispatchField had no else-branch and silently DROPPED such a
+  # field from the output.
+
+  type Doc {.kdlNode: "doc".} = object
+    title {.kdlArg.}: string
+    count: int            # no pragma → inferred prop
+
+  deriveEncode(Doc)
+
+  test "no-pragma primitive field encodes as inferred prop":
+    var d = Doc(title: "hello", count: 5)
+    var e = newBufferEmitter()
+    kdlEncode(d, e)
+    check e.finish() == "doc \"hello\" count=5\n"
+
+  type Section {.kdlNode: "section".} = object
+    name {.kdlArg.}: string
+
+  deriveEncode(Section)
+
+  type Book {.kdlNode: "book".} = object
+    section: Section      # no pragma, object → inferred child
+
+  deriveEncode(Book)
+
+  test "no-pragma object field infers a child":
+    var b = Book(section: Section(name: "intro"))
+    var e = newBufferEmitter()
+    kdlEncode(b, e)
+    check e.finish() == "book {\n    section \"intro\"\n}\n"
+
+  type Library {.kdlNode: "library".} = object
+    sections: seq[Section]   # no pragma, seq[object] → inferred child-seq
+
+  deriveEncode(Library)
+
+  test "no-pragma seq-of-object field infers a child-seq":
+    var l = Library(sections: @[Section(name: "a"), Section(name: "b")])
+    var e = newBufferEmitter()
+    kdlEncode(l, e)
+    check e.finish() == "library {\n    section \"a\"\n    section \"b\"\n}\n"

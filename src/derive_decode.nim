@@ -45,66 +45,10 @@ import ./spans
 export node, value, cursor, token_text, lexer, numlit, spans
 
 # ---------------------------------------------------------------------------
-# Shared AST inspection helpers (mirror those in derive_encode)
-# ---------------------------------------------------------------------------
-
-proc nodeNameOf(typeSym: NimNode): string =
-  ## Read `kdlNode: "name"` pragma or fall back to lowercased type name.
-  let impl = typeSym.getImpl
-  expectKind(impl, nnkTypeDef)
-  let nameNode = impl[0]
-  if nameNode.kind == nnkPragmaExpr:
-    let pragmas = nameNode[1]
-    for p in pragmas:
-      let head = pragmaHead(p)
-      if $head == "kdlNode" and
-         p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2 and
-         p[1].kind == nnkStrLit:
-        return p[1].strVal
-  result = $typeSym
-  for i in 0 ..< result.len:
-    if result[i] in {'A'..'Z'}:
-      result[i] = char(uint8(result[i]) + 32)
-
-proc objectRecList(typeSym: NimNode): NimNode =
-  let impl = typeSym.getImpl
-  let objTy =
-    if impl[2].kind == nnkObjectTy: impl[2]
-    elif impl[2].kind == nnkRefTy and impl[2][0].kind == nnkObjectTy: impl[2][0]
-    else: nil
-  doAssert objTy != nil, "deriveDecode: expected an object or ref object type"
-  objTy[2]
-
-# ---------------------------------------------------------------------------
 # Macro
 # ---------------------------------------------------------------------------
-
-proc isOptionType(t: NimNode): bool {.inline.} =
-  ## `eqIdent` (not `$t[0] == "Option"`) so a qualified `std/options.Option` or
-  ## an aliased import still matches (rfc §8.7).
-  t.kind == nnkBracketExpr and t[0].eqIdent("Option")
-
-proc isObjectTypeResolved(t: NimNode): bool =
-  ## True iff `t` resolves (via `getTypeImpl`, following one `ref`) to an object
-  ## type. Empirically: primitives → nnkSym, `seq[X]` → nnkBracketExpr, user
-  ## object → nnkObjectTy, `ref object` → nnkRefTy→nnkObjectTy. CAVEAT: `Option[X]`
-  ## *also* resolves to nnkObjectTy, so the §8.2 inference peels Option first.
-  var impl: NimNode
-  try: impl = t.getTypeImpl
-  except: return false
-  if impl.kind == nnkRefTy: impl = impl[0].getTypeImpl
-  impl.kind == nnkObjectTy
-
-proc isEnumType(t: NimNode): bool =
-  if t.kind == nnkEnumTy: return true
-  try:
-    let impl = t.getTypeImpl
-    if impl.kind == nnkEnumTy: return true
-    if impl.kind == nnkBracketExpr and impl.len >= 2 and $impl[0] == "typeDesc":
-      let innerImpl = impl[1].getTypeImpl
-      if innerImpl.kind == nnkEnumTy: return true
-  except: discard
-  false
+# nodeNameOf / objectRecList / isOptionType / isObjectTypeResolved /
+# isEnumType now live in derive_common (S0c unification).
 
 proc enumImpl(t: NimNode): NimNode =
   ## Resolve to the nnkEnumTy AST regardless of wrapper.

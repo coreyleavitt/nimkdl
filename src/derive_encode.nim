@@ -39,68 +39,8 @@ import ./emitter
 # never references the pragma templates themselves. User code imports
 # pragmas to ATTACH them; derive_encode just inspects.
 
-proc nodeNameOf(typeSym: NimNode): string =
-  ## Read the `kdlNode` pragma value off the type's pragma list, or
-  ## fall back to the type name lowercased. Type-level pragmas live
-  ## on the TypeDef's pragma node (TypeDef.0 if pragmas attached).
-  ##
-  ## The pragma `{.kdlNode: "name".}` parses as `ExprColonExpr(kdlNode,
-  ## "name")` inside the pragma list — NOT as a Call. (`{.kdlNode("name").}`
-  ## with parens would be a Call, but the colon form is idiomatic.)
-  let impl = typeSym.getImpl
-  expectKind(impl, nnkTypeDef)
-  let nameNode = impl[0]
-  if nameNode.kind == nnkPragmaExpr:
-    let pragmas = nameNode[1]
-    for p in pragmas:
-      let head = if p.kind in {nnkCall, nnkExprColonExpr}: p[0] else: p
-      let arg  = if p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2:
-                   p[1] else: nil
-      if $head == "kdlNode" and arg != nil and arg.kind == nnkStrLit:
-        return arg.strVal
-  # Fallback: type-name lowercased.
-  result = $typeSym
-  for i in 0 ..< result.len:
-    if result[i] in {'A' .. 'Z'}:
-      result[i] = char(uint8(result[i]) + 32)
-
-proc objectRecList(typeSym: NimNode): NimNode =
-  let impl = typeSym.getImpl
-  let objTy =
-    if impl[2].kind == nnkObjectTy: impl[2]
-    elif impl[2].kind == nnkRefTy and impl[2][0].kind == nnkObjectTy: impl[2][0]
-    else: nil
-  doAssert objTy != nil, "deriveEncode: expected an object or ref object type"
-  objTy[2]
-
-proc isOptionType(t: NimNode): bool {.inline.} =
-  ## Detect `Option[T]` by AST shape: BracketExpr with head `Option`.
-  t.kind == nnkBracketExpr and $t[0] == "Option"
-
-proc isEnumType(t: NimNode): bool =
-  ## True iff `t`'s underlying type is an enum.
-  ##
-  ## Inputs may arrive as:
-  ##   - The enum AST itself (nnkEnumTy) — direct hit
-  ##   - A type symbol that resolves to nnkEnumTy via getTypeImpl
-  ##   - A `typeDesc[T]` wrapper (this happens when `t` is the inner
-  ##     of a BracketExpr like `Option[E]` — getTypeImpl returns
-  ##     `typeDesc[E]` rather than E's impl). Unwrap and re-resolve.
-  if t.kind == nnkEnumTy: return true
-  var impl: NimNode
-  try:
-    impl = t.getTypeImpl
-  except:
-    return false
-  if impl.kind == nnkEnumTy: return true
-  if impl.kind == nnkBracketExpr and impl.len >= 2 and
-     $impl[0] == "typeDesc":
-    try:
-      let innerImpl = impl[1].getTypeImpl
-      if innerImpl.kind == nnkEnumTy: return true
-    except:
-      discard
-  false
+# nodeNameOf / objectRecList / isOptionType / isEnumType /
+# isObjectTypeResolved now live in derive_common (S0c unification).
 
 proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
                        fieldType: NimNode, annoLit: NimNode,
@@ -258,13 +198,35 @@ macro deriveEncode*(T: typedesc): untyped =
       emitPropPush(targetBody, vSym, eSym, fieldName, wireKey, fieldType,
                    annoLit, scalar)
     elif hasPragma(pragmas, "kdlChild"):
-      if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
+      if fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq"):
         childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq))
       elif isOptionType(fieldType):
         childFields.add((name: fieldName, typ: innerOfOption(fieldType),
                          kind: ckOption))
       else:
         childFields.add((name: fieldName, typ: fieldType, kind: ckSingle))
+    else:
+      # No routing pragma — infer the slot from the field type (rfc §8.2 /
+      # S0c), MIRRORING decode's classify exactly. Previously this fell
+      # through with no else-branch, silently dropping the field from encode.
+      var ft = fieldType
+      if isOptionType(ft): ft = innerOfOption(ft)   # Option[X] inherits X's routing
+      if ft.kind == nnkBracketExpr and ft[0].eqIdent("seq"):
+        if isObjectTypeResolved(ft[1]):
+          childFields.add((name: fieldName, typ: ft[1], kind: ckSeq))
+        else:
+          error("deriveEncode: cannot infer a KDL slot for seq field '" &
+                fieldName & "' of primitive elements — annotate it with " &
+                "{.kdlArg.} (variadic args) or {.kdlChild.}")
+      elif isObjectTypeResolved(ft):
+        # Option[object] infers to an optional child (absent → nothing);
+        # plain object infers to a single child.
+        let kind = if isOptionType(fieldType): ckOption else: ckSingle
+        childFields.add((name: fieldName, typ: ft, kind: kind))
+      else:
+        # primitive / enum (incl. Option[primitive]) → prop; key = field name.
+        emitPropPush(targetBody, vSym, eSym, fieldName, wireKey, fieldType,
+                     annoLit, scalar)
   let topRecList = objectRecList(typeSym)
   # Plain non-variant fields first (in declaration order).
   for (fieldName, fieldType, pragmas, _) in regularFields(topRecList):
