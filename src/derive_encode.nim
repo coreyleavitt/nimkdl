@@ -175,6 +175,16 @@ macro deriveEncode*(T: typedesc): untyped =
   # present.
   type ChildKind = enum ckSingle, ckSeq, ckOption
   var childFields: seq[tuple[name: string, typ: NimNode, kind: ChildKind]]
+  # The single {.kdlVariadic.} field (rfc S1). Required invariant: the fixed
+  # {.kdlArg.} fields emit FIRST (in declaration order), then the variadic
+  # elements. We enforce the variadic field is declared after every fixed
+  # kdlArg field, else declaration-order emission would interleave args and
+  # corrupt the decode round-trip.
+  var hasVariadic = false
+  var variadicName: string
+  var variadicElemType: NimNode = nil
+  var sawArgAfterVariadic = false
+  var variadicSeen = false
   proc dispatchField(fieldName: string, fieldType: NimNode,
                      pragmas: seq[NimNode], targetBody: var NimNode) =
     # Annotation: emit `(tag)` before the value when `{.kdlReserved: ...}`.
@@ -193,7 +203,34 @@ macro deriveEncode*(T: typedesc): untyped =
       else:
         fieldName
     let scalar = hasPragma(pragmas, "kdlScalar")
+    let isSeqField =
+      fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")
+    if hasPragma(pragmas, "kdlVariadic"):
+      # Mirror decode's guards (rfc §3.5.5.1) so a misuse fails the same way
+      # in either direction.
+      if not isSeqField:
+        error("{.kdlVariadic.} requires a seq[T] field; '" & fieldName &
+              "' has type '" & $fieldType & "'.")
+      if hasVariadic:
+        error("{.kdlVariadic.} on '" & fieldName &
+              "': only one variadic field is allowed per type; '" &
+              variadicName & "' already claims the positional tail. " &
+              "Merge them into one seq[T].")
+      let elemT = fieldType[1]
+      if isObjectTypeResolved(elemT) and not scalar:
+        error("{.kdlVariadic.} on '" & fieldName & "': element type '" &
+              $elemT & "' is child-shaped, but positional args are scalar. " &
+              "Use {.kdlChild.} for a seq of nested objects.")
+      hasVariadic = true
+      variadicSeen = true
+      variadicName = fieldName
+      variadicElemType = elemT
+      return
+    if hasPragma(pragmas, "kdlArg") and isSeqField:
+      error("{.kdlArg.} on a seq field '" & fieldName &
+            "' consumes only one argument. Did you mean {.kdlVariadic.}?")
     if hasPragma(pragmas, "kdlArg"):
+      if variadicSeen: sawArgAfterVariadic = true
       emitArgPush(targetBody, vSym, eSym, fieldName, fieldType, annoLit, scalar)
     elif hasPragma(pragmas, "kdlProp") or
          (scalar and not hasPragma(pragmas, "kdlChild")):
@@ -235,6 +272,25 @@ macro deriveEncode*(T: typedesc): untyped =
   # Plain non-variant fields first (in declaration order).
   for (fieldName, fieldType, pragmas, _) in regularFields(topRecList):
     dispatchField(fieldName, fieldType, pragmas, body)
+  # Required invariant (rfc S1): a {.kdlArg.} declared after the {.kdlVariadic.}
+  # would emit between the variadic elements on the wire — corrupting the
+  # round-trip (decode binds the fixed args by position first). Reject it.
+  if sawArgAfterVariadic:
+    error("{.kdlArg.} field declared after the {.kdlVariadic.} field '" &
+          variadicName & "' would shift positional indices and corrupt " &
+          "round-trips. Declare every fixed {.kdlArg.} field before the " &
+          "variadic field.")
+  # Emit the variadic tail: fixed args are already in `body` (declaration
+  # order); now append each variadic element as a positional push.
+  if hasVariadic:
+    let varIdent = ident(variadicName)
+    let elemSym = genSym(nskForVar, "varg")
+    var elemPush = newStmtList()
+    emitArgPushDirect(elemPush, eSym, elemSym, variadicElemType,
+                      newStrLitNode(""))
+    body.add quote do:
+      for `elemSym` in `vSym`.`varIdent`:
+        `elemPush`
   # Variant discriminator + per-branch dispatch.
   let recCase = findRecCase(topRecList)
   if recCase != nil:

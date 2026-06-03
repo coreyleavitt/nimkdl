@@ -7,6 +7,7 @@
 import std/[options, unittest]
 
 import ../src/derive_encode
+import ../src/derive_decode  # S1 round-trip: encode → decode (re-exports cursor/lexer/spans)
 import ../src/emitter
 import ../src/pragmas
 
@@ -550,3 +551,81 @@ suite "derive_encode — kdlScalar custom hook (rfc §8 KdlValue interchange)":
     var e = newBufferEmitter()
     kdlEncode(t, e)
     check e.finish() == "timeout after=500\n"
+
+suite "derive_encode — S1: kdlVariadic (variadic positional args)":
+
+  type Cmd {.kdlNode: "cmd".} = object
+    name {.kdlArg.}: string
+    rest {.kdlVariadic.}: seq[string]
+
+  deriveEncode(Cmd)
+  deriveDecode(Cmd)
+
+  test "fixed arg emits first, then each variadic element in order":
+    var c = Cmd(name: "run", rest: @["a", "b", "c"])
+    var e = newBufferEmitter()
+    kdlEncode(c, e)
+    check e.finish() == "cmd \"run\" \"a\" \"b\" \"c\"\n"
+
+  test "empty variadic seq emits only the fixed arg":
+    var c = Cmd(name: "run", rest: @[])
+    var e = newBufferEmitter()
+    kdlEncode(c, e)
+    check e.finish() == "cmd \"run\"\n"
+
+  test "round-trips encode → decode":
+    var c = Cmd(name: "run", rest: @["a", "b", "c"])
+    var e = newBufferEmitter()
+    kdlEncode(c, e)
+    let wire = e.finish()
+    check wire == "cmd \"run\" \"a\" \"b\" \"c\"\n"
+    var sref: ref TokenStream
+    new(sref)
+    sref[] = lex(wire)
+    var cur = initStringCursor(addr sref[], wire)
+    var back: Cmd
+    let r = kdlDecode(back, cur)
+    check r.isOk
+    check back.name == "run"
+    check back.rest == @["a", "b", "c"]
+
+  type Nums {.kdlNode: "nums".} = object
+    vals {.kdlVariadic.}: seq[int]
+
+  deriveEncode(Nums)
+
+  test "variadic of int elements emits bare numbers":
+    var n = Nums(vals: @[1, 2, 3])
+    var e = newBufferEmitter()
+    kdlEncode(n, e)
+    check e.finish() == "nums 1 2 3\n"
+
+suite "derive_encode — S1: kdlVariadic macro-error guards":
+
+  test "well-formed variadic encode compiles (sanity)":
+    check compiles((
+      block:
+        type Ok {.kdlNode: "ok".} = object
+          head {.kdlArg.}: string
+          tail {.kdlVariadic.}: seq[string]
+        deriveEncode(Ok)
+    ))
+
+  test "a fixed {.kdlArg.} declared after {.kdlVariadic.} is rejected":
+    # Required fixed-then-variadic invariant (rfc S1): an arg after the
+    # variadic would interleave on the wire and break round-trips.
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          tail {.kdlVariadic.}: seq[string]
+          trailing {.kdlArg.}: string
+        deriveEncode(Bad)
+    ))
+
+  test "{.kdlArg.} on a seq field is rejected on encode too":
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          tags {.kdlArg.}: seq[string]
+        deriveEncode(Bad)
+    ))

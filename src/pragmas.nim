@@ -10,6 +10,20 @@ template kdlNode*(name: string) {.pragma.}
 template kdlArg*() {.pragma.}
   ## Field-level: serialize/parse as a positional argument.
 
+template kdlVariadic*() {.pragma.}
+  ## Field-level: collect ALL positional arguments beyond the fixed
+  ## `{.kdlArg.}` fields into a `seq[T]`. The field type MUST be a
+  ## `seq[T]` whose element type `T` is a scalar (string/int/float/bool/
+  ## enum/`{.kdlScalar.}` — args are scalar, never child-shaped). At most
+  ## ONE variadic field per type. Combine freely with fixed `{.kdlArg.}`
+  ## fields: the fixed args bind by position first, then every remaining
+  ## arg is decoded as `T` and appended to the seq. A variadic field is
+  ## never required (an empty arg list yields an empty seq). On encode the
+  ## fixed `{.kdlArg.}` fields are written first (in declaration order),
+  ## then each variadic element — so the variadic field must be declared
+  ## after every fixed `{.kdlArg.}` field for round-trips to align.
+  ## Use `{.kdlVariadic.}`, not `{.kdlArg.}`, for a `seq[T]` of arguments.
+
 template kdlProp*() {.pragma.}
   ## Field-level: serialize/parse as a property (key=value).
 

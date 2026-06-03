@@ -784,3 +784,80 @@ suite "derive_decode — kdlScalar typed numeric input (rfc §8)":
     var t: Timeout
     let r = kdlDecode(t, f.cursor)
     check r.isErr
+
+suite "derive_decode — S1: kdlVariadic (variadic positional args)":
+
+  type Cmd {.kdlNode: "cmd".} = object
+    name {.kdlArg.}: string
+    rest {.kdlVariadic.}: seq[string]
+
+  deriveDecode(Cmd)
+
+  test "fixed arg binds first, remaining args collect into the seq":
+    let f = mkCursor("cmd \"run\" \"a\" \"b\" \"c\"")
+    var v: Cmd
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.name == "run"
+    check v.rest == @["a", "b", "c"]
+
+  test "no extra args yields an empty variadic seq":
+    let f = mkCursor("cmd \"run\"")
+    var v: Cmd
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.name == "run"
+    check v.rest.len == 0
+
+  type Nums {.kdlNode: "nums".} = object
+    vals {.kdlVariadic.}: seq[int]
+
+  deriveDecode(Nums)
+
+  test "variadic of typed (int) elements decodes all args":
+    let f = mkCursor("nums 1 2 3 4")
+    var v: Nums
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.vals == @[1, 2, 3, 4]
+
+suite "derive_decode — S1: kdlVariadic macro-error guards":
+
+  test "a valid single-variadic type compiles (sanity)":
+    # Positive control: the guard rejections below mean nothing unless the
+    # well-formed shape actually compiles.
+    check compiles((
+      block:
+        type Ok {.kdlNode: "ok".} = object
+          head {.kdlArg.}: string
+          tail {.kdlVariadic.}: seq[string]
+        deriveDecode(Ok)
+    ))
+
+  test "{.kdlArg.} on a seq field is rejected (did-you-mean kdlVariadic)":
+    # §3.5.5.1: kdlArg consumes one arg; a seq[T] arg field is the variadic
+    # mistake. PINNED guard.
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          tags {.kdlArg.}: seq[string]
+        deriveDecode(Bad)
+    ))
+
+  test "two {.kdlVariadic.} fields on one type are rejected":
+    # PINNED guard: only one positional tail per type.
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          a {.kdlVariadic.}: seq[string]
+          b {.kdlVariadic.}: seq[int]
+        deriveDecode(Bad)
+    ))
+
+  test "{.kdlVariadic.} on a non-seq field is rejected":
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          port {.kdlVariadic.}: int
+        deriveDecode(Bad)
+    ))

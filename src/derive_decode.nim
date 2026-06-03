@@ -269,6 +269,14 @@ macro deriveDecode*(T: typedesc): untyped =
   var argFields: seq[ArgField]
   var propFields: seq[PropField]              # plain (non-variant) props
   var childFields: seq[ChildField]            # plain children
+  # The single `{.kdlVariadic.}` field (rfc S1), if any. It collects every
+  # positional arg beyond the fixed kdlArg fields into a `seq[elemType]`.
+  # Routed here (NOT into argFields) and excluded from the required bitmap —
+  # an empty arg tail yields an empty seq, never a missing-required error.
+  var hasVariadic = false
+  var variadicName: string
+  var variadicElemType: NimNode = nil
+  var variadicPath: NimNode = nil
   # Variant info: when the object is a case object, we track the
   # discriminator (so we know how to dispatch later) and per-branch
   # prop fields (so each branch's ceProp matches its own field set).
@@ -303,6 +311,36 @@ macro deriveDecode*(T: typedesc): untyped =
     # selector — it still lands in an arg or prop. With no explicit kdlArg/
     # kdlProp it defaults to a prop (key = field name).
     let scalar = hasPragma(pragmas, "kdlScalar")
+    let isSeqField =
+      fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")
+    # {.kdlVariadic.}: collects all remaining positional args into seq[T].
+    # Macro-time guards (rfc §3.5.5.1 message format): exactly one per type;
+    # the field MUST be a seq; the element type T must be scalar (args are
+    # never child-shaped objects).
+    if hasPragma(pragmas, "kdlVariadic"):
+      if not isSeqField:
+        error("{.kdlVariadic.} requires a seq[T] field; '" & fieldName &
+              "' has type '" & $fieldType & "'.")
+      if hasVariadic:
+        error("{.kdlVariadic.} on '" & fieldName &
+              "': only one variadic field is allowed per type; '" &
+              variadicName & "' already claims the positional tail. " &
+              "Merge them into one seq[T].")
+      let elemT = fieldType[1]
+      if isObjectTypeResolved(elemT) and not scalar:
+        error("{.kdlVariadic.} on '" & fieldName & "': element type '" &
+              $elemT & "' is child-shaped, but positional args are scalar. " &
+              "Use {.kdlChild.} for a seq of nested objects.")
+      hasVariadic = true
+      variadicName = fieldName
+      variadicElemType = elemT
+      variadicPath = pathExpr
+      return
+    # {.kdlArg.} on a seq field is the classic mistake — kdlArg consumes a
+    # single positional. Point the user at kdlVariadic (rfc §3.5.5.1).
+    if hasPragma(pragmas, "kdlArg") and isSeqField:
+      error("{.kdlArg.} on a seq field '" & fieldName &
+            "' consumes only one argument. Did you mean {.kdlVariadic.}?")
     if hasPragma(pragmas, "kdlArg"):
       argSink.add((name: fieldName, typ: fieldType, reservedTag: reservedTag,
                    scalar: scalar, pathExpr: pathExpr,
@@ -493,11 +531,26 @@ macro deriveDecode*(T: typedesc): untyped =
       `branchBody`
       `mark`
     argCase.add(newTree(nnkOfBranch, idxLit, branchBody))
-  argCase.add(newTree(nnkElse,
-    quote do:
-      return err[void, ParseError](
-        initError(peParseUnexpected, `evSym2`.span,
-                  "unexpected extra positional argument"))))
+  if hasVariadic:
+    # Every positional arg beyond the fixed kdlArg fields decodes as the
+    # variadic element type and appends to the seq (rfc S1). No required-slot
+    # mark — a variadic field is never required.
+    let elemSym = genSym(nskVar, "variadicElem")
+    let tokIndexExpr = quote do: `evSym2`.argTok
+    var elemDecode = emitTypedDecode(elemSym, tokIndexExpr, variadicElemType, cSym)
+    enrichLeafErrors(elemDecode, newLit(variadicName))
+    let vPath = variadicPath
+    argCase.add(newTree(nnkElse,
+      quote do:
+        var `elemSym`: `variadicElemType`
+        `elemDecode`
+        `vPath`.add(`elemSym`)))
+  else:
+    argCase.add(newTree(nnkElse,
+      quote do:
+        return err[void, ParseError](
+          initError(peParseUnexpected, `evSym2`.span,
+                    "unexpected extra positional argument"))))
 
   # FNV-1a 32-bit, evaluated at macro time so each prop key's hash
   # becomes a const branch label. Must match cursor.tokenBytesHash
