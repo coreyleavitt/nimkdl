@@ -29,6 +29,7 @@ import std/[macros, sets]
 import std/options  # the emitted decoder constructs `some(value)` for Option[T] fields
 export options       # so user code doesn't need to import options separately
 
+import ./derive_common  # shared macro helpers (rfc-derive-vocabulary.md S0a)
 import ./node
 import ./value
 import ./cursor
@@ -46,22 +47,6 @@ export node, value, cursor, token_text, lexer, numlit, spans
 # ---------------------------------------------------------------------------
 # Shared AST inspection helpers (mirror those in derive_encode)
 # ---------------------------------------------------------------------------
-
-proc pragmaHead(p: NimNode): NimNode {.inline.} =
-  if p.kind in {nnkCall, nnkExprColonExpr}: p[0]
-  else: p
-
-proc hasPragma(pragmas: seq[NimNode], name: string): bool =
-  for p in pragmas:
-    if $pragmaHead(p) == name: return true
-  false
-
-proc pragmaArg(pragmas: seq[NimNode], name: string): NimNode =
-  for p in pragmas:
-    if $pragmaHead(p) == name and
-       p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2:
-      return p[1]
-  nil
 
 proc nodeNameOf(typeSym: NimNode): string =
   ## Read `kdlNode: "name"` pragma or fall back to lowercased type name.
@@ -81,25 +66,6 @@ proc nodeNameOf(typeSym: NimNode): string =
     if result[i] in {'A'..'Z'}:
       result[i] = char(uint8(result[i]) + 32)
 
-proc fieldInfo(identDefs: NimNode, fieldIdx: int):
-    tuple[name: string, pragmas: seq[NimNode]] =
-  let fieldNameNode = identDefs[fieldIdx]
-  if fieldNameNode.kind == nnkPragmaExpr:
-    result.name = $fieldNameNode[0]
-    for p in fieldNameNode[1]:
-      result.pragmas.add(p)
-  else:
-    result.name = $fieldNameNode
-
-iterator regularFields(recList: NimNode):
-    tuple[name: string, typ: NimNode, pragmas: seq[NimNode]] =
-  for child in recList:
-    if child.kind != nnkIdentDefs: continue
-    let fieldType = child[^2]
-    for i in 0 ..< child.len - 2:
-      let info = fieldInfo(child, i)
-      yield (name: info.name, typ: fieldType, pragmas: info.pragmas)
-
 proc objectRecList(typeSym: NimNode): NimNode =
   let impl = typeSym.getImpl
   let objTy =
@@ -109,11 +75,6 @@ proc objectRecList(typeSym: NimNode): NimNode =
   doAssert objTy != nil, "deriveDecode: expected an object or ref object type"
   objTy[2]
 
-proc findRecCase(recList: NimNode): NimNode =
-  for child in recList:
-    if child.kind == nnkRecCase: return child
-  nil
-
 # ---------------------------------------------------------------------------
 # Macro
 # ---------------------------------------------------------------------------
@@ -122,9 +83,6 @@ proc isOptionType(t: NimNode): bool {.inline.} =
   ## `eqIdent` (not `$t[0] == "Option"`) so a qualified `std/options.Option` or
   ## an aliased import still matches (rfc §8.7).
   t.kind == nnkBracketExpr and t[0].eqIdent("Option")
-
-proc innerOfOption(t: NimNode): NimNode {.inline.} =
-  t[1]
 
 proc isObjectTypeResolved(t: NimNode): bool =
   ## True iff `t` resolves (via `getTypeImpl`, following one `ref`) to an object
@@ -190,21 +148,6 @@ proc enrichLeafErrors(n: NimNode, fnLit: NimNode) =
       return   # the wrapped argument holds no further err() sites
   for i in 0 ..< n.len:
     enrichLeafErrors(n[i], fnLit)
-
-proc baseTypeName(t: NimNode): string =
-  ## Resolve a transparent type alias (`type Port = int`) to its
-  ## underlying primitive name, so the value-decode dispatch matches on
-  ## `int` rather than `Port` (#39 item 5). `getTypeImpl` of an alias sym
-  ## yields the underlying sym; distinct types yield `nnkDistinctTy` and
-  ## are left as-is (handled — or rejected — by the caller). The bounded
-  ## loop guards against pathological alias chains.
-  var cur = t
-  for _ in 0 ..< 16:
-    if cur.kind != nnkSym: break
-    let impl = cur.getTypeImpl
-    if impl.kind == nnkSym and not impl.eqIdent($cur): cur = impl
-    else: break
-  $cur
 
 proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
                      fieldType: NimNode, cSym: NimNode,

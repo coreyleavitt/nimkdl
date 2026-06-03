@@ -31,6 +31,7 @@
 
 import std/macros
 
+import ./derive_common  # shared macro helpers (rfc-derive-vocabulary.md S0a)
 import ./emitter
 # Pragma identifiers (kdlNode / kdlArg / kdlProp / kdlChild / kdlSkip /
 # kdlRename / kdlReserved) live in src/pragmas.nim. We don't import it
@@ -63,36 +64,6 @@ proc nodeNameOf(typeSym: NimNode): string =
     if result[i] in {'A' .. 'Z'}:
       result[i] = char(uint8(result[i]) + 32)
 
-proc fieldInfo(identDefs: NimNode, fieldIdx: int):
-    tuple[name: string, pragmas: seq[NimNode]] =
-  ## Read (name, pragmas) for the `fieldIdx`-th field of an IdentDefs.
-  let fieldNameNode = identDefs[fieldIdx]
-  if fieldNameNode.kind == nnkPragmaExpr:
-    result.name = $fieldNameNode[0]
-    for p in fieldNameNode[1]:
-      result.pragmas.add(p)
-  else:
-    result.name = $fieldNameNode
-
-iterator regularFields(recList: NimNode):
-    tuple[name: string, typ: NimNode, pragmas: seq[NimNode]] =
-  ## Walk a RecList yielding plain (non-variant) fields. Variant
-  ## structure (RecCase) is handled separately by `findVariant`.
-  for child in recList:
-    if child.kind != nnkIdentDefs: continue
-    let fieldType = child[^2]
-    for i in 0 ..< child.len - 2:
-      let info = fieldInfo(child, i)
-      yield (name: info.name, typ: fieldType, pragmas: info.pragmas)
-
-proc findRecCase(recList: NimNode): NimNode =
-  ## Return the variant's RecCase node, or nil if the object is not a
-  ## variant. KDL deriveEncode supports at most one variant per type
-  ## (the spec doesn't model nested variants cleanly anyway).
-  for child in recList:
-    if child.kind == nnkRecCase: return child
-  nil
-
 proc objectRecList(typeSym: NimNode): NimNode =
   let impl = typeSym.getImpl
   let objTy =
@@ -102,35 +73,9 @@ proc objectRecList(typeSym: NimNode): NimNode =
   doAssert objTy != nil, "deriveEncode: expected an object or ref object type"
   objTy[2]
 
-proc pragmaHead(p: NimNode): NimNode {.inline.} =
-  ## Extract a pragma's name node — `{.foo.}` is a plain ident,
-  ## `{.foo("x").}` is a Call with the ident at [0], `{.foo: "x".}` is
-  ## an ExprColonExpr with the ident at [0]. Unify them.
-  if p.kind in {nnkCall, nnkExprColonExpr}: p[0]
-  else: p
-
-proc hasPragma(pragmas: seq[NimNode], name: string): bool =
-  for p in pragmas:
-    if $pragmaHead(p) == name: return true
-  false
-
-proc pragmaArg(pragmas: seq[NimNode], name: string): NimNode =
-  ## Return the first argument of pragma `name`, or nil if not present
-  ## (or pragma has no argument). Used to read `kdlReserved: "ipv4"` /
-  ## `kdlRename: "template"` payloads.
-  for p in pragmas:
-    if $pragmaHead(p) == name and
-       p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2:
-      return p[1]
-  nil
-
 proc isOptionType(t: NimNode): bool {.inline.} =
   ## Detect `Option[T]` by AST shape: BracketExpr with head `Option`.
   t.kind == nnkBracketExpr and $t[0] == "Option"
-
-proc innerOfOption(t: NimNode): NimNode {.inline.} =
-  ## Extract the inner T of `Option[T]`.
-  t[1]
 
 proc isEnumType(t: NimNode): bool =
   ## True iff `t`'s underlying type is an enum.
@@ -156,19 +101,6 @@ proc isEnumType(t: NimNode): bool =
     except:
       discard
   false
-
-proc baseTypeName(t: NimNode): string =
-  ## Resolve a transparent type alias (`type Port = int`) to its
-  ## underlying primitive name so the push dispatch matches on `int`, not
-  ## `Port` (#39 item 5). Mirrors `derive_decode.baseTypeName`. distinct
-  ## types yield `nnkDistinctTy` and fall through to the enum/error path.
-  var cur = t
-  for _ in 0 ..< 16:
-    if cur.kind != nnkSym: break
-    let impl = cur.getTypeImpl
-    if impl.kind == nnkSym and not impl.eqIdent($cur): cur = impl
-    else: break
-  $cur
 
 proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
                        fieldType: NimNode, annoLit: NimNode,
