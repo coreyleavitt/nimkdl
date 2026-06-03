@@ -15,10 +15,12 @@ inference, `uint`, `eqIdent`, >64-field guard, field-path errors; stable
 in #39, landed on `core-rebuild`):** `ckRef` (ref object as user-facing decode/encode
 type — `cbded0b`, closes #9); leaf-field-path enrichment (`outer.inner.port` —
 `22afb3c`); type-alias→base-primitive dispatch (`baseTypeName`, decode+encode — closes
-#39 item 5).
-**Remaining (finicky §8.7 polish, #39):** `ckOption` (Option[object] child —
-`nodeNameOf` needs inner→sym resolution, item 1), `kdlScalar` + mixin `kdlDecodeValue`
-(item 3), partial-splice preserve under mutation (item 6).
+#39 item 5); `ckOption` (Option[object] as `kdlChild`, peel-before-`nodeNameOf` +
+new `ckOption` ChildKind — `e12f161`, closes #39 item 1).
+**Remaining (#39 — both need design, not mechanical fixes):** `kdlScalar` + mixin
+`kdlDecodeValue`/`kdlEncodeValue` (item 3 — new public hook protocol, durable spec
+surface); partial-splice preserve under mutation (item 6 — extension of the typed
+byte-preserve subsystem #31, RFC-scale).
 **Date:** 2026-06-03 (R3 review folded)
 **Supersedes:** the *substrate* sections of `rfc-api-v0.2-hardening.md` (F.0–F.6,
 §2.5 C0-x, the `ownerDocument`/`adopt`/ref-vs-arena material). That RFC's **API
