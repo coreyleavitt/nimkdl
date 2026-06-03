@@ -624,12 +624,13 @@ macro deriveDecode*(T: typedesc): untyped =
       let cond = quote do:
         bytesEqLit(`cSym`, `childPeekSym`.nodeNameTok, `keyLit`)
       let mark = markSlot(childSlots[i])
+      let fNameLit = newStrLitNode(fName)   # field-path enrichment (rfc §10)
       let body =
         case kind
         of ckSingle:
           quote do:
             let r = kdlDecode(`vSym`.`fIdent`, `cSym`)
-            if r.isErr: return r
+            if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
             `mark`
         of ckSeq:
           let elemSym = genSym(nskVar, "childElem")
@@ -637,7 +638,7 @@ macro deriveDecode*(T: typedesc): untyped =
           quote do:
             var `elemSym`: `elemType`
             let r = kdlDecode(`elemSym`, `cSym`)
-            if r.isErr: return r
+            if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
             `vSym`.`fIdent`.add(`elemSym`)
       if rootIf.isNil:
         rootIf = newNimNode(nnkIfStmt)

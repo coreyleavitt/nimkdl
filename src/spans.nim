@@ -90,6 +90,10 @@ type
     code*: ParseErrorCode
     span*: Span
     hint*: string
+    fieldPath*: seq[string]
+      ## Typed-decode field path, outermost-first (e.g. `@["server", "listen"]`
+      ## renders as `server.listen`). Empty for non-decode / top-level errors;
+      ## enriched at each nested child-decode boundary (rfc §10).
 
   ResultKind* = enum
     rkOk, rkErr
@@ -226,6 +230,12 @@ func initError*(code: ParseErrorCode, span: Span, hint = ""): ParseError {.inlin
 func initError*(code: ParseErrorCode, pos: Position, hint = ""): ParseError {.inline.} =
   ParseError(code: code, span: pointSpan(pos), hint: hint)
 
+func withField*(e: ParseError, name: string): ParseError =
+  ## Prepend `name` to the error's field path. Called at each nested child-decode
+  ## boundary as the error unwinds, so the path reads outermost-first (rfc §10).
+  result = e
+  result.fieldPath.insert(name, 0)
+
 func codeMessage*(code: ParseErrorCode): string =
   case code
   of peLexUnexpectedChar:    "unexpected character"
@@ -285,6 +295,8 @@ func formatError*(err: ParseError, source: string, filename = ""): string =
 
   var buf = "error: " & codeMsg & "\n"
   buf.add("  --> " & location & "\n")
+  if err.fieldPath.len > 0:
+    buf.add("  in field: " & err.fieldPath.join(".") & "\n")
   buf.add(pad & " |\n")
   buf.add(gutter & " | " & lineText & "\n")
   buf.add(pad & " | " & " ".repeat(caretStart) & "^".repeat(caretWidth))
