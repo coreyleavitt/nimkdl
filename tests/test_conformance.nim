@@ -20,9 +20,8 @@
 
 import std/[algorithm, os, sets, strutils, unittest]
 
-import ../src/ast
-import ../src/doc_emit
-import ../src/emitter
+import ../src/node
+import ../src/node_emit
 import ../src/grammar
 import ../src/parser
 import ../src/spans
@@ -42,14 +41,10 @@ proc loadSkips(): HashSet[string] =
       result.incl(name)
 
 proc emitCanonical(doc: KdlDoc): string =
-  var e = newBufferEmitter()
-  emitDoc(doc, e)
-  e.finish()
+  encode(doc)
 
 proc emitPreserve(doc: KdlDoc): string =
-  var e = newBufferEmitter()
-  emitDocPreserve(doc, e)
-  e.finish()
+  encode(doc, preserve = true)
 
 type
   CaseOutcome = enum

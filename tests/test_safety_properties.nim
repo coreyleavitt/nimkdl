@@ -18,7 +18,6 @@ import proptest
 import ../src/api
 import ../src/cursor
 import ../src/emitter
-import ../src/intern
 import ../src/kdl_block
 import ../src/lexer
 import ../src/pragmas

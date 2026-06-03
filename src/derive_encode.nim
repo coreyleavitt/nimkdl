@@ -171,6 +171,9 @@ proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
   of "int", "int8", "int16", "int32", "int64":
     pushBody.add quote do:
       `eSym`.pushArgInt(int64(`valueExpr`), `annoLit`)
+  of "uint", "uint8", "uint16", "uint32", "uint64":
+    pushBody.add quote do:
+      `eSym`.pushArgInt(int64(`valueExpr`), `annoLit`)
   of "float", "float32", "float64":
     pushBody.add quote do:
       `eSym`.pushArgFloat(float64(`valueExpr`), `annoLit`)
@@ -210,6 +213,9 @@ proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
     pushBody.add quote do:
       `eSym`.pushPropString(`keyLit`, `valueExpr`, `annoLit`)
   of "int", "int8", "int16", "int32", "int64":
+    pushBody.add quote do:
+      `eSym`.pushPropInt(`keyLit`, int64(`valueExpr`), `annoLit`)
+  of "uint", "uint8", "uint16", "uint32", "uint64":
     pushBody.add quote do:
       `eSym`.pushPropInt(`keyLit`, int64(`valueExpr`), `annoLit`)
   of "float", "float32", "float64":

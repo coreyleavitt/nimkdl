@@ -57,30 +57,33 @@ type
                            ## Always `[0, ...]` (line 1 starts at 0).
 
   ParseErrorCode* = enum
-    ## Stable categorization of parse failures.
-    peLexUnexpectedChar
-    peLexUnterminatedString
-    peLexInvalidEscape
-    peLexInvalidNumber
-    peLexInvalidIdentifier
-    peLexReservedKeyword
-    peReservedTypeInvalid
-    peTypeReservedMismatch
-    peParseUnexpected
-    peParseExpected
-    peParseDepthExceeded
-    peTypeUnknownField
-    peTypeMismatch
-    peTypeMissingRequired
-    peTypeEnumInvalid
-    peTypeDiscriminatorBad
-    peEncodeUnsupported    ## the typed encoder doesn't support this
+    ## Stable categorization of parse failures. **The integer values are an
+    ## explicit, stable wire/conformance contract (rfc-core-rebuild §10): new
+    ## codes APPEND with the next free value — never renumber or insert in the
+    ## middle. `test_error_codes` pins these.**
+    peLexUnexpectedChar    = 0
+    peLexUnterminatedString = 1
+    peLexInvalidEscape     = 2
+    peLexInvalidNumber     = 3
+    peLexInvalidIdentifier = 4
+    peLexReservedKeyword   = 5
+    peReservedTypeInvalid  = 6
+    peTypeReservedMismatch = 7
+    peParseUnexpected      = 8
+    peParseExpected        = 9
+    peParseDepthExceeded   = 10
+    peTypeUnknownField     = 11
+    peTypeMismatch         = 12
+    peTypeMissingRequired  = 13
+    peTypeEnumInvalid      = 14
+    peTypeDiscriminatorBad = 15
+    peEncodeUnsupported    = 16  ## the typed encoder doesn't support this
                            ## Nim shape (e.g. variant case-object types,
                            ## Option[T] on a kdlArg). Distinct from
                            ## peTypeMismatch (which means a value's KDL
                            ## kind doesn't match its Nim field type) —
                            ## here the shape itself is the issue.
-    peOther
+    peOther                = 17
 
   ParseError* = object
     ## Structured error.
@@ -98,6 +101,16 @@ type
         value*: T
     of rkErr:
       error*: E
+
+  Parsed*[T] = object
+    ## Outcome of a recovering, multi-error parse (rfc-core-rebuild §8.1): a
+    ## (possibly partial) value plus every error encountered while recovering.
+    ## Replaces the bare `tuple[doc, errors]` so `decodeAll`/`buildDocAll` share
+    ## one shape. `isComplete` iff no errors were collected.
+    value*: T
+    errors*: seq[ParseError]
+
+func isComplete*[T](p: Parsed[T]): bool {.inline.} = p.errors.len == 0
 
 
 # ---------------------------------------------------------------------------

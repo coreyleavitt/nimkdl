@@ -18,9 +18,6 @@
 
 import std/macros
 
-import ./ast
-import ./fnv
-import ./intern
 import ./lexer
 import ./spans
 

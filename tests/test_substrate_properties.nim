@@ -17,9 +17,8 @@ import std/[math, unittest]
 import proptest
 
 import ../src/cursor
-import ../src/doc_build  # tokenAsString — decode token payload back to string
+import ../src/token_text  # tokenAsString — decode token payload back to string
 import ../src/emitter
-import ../src/intern
 import ../src/lexer
 import ../src/numlit    # decodeIntFromToken / decodeFloatFromToken
 import ../src/spans     # Result.isOk / .get
@@ -31,7 +30,6 @@ proc driveToEof(src: string): bool =
   ## ceEof or emitted a ceError without raising. The strong claim is
   ## "completes without raising" — if any exception escapes, proptest
   ## fails the property.
-  var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
   sref[] = lex(src)
@@ -155,7 +153,6 @@ proc tokToGenArg(tok: Token, anno: string,
 proc cursorEventsToGen(src: string): seq[GenEvent] =
   ## Drive cursor over `src`, decode each emitted event back to
   ## the span-free GenEvent shape used by the property comparator.
-  var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
   sref[] = lex(src)

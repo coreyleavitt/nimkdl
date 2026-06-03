@@ -25,7 +25,7 @@
 
 import std/[formatfloat, strutils, unicode]   # addFloatRoundtrip — stdlib, NOT nkdl's formatter
 import proptest
-import ../src/ast
+import ../src/value
 
 type
   ValueSurface* = object
@@ -110,7 +110,7 @@ proc integerSurfaces*(): Strategy[ValueSurface] =
           body.add digits[i]
           for _ in 0 ..< us[i]: body.add '_'   # run after digit i (i=last ⇒ trailing)
         ValueSurface(text: signTxt & basePrefix(style.base) & body,
-                     value: newIntValue(value))))
+                     value: newKdlInt(value))))
 
 # ---------------------------------------------------------------------------
 # Slice 4 — decimal floats
@@ -132,7 +132,7 @@ proc finiteFloatSurfaces*(): Strategy[ValueSurface] =
       proc(f: float, plus: bool): ValueSurface =
         var t = renderFloat(f)
         if plus and t.len > 0 and t[0] notin {'-', '+'}: t = "+" & t
-        ValueSurface(text: t, value: newFloatValue(f)))
+        ValueSurface(text: t, value: newKdlFloat(f)))
 
 # ---------------------------------------------------------------------------
 # Slice 5 — keyword values
@@ -141,12 +141,12 @@ proc finiteFloatSurfaces*(): Strategy[ValueSurface] =
 proc keywordSurfaces*(): Strategy[ValueSurface] =
   ## The six `#`-keyword values.
   sampledFrom(@[
-    ("#true",  newBoolValue(true)),
-    ("#false", newBoolValue(false)),
-    ("#null",  newNullValue()),
-    ("#inf",   newFloatValue(Inf)),
-    ("#-inf",  newFloatValue(NegInf)),
-    ("#nan",   newFloatValue(NaN)),
+    ("#true",  newKdlBool(true)),
+    ("#false", newKdlBool(false)),
+    ("#null",  newKdlNull()),
+    ("#inf",   newKdlFloat(Inf)),
+    ("#-inf",  newKdlFloat(NegInf)),
+    ("#nan",   newKdlFloat(NaN)),
   ]).map(proc(p: (string, KdlValue)): ValueSurface =
     ValueSurface(text: p[0], value: p[1]))
 
@@ -161,7 +161,7 @@ proc plainStringSurfaces*(): Strategy[ValueSurface] =
                      (0x23'i32, 0x5B'i32),
                      (0x5D'i32, 0x7E'i32)]), 0, 32)
     .map(proc(s: string): ValueSurface =
-      ValueSurface(text: "\"" & s & "\"", value: newStringValue(s)))
+      ValueSurface(text: "\"" & s & "\"", value: newKdlString(s)))
 
 # ---------------------------------------------------------------------------
 # Slice 7 — escaped regular strings
@@ -193,7 +193,7 @@ proc escapedStringSurfaces*(): Strategy[ValueSurface] =
   ## value is the decoded original. Exercises escape DECODING.
   strings(intervals([(0x00'i32, 0x7F'i32)]), 0, 24)
     .map(proc(s: string): ValueSurface =
-      ValueSurface(text: "\"" & escapeRegular(s) & "\"", value: newStringValue(s)))
+      ValueSurface(text: "\"" & escapeRegular(s) & "\"", value: newKdlString(s)))
 
 # ---------------------------------------------------------------------------
 # Slice 8 — \u{} escapes (ordinary scalar values)
@@ -234,7 +234,7 @@ proc unicodeEscapeSurfaces*(): Strategy[ValueSurface] =
       proc(s: string, pad: int, upper: bool): ValueSurface =
         let cp = int(s.runeAt(0))
         ValueSurface(text: "\"" & renderUnicodeEscape(cp, pad, upper) & "\"",
-                     value: newStringValue(s)))
+                     value: newKdlString(s)))
 
 # ---------------------------------------------------------------------------
 # Slice 9 — ws-escape (line continuation) in strings
@@ -265,7 +265,7 @@ proc wsEscapeStringSurfaces*(): Strategy[ValueSurface] =
           if picks[i] > 0: t.add wsEscapeForms[picks[i] - 1]   # inject ws-escape
           if i < base.len: t.add base[i]
         t.add "\""
-        ValueSurface(text: t, value: newStringValue(base))))
+        ValueSurface(text: t, value: newKdlString(base))))
 
 # ---------------------------------------------------------------------------
 # Slice 10 — raw strings
@@ -294,7 +294,7 @@ proc rawStringSurfaces*(): Strategy[ValueSurface] =
   map(integers(1, 5), bodyGen, proc(n: int, body: string): ValueSurface =
     let hashes = repeat('#', n)
     ValueSurface(text: hashes & "\"" & body & "\"" & hashes,
-                 value: newStringValue(body)))
+                 value: newKdlString(body)))
 
 # ---------------------------------------------------------------------------
 # Slice 11 — multi-line strings + dedent
@@ -323,7 +323,7 @@ proc multilineStringSurfaces*(): Strategy[ValueSurface] =
         var t = "\"\"\"\n"
         for ln in lines: t.add p & ln & "\n"
         t.add p & "\"\"\""
-        ValueSurface(text: t, value: newStringValue(lines.join("\n"))))
+        ValueSurface(text: t, value: newKdlString(lines.join("\n"))))
 
 # ---------------------------------------------------------------------------
 # Slice 12 — node-space trivia (whitespace, block comments, esclines)
@@ -358,7 +358,7 @@ proc triviaSurfaces*(): Strategy[ValueSurface] =
   map(nodeSpaceTrivia(), integers(-9999, 9999), booleans(),
       proc(triv: string, n: int, trailComment: bool): ValueSurface =
         let tail = if trailComment: " // trailing comment" else: ""
-        ValueSurface(text: triv & " " & $n & tail, value: newIntValue(n.int64)))
+        ValueSurface(text: triv & " " & $n & tail, value: newKdlInt(n.int64)))
 
 # ---------------------------------------------------------------------------
 # Slice 13 — bareword identifiers (node names)

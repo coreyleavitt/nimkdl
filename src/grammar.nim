@@ -57,10 +57,10 @@
 
 import std/[strutils, tables]
 
-import ./ast
-import ./hashing  # hashNodeFromChildHashes
-import ./fnv     # Hash128
-import ./intern
+import std/options
+
+import ./node
+import ./value
 import ./lexer
 import ./numlit
 import ./reserved
@@ -567,13 +567,13 @@ proc collectTokens(n: ParseNode): seq[Token] =
   result = newSeqOfCap[Token](n.tokens.len + 1)
   collectTokensInto(n, result)
 
-proc resolveName(toks: seq[Token], stream: TokenStream, doc: var KdlDoc): InternedStr =
+proc resolveName(toks: seq[Token], stream: TokenStream): string =
   ## Helper: bareword / quoted string / raw string used as a name.
-  if toks.len == 0: return InvalidInterned
+  if toks.len == 0: return ""
   case toks[0].kind
   of tkIdent, tkString, tkRawString:
-    doc.interner.intern(tokenText(stream, toks[0]))
-  else: InvalidInterned
+    tokenText(stream, toks[0])
+  else: ""
 
 proc findImmediate(n: ParseNode, ruleName: string): ParseNode =
   ## Like `findFirst` but only walks the **immediate** children — does not
@@ -596,13 +596,15 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc, stream: TokenStream, err
   ## `errs` is the build-time error accumulator — decode failures
   ## (overflow, malformed float) push into it. `referenceInterpret`
   ## surfaces the first error after the whole build pass completes.
-  var anno = InvalidInterned
+  var anno = none(string)
+  var annoSpan = pointSpan(StartPosition)
   let typeAnno = findImmediate(valueMatch, "typeAnno")
   if typeAnno != nil:
     # typeAnno tokens = '(' name ')'
     let toks = collectTokens(typeAnno)
     if toks.len >= 3:
-      anno = resolveName(@[toks[1]], stream, doc)
+      anno = some(resolveName(@[toks[1]], stream))
+      annoSpan = toks[1].span
   # The grammar enforces `value := opt(typeAnno) rawValue`, so a value
   # match always has a non-empty rawValue child. No defensive paths —
   # if the invariant ever breaks, an out-of-bounds access here is the
@@ -612,47 +614,46 @@ proc buildValue(valueMatch: ParseNode, doc: var KdlDoc, stream: TokenStream, err
   let v = toks[0]
   case v.kind
   of tkString, tkRawString:
-    result = newStringValue(tokenText(stream, v), v.span)
+    result = newKdlString(tokenText(stream, v))
   of tkIdent:
     # Bare-ident value: read the bareword text via the unified resolver.
     let identStr = tokenText(stream, v)
     if isReservedBareword(identStr):
       errs.add(initError(peLexReservedKeyword, v.span,
         "reserved keyword '" & identStr & "' cannot be used as a bare value"))
-      result = newNullValue(v.span)
+      result = newKdlNull()
     else:
-      result = newStringValue(identStr, v.span)
+      result = newKdlString(identStr)
   of tkNumber:
     if looksLikeFloat(numberText(stream.source, v.span), v.numBase):
       let floatRes = decodeFloatFromToken(numberText(stream.source, v.span), v.span)
       if floatRes.isErr:
         errs.add(floatRes.getErr)
-        result = newNullValue(v.span)
+        result = newKdlNull()
       else:
-        result = newFloatValue(floatRes.get, v.span)
+        result = newKdlFloat(floatRes.get)
     else:
       let intRes = decodeIntPromoting(numberText(stream.source, v.span), v.numBase, v.span)
       if intRes.isErr:
         errs.add(intRes.getErr)
-        result = newNullValue(v.span)
+        result = newKdlNull()
       else:
         let d = intRes.get
-        result = if d.fits64: newIntValue(d.intVal, v.span)
-                 else: newBigIntValue(d.bigHi, d.bigLo, d.negative, v.span)
+        result = if d.fits64: newKdlInt(d.intVal)
+                 else: newKdlBigInt(d.bigHi, d.bigLo, d.negative)
   of tkKeyword:
     case v.keyword
-    of kwTrue:   result = newBoolValue(true, v.span)
-    of kwFalse:  result = newBoolValue(false, v.span)
-    of kwNull:   result = newNullValue(v.span)
-    of kwInf:    result = newFloatValue(Inf, v.span)
-    of kwNegInf: result = newFloatValue(NegInf, v.span)
-    of kwNan:    result = newFloatValue(NaN, v.span)
+    of kwTrue:   result = newKdlBool(true)
+    of kwFalse:  result = newKdlBool(false)
+    of kwNull:   result = newKdlNull()
+    of kwInf:    result = newKdlFloat(Inf)
+    of kwNegInf: result = newKdlFloat(NegInf)
+    of kwNan:    result = newKdlFloat(NaN)
   else:
-    result = newNullValue()
+    result = newKdlNull()
   result.typeAnnotation = anno
-  if anno != InvalidInterned:
-    let tagStr = doc.interner.lookup(anno)
-    let rcheck = validateReserved(tagStr, result)
+  if anno.isSome:
+    let rcheck = validateReserved(anno.get, result, annoSpan)
     if rcheck.isErr: errs.add(rcheck.getErr)
 
 proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc, stream: TokenStream,
@@ -663,26 +664,22 @@ proc buildEntry(entryMatch: ParseNode, doc: var KdlDoc, stream: TokenStream,
   ## `tokens` is the original token stream — used to compute real spans
   ## on the resulting entry (rather than the StartPosition placeholder
   ## the build* procs used to emit).
-  let entrySpan = toSpan(entryMatch.consumed, stream.tokens)
   let prop = findImmediate(entryMatch, "property")
   if prop != nil:
     let nameMatch = findImmediate(prop, "name")
     let key =
-      if nameMatch != nil: resolveName(collectTokens(nameMatch), stream, doc)
-      else: InvalidInterned
+      if nameMatch != nil: resolveName(collectTokens(nameMatch), stream)
+      else: ""
     let valueMatch = findImmediate(prop, "value")
     let v =
       if valueMatch != nil: buildValue(valueMatch, doc, stream, errs)
-      else: newNullValue()
-    return KdlEntry(kind: keProperty, propName: key, propValue: v,
-                    span: entrySpan)
+      else: newKdlNull()
+    return KdlEntry(kind: keProperty, propKey: key, propValue: v)
   let valueMatch = findImmediate(entryMatch, "value")
   if valueMatch != nil:
     return KdlEntry(kind: keArgument,
-                    argValue: buildValue(valueMatch, doc, stream, errs),
-                    span: entrySpan)
-  return KdlEntry(kind: keArgument, argValue: newNullValue(),
-                  span: entrySpan)
+                    argValue: buildValue(valueMatch, doc, stream, errs))
+  return KdlEntry(kind: keArgument, argValue: newKdlNull())
 
 proc buildNode(node: ParseNode, doc: var KdlDoc, stream: TokenStream,
                errs: var seq[ParseError]): KdlNode
@@ -717,35 +714,34 @@ proc buildNode(node: ParseNode, doc: var KdlDoc, stream: TokenStream,
                errs: var seq[ParseError]): KdlNode =
   ## Build a KdlNode from a `node` rule match. Grammar:
   ##   node := opt(typeAnno) name star(entry) opt(children) terminator
-  var anno = InvalidInterned
+  var anno = none(string)
   let typeAnnoMatch = findImmediate(node, "typeAnno")
   if typeAnnoMatch != nil:
     let toks = collectTokens(typeAnnoMatch)
     if toks.len >= 3:
-      anno = resolveName(@[toks[1]], stream, doc)
+      anno = some(resolveName(@[toks[1]], stream))
 
   let nameMatch = findImmediate(node, "name")
   let name =
-    if nameMatch != nil: resolveName(collectTokens(nameMatch), stream, doc)
-    else: InvalidInterned
+    if nameMatch != nil: resolveName(collectTokens(nameMatch), stream)
+    else: ""
 
+  let nodeSpan = toSpan(node.consumed, stream.tokens)
   result = KdlNode(name: name, typeAnnotation: anno,
-                   entries: @[], childNodes: @[],
-                   span: toSpan(node.consumed, stream.tokens))
+                   entries: @[], childNodes: @[])
 
   for entryMatch in findImmediateAll(node, "entry"):
     let etoks = collectTokens(entryMatch)
     if etoks.len > 0 and etoks[0].kind == tkSlashDash:
       continue  # slashdashed entry
-    var newEntry = buildEntry(entryMatch, doc, stream, errs)
-    newEntry.parseHash = hashEntry(newEntry, doc.interner)
+    let newEntry = buildEntry(entryMatch, doc, stream, errs)
     if newEntry.kind == keProperty:
       # KDL v2: repeated property keys → last-write-wins. Drop any
       # earlier entry with the same key before appending.
       var i = 0
       while i < result.entries.len:
         if result.entries[i].kind == keProperty and
-           result.entries[i].propName == newEntry.propName:
+           result.entries[i].propKey == newEntry.propKey:
           result.entries.delete(i)
         else:
           inc i
@@ -767,22 +763,11 @@ proc buildNode(node: ParseNode, doc: var KdlDoc, stream: TokenStream,
     if skipped:
       continue  # structurally consumed, semantically absent
     if realChildrenSeen:
-      errs.add(initError(peParseUnexpected, result.span,
+      errs.add(initError(peParseUnexpected, nodeSpan,
         "a node may have at most one real children block"))
       continue
     result.childNodes = buildChildrenBlock(childBlock, doc, stream, errs)
     realChildrenSeen = true
-  # Seed the parse-time content hash so `encode(doc, emPreserve)` can
-  # detect unmodified subtrees after this doc round-trips through the
-  # reference interpreter too. Counts feed the surgical-splice path
-  # in the encoder.
-  result.parseEntryCount = int32(result.entries.len)
-  result.parseChildCount = int32(result.childNodes.len)
-  # Bottom-up — children's parseHash is already populated by recursive
-  # buildNode calls above. See parser.nim:481 for the equivalence rationale.
-  var childHashes = newSeq[Hash128](result.childNodes.len)
-  for i, c in result.childNodes: childHashes[i] = c.parseHash
-  result.parseHash = hashNodeFromChildHashes(result, doc.interner, childHashes)
 
 proc buildDocFromParseTree(root: ParseNode, doc: var KdlDoc, stream: TokenStream,
               errs: var seq[ParseError]) =
@@ -845,19 +830,19 @@ proc checkNoReservedKeywords(nodes: seq[KdlNode], doc: KdlDoc):
   ## The hand parser checks these inline; the reference interpreter
   ## checks here after the build.
   for n in nodes:
-    let nameStr = doc.interner.lookup(n.name)
+    let nameStr = n.name
     if isReservedBareword(nameStr):
       return err[void, ParseError](initError(peLexReservedKeyword,
-        n.span,
+        pointSpan(StartPosition),
         "reserved keyword '" & nameStr & "' cannot be used as a bare node name"))
     for e in n.entries:
       if e.kind == keProperty:
-        let k = doc.interner.lookup(e.propName)
+        let k = e.propKey
         if isReservedBareword(k):
           return err[void, ParseError](initError(peLexReservedKeyword,
-            e.span,
+            pointSpan(StartPosition),
             "reserved keyword '" & k & "' cannot be used as a property key"))
-    let childRes = checkNoReservedKeywords(n.children, doc)
+    let childRes = checkNoReservedKeywords(n.childNodes, doc)
     if childRes.isErr:
       return childRes
   ok(void, ParseError)

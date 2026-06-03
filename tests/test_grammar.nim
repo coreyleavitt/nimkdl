@@ -4,7 +4,7 @@
 
 import std/[strutils, tables, unittest]
 
-import ../src/ast
+import ../src/node
 import ../src/grammar
 import ../src/lexer
 import ../src/parser

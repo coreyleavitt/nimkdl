@@ -24,8 +24,8 @@ import std/unittest
 import proptest
 
 import ../src/api
-import ../src/ast
-import ../src/doc_emit
+import ../src/node
+import ../src/node_emit
 import ../src/emitter
 import ../src/grammar  # referenceInterpret — the differential oracle / alternate Cat 1 consumer
 import ../src/kdl_block
@@ -45,13 +45,11 @@ kdl:
     items {.kdlChild.}: seq[Item]
 
 proc cat3RoundtripDoc(src: string): KdlDoc =
-  ## Path A: parse src → KdlDoc → emitDoc → re-parse.
+  ## Path A: parse src → KdlDoc → encode → re-parse.
   let r = parse(src)
   doAssert r.isOk, "cat3 path: parse(B) must succeed for P9 inputs"
-  var e = newBufferEmitter()
-  emitDoc(r.get, e)
-  let r2 = parse(e.finish())
-  doAssert r2.isOk, "cat3 path: emitDoc output must be reparseable"
+  let r2 = parse(encode(r.get))
+  doAssert r2.isOk, "cat3 path: encode output must be reparseable"
   r2.get
 
 proc cat2RoundtripDoc[T](src: string): KdlDoc =

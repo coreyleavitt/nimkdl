@@ -1,7 +1,7 @@
 import std/strutils
+import std/options
 
-import ./ast
-import ./intern
+import ./value
 import ./lexer  # isBareword + isDisallowedControl — emitter is the dual of lexer recognition
 import ./numlit  # formatInt / formatFloat / formatBigInt — numeric value → wire bytes
 import ./spec_literals  # KdlKeywordLiterals + KdlSlashdash — wire bytes single source of truth
@@ -319,6 +319,16 @@ func pushArgNull*(e: var BufferEmitter, anno: openArray[char] = "") =
   e.appendAnno(anno)
   e.appendNull()
 
+func pushArgBigInt*(e: var BufferEmitter, hi, lo: uint64, negative: bool,
+                    anno: openArray[char] = "") =
+  ## Append a positional >int64 argument (128-bit magnitude + sign). The
+  ## value-typed counterpart of the `dispatchValue` bigint path, for the
+  ## self-contained node walker (no KdlValue construction).
+  e.appendByte(' ')
+  e.consumeSlashdash()
+  e.appendAnno(anno)
+  e.appendBigInt(hi, lo, negative)
+
 # ---------------------------------------------------------------------------
 # Typed-value property pushes (codegen zero-overhead path)
 # ---------------------------------------------------------------------------
@@ -362,6 +372,12 @@ func pushPropNull*(e: var BufferEmitter, key: openArray[char],
   e.appendPropPrefix(key, anno)
   e.appendNull()
 
+func pushPropBigInt*(e: var BufferEmitter, key: openArray[char],
+                     hi, lo: uint64, negative: bool,
+                     anno: openArray[char] = "") =
+  e.appendPropPrefix(key, anno)
+  e.appendBigInt(hi, lo, negative)
+
 # ---------------------------------------------------------------------------
 # KdlValue convenience dispatcher (Cat 3 docEmit consumers)
 # ---------------------------------------------------------------------------
@@ -374,60 +390,50 @@ func pushPropNull*(e: var BufferEmitter, key: openArray[char],
 # That's the AST convenience tax — the codegen path pays nothing
 # because it never constructs a KdlValue.
 
-func appendInternedAnno(e: var BufferEmitter, interner: Interner,
-                        t: InternedStr) {.inline.} =
-  ## Emit `(tag)` from an InternedStr handle, distinguishing absent
-  ## (InvalidInterned → no annotation) from explicit empty
-  ## (interned-handle-to-empty-string → `("")` form). The string-based
-  ## `appendAnno` can't make this distinction because empty-string is
-  ## the absent sentinel there; the AST-walking paths consult the
-  ## InternedStr handle directly to preserve the semantic difference.
-  if t != InvalidInterned:
+# ---------------------------------------------------------------------------
+# Self-contained value walker pushes (used by node_emit). Annotation is
+# Option[string], so `none` vs `some("")` is distinguishable — the latter
+# renders `("")` so an explicit empty type annotation round-trips byte-exactly
+# (which the string-anno primitives above cannot express).
+# ---------------------------------------------------------------------------
+
+func appendAnnoOpt(e: var BufferEmitter, anno: Option[string]) {.inline.} =
+  if anno.isSome:
     e.appendByte('(')
-    e.appendIdent(interner.lookup(t))
+    e.appendIdent(anno.get)   # "" → quoted empty → renders as ("")
     e.appendByte(')')
 
-func dispatchValue(e: var BufferEmitter, v: KdlValue) {.inline.} =
+func dispatchValueV(e: var BufferEmitter, v: value.KdlValue) =
   case v.kind
-  of kvString: e.appendString(v.strVal)
-  of kvInt:    e.appendBytes(formatInt(v.intVal))
-  of kvBigInt: e.appendBytes(formatBigInt(v.bigHi, v.bigLo, v.bigNegative))
-  of kvFloat:  e.appendFloat(v.floatVal)
-  of kvBool:   e.appendBool(v.boolVal)
-  of kvNull:   e.appendNull()
+  of value.kvString: e.appendString(v.strVal)
+  of value.kvInt:    e.appendBytes(formatInt(v.intVal))
+  of value.kvBigInt: e.appendBigInt(v.bigHi, v.bigLo, v.bigNegative)
+  of value.kvFloat:  e.appendFloat(v.floatVal)
+  of value.kvBool:   e.appendBool(v.boolVal)
+  of value.kvNull:   e.appendNull()
 
-func pushArg*(e: var BufferEmitter, v: KdlValue, interner: Interner) =
-  ## Append an arg whose value + anno are carried in the KdlValue.
-  ## Routes annotation through the InternedStr-aware path so an
-  ## explicit empty `("")` annotation survives byte-exactly.
+func pushArgV*(e: var BufferEmitter, v: value.KdlValue) =
+  ## Positional argument from a self-contained KdlValue.
   e.appendByte(' ')
   e.consumeSlashdash()
-  e.appendInternedAnno(interner, v.typeAnnotation)
-  e.dispatchValue(v)
+  e.appendAnnoOpt(v.typeAnnotation)
+  e.dispatchValueV(v)
 
-func pushProp*(e: var BufferEmitter, key: openArray[char], v: KdlValue,
-               interner: Interner) =
-  ## Append a `key=v` property; AST-aware annotation handling.
+func pushPropV*(e: var BufferEmitter, key: openArray[char], v: value.KdlValue) =
+  ## `key=value` property from a self-contained KdlValue.
   e.appendByte(' ')
   e.consumeSlashdash()
   e.appendIdent(key)
   e.appendByte('=')
-  e.appendInternedAnno(interner, v.typeAnnotation)
-  e.dispatchValue(v)
+  e.appendAnnoOpt(v.typeAnnotation)
+  e.dispatchValueV(v)
 
-# ---------------------------------------------------------------------------
-# AST-aware node-begin overload (for docEmit / parsed-tree consumers)
-# ---------------------------------------------------------------------------
-
-proc pushNodeBegin*(e: var BufferEmitter, name: openArray[char],
-                    interner: Interner, annoTok: InternedStr) =
-  ## AST-aware variant: takes the node's annotation as an InternedStr
-  ## handle so the absent-vs-explicit-empty distinction round-trips.
-  ## docEmit uses this; codegen uses the openArray[char] overload
-  ## (synthesized callers don't need the distinction).
+func pushNodeBeginV*(e: var BufferEmitter, name: openArray[char],
+                     anno: Option[string]) =
+  ## Begin a node with an Option[string] annotation (distinguishes `("")`).
   e.appendIndent()
   e.consumeSlashdash()
-  e.appendInternedAnno(interner, annoTok)
+  e.appendAnnoOpt(anno)
   e.appendIdent(name)
 
 # ---------------------------------------------------------------------------

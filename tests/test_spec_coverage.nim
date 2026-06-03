@@ -9,10 +9,9 @@ import std/unittest
 
 import proptest
 
-import ../src/ast
+import ../src/node    # self-contained KdlNode/KdlDoc/KdlValue (doc-free)
 import ../src/parser
 import ../src/spans   # Result.isOk / .get
-import ../src/intern  # interner.lookup
 
 import ./kdlgen
 
@@ -30,8 +29,8 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
   test "denotes is non-vacuous — it detects a value mismatch":
     # Guards every property below: if `denotes` ever became trivially true,
     # this fails. `5` does not denote the int 6.
-    check denotes(ValueSurface(text: "5", value: newIntValue(5)))
-    check not denotes(ValueSurface(text: "5", value: newIntValue(6)))
+    check denotes(ValueSurface(text: "5", value: newKdlInt(5)))
+    check not denotes(ValueSurface(text: "5", value: newKdlInt(6)))
 
   property "integers (any base, sign, underscores) denote their value":
     # Full integer grammar: decimal/hex/octal/binary x sign{none,+,-} x
@@ -90,4 +89,4 @@ suite "spec-coverage Tier 1 — lexical value fidelity":
     given name in identifierNames()
     let r = parse(name)
     ensure r.isOk and r.get.nodes.len == 1 and
-           r.get.interner.lookup(r.get.nodes[0].name) == name
+           r.get.nodes[0].name == name   # doc-free: name is an owned string now

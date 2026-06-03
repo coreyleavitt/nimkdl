@@ -29,9 +29,10 @@ import std/[macros, sets]
 import std/options  # the emitted decoder constructs `some(value)` for Option[T] fields
 export options       # so user code doesn't need to import options separately
 
-import ./ast
+import ./node
+import ./value
 import ./cursor
-import ./doc_build  # tokenAsString — single source of truth for token → string
+import ./token_text  # tokenAsString — single source of truth for token → string (rfc §6)
 import ./lexer      # TokenKind / KeywordKind dispatch in emitted code
 import ./numlit     # decodeIntFromToken / decodeFloatFromToken
 import ./spans
@@ -40,7 +41,7 @@ import ./spans
 # (Result, ParseError, ok, err, initError, peTypeMismatch, etc., plus the
 # cursor/lexer token-kind enum cases). Without these the caller would need
 # to import every substrate module by hand.
-export ast, cursor, doc_build, lexer, numlit, spans
+export node, value, cursor, token_text, lexer, numlit, spans
 
 # ---------------------------------------------------------------------------
 # Shared AST inspection helpers (mirror those in derive_encode)
@@ -118,10 +119,23 @@ proc findRecCase(recList: NimNode): NimNode =
 # ---------------------------------------------------------------------------
 
 proc isOptionType(t: NimNode): bool {.inline.} =
-  t.kind == nnkBracketExpr and $t[0] == "Option"
+  ## `eqIdent` (not `$t[0] == "Option"`) so a qualified `std/options.Option` or
+  ## an aliased import still matches (rfc §8.7).
+  t.kind == nnkBracketExpr and t[0].eqIdent("Option")
 
 proc innerOfOption(t: NimNode): NimNode {.inline.} =
   t[1]
+
+proc isObjectTypeResolved(t: NimNode): bool =
+  ## True iff `t` resolves (via `getTypeImpl`, following one `ref`) to an object
+  ## type. Empirically: primitives → nnkSym, `seq[X]` → nnkBracketExpr, user
+  ## object → nnkObjectTy, `ref object` → nnkRefTy→nnkObjectTy. CAVEAT: `Option[X]`
+  ## *also* resolves to nnkObjectTy, so the §8.2 inference peels Option first.
+  var impl: NimNode
+  try: impl = t.getTypeImpl
+  except: return false
+  if impl.kind == nnkRefTy: impl = impl[0].getTypeImpl
+  impl.kind == nnkObjectTy
 
 proc isEnumType(t: NimNode): bool =
   if t.kind == nnkEnumTy: return true
@@ -220,6 +234,22 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
       if decoded.isErr:
         return err[void, ParseError](decoded.getErr)
       `targetIdent` = `typeNode`(decoded.get)
+  of "uint", "uint8", "uint16", "uint32", "uint64":
+    let typeNode = fieldType
+    return quote do:
+      let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
+      if tok.kind != tkNumber:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span, "expected unsigned integer value"))
+      let decoded = decodeIntFromToken(
+        numberText(`cSym`.source, tok.span), tok.numBase, tok.span)
+      if decoded.isErr:
+        return err[void, ParseError](decoded.getErr)
+      if decoded.get < 0:
+        return err[void, ParseError](
+          initError(peTypeMismatch, tok.span,
+                    "expected unsigned (non-negative) integer"))
+      `targetIdent` = `typeNode`(decoded.get)
   of "float", "float32", "float64":
     let typeNode = fieldType
     return quote do:
@@ -313,7 +343,7 @@ macro deriveDecode*(T: typedesc): untyped =
     elif hasPragma(pragmas, "kdlChild"):
       var kind: ChildKind
       var elemType: NimNode
-      if fieldType.kind == nnkBracketExpr and $fieldType[0] == "seq":
+      if fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq"):
         kind = ckSeq
         elemType = fieldType[1]
       else:
@@ -321,6 +351,30 @@ macro deriveDecode*(T: typedesc): untyped =
         elemType = fieldType
       childSink.add((name: fieldName, elemType: elemType, kind: kind,
                      wireName: nodeNameOf(elemType)))
+    else:
+      # No routing pragma — infer the slot from the field type (rfc §8.2,
+      # name-preserving). Previously this fell through silently, dropping the
+      # field from the decoder (a D3 "fail loud" violation).
+      var ft = fieldType
+      if isOptionType(ft): ft = innerOfOption(ft)   # Option[X] inherits X's routing
+      if ft.kind == nnkBracketExpr and ft[0].eqIdent("seq"):
+        if isObjectTypeResolved(ft[1]):
+          childSink.add((name: fieldName, elemType: ft[1], kind: ckSeq,
+                         wireName: nodeNameOf(ft[1])))
+        else:
+          error("deriveDecode: cannot infer a KDL slot for seq field '" &
+                fieldName & "' of primitive elements — annotate it with " &
+                "{.kdlArg.} (variadic args) or {.kdlChild.}")
+      elif isObjectTypeResolved(ft):
+        if isOptionType(fieldType):
+          error("deriveDecode: inferred optional child for field '" & fieldName &
+                "' (Option[object]) is not yet supported — annotate {.kdlChild.}")
+        childSink.add((name: fieldName, elemType: ft, kind: ckSingle,
+                       wireName: nodeNameOf(ft)))
+      else:
+        # primitive / enum (incl. Option[primitive]) → prop; key = field name.
+        propSink.add((name: fieldName, typ: fieldType, wireKey: fieldName,
+                      reservedTag: reservedTag))
 
   let recList = objectRecList(typeSym)
   for (fieldName, fieldType, pragmas) in regularFields(recList):
@@ -372,9 +426,13 @@ macro deriveDecode*(T: typedesc): untyped =
   var requiredMask: uint64 = 0
   var nextSlot = 0
   proc claimSlot(): int =
+    if nextSlot >= 64:
+      # The required-field bitmap is a uint64; slots past 63 would silently lose
+      # their required bit (missing-required would never fire). Fail loud (§8.7).
+      error("deriveDecode: type has more than 64 required fields — make some " &
+            "Option[T] / {.kdlSkip.}, or split the type")
     result = nextSlot
-    if result < 64:
-      requiredMask = requiredMask or (1'u64 shl result)
+    requiredMask = requiredMask or (1'u64 shl result)
     inc nextSlot
 
   proc isOptionalKdlArgOrProp(typ: NimNode): bool =

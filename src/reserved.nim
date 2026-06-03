@@ -43,83 +43,83 @@
 ## All procs are `{.noSideEffect.}` so the chain stays VM-callable for
 ## `embed[T]` compile-time decode.
 
-import ./ast
+import ./value
 import ./spans
 
-func intMismatch(v: KdlValue, tag: string): ParseError {.inline.} =
-  initError(peReservedTypeInvalid, v.span,
+func intMismatch(v: KdlValue, tag: string, span: Span): ParseError {.inline.} =
+  initError(peReservedTypeInvalid, span,
             "(" & tag & ") requires an integer value")
 
-func intOutOfRange(v: KdlValue, tag, lo, hi: string): ParseError {.inline.} =
+func intOutOfRange(v: KdlValue, tag, lo, hi: string, span: Span): ParseError {.inline.} =
   let shown =
     case v.kind
     of kvInt: $v.intVal
     of kvBigInt: "<128-bit magnitude>"
     else: "<non-integer>"
-  initError(peReservedTypeInvalid, v.span,
+  initError(peReservedTypeInvalid, span,
             "(" & tag & ") value " & shown & " is out of range [" & lo &
             ", " & hi & "]")
 
-func validateSignedInt(v: KdlValue, tag: string, lo, hi: int64):
+func validateSignedInt(v: KdlValue, tag: string, lo, hi: int64, span: Span):
     Result[void, ParseError] =
   ## Range check a signed integer reserved type. Caller supplies range.
   case v.kind
   of kvInt:
     if v.intVal < lo or v.intVal > hi:
-      return err[void, ParseError](intOutOfRange(v, tag, $lo, $hi))
+      return err[void, ParseError](intOutOfRange(v, tag, $lo, $hi, span))
     return ok(void, ParseError)
   of kvBigInt:
     # Magnitude exceeds int64.high by definition; cannot fit any tag
     # narrower than i128.
-    err[void, ParseError](intOutOfRange(v, tag, $lo, $hi))
+    err[void, ParseError](intOutOfRange(v, tag, $lo, $hi, span))
   else:
-    err[void, ParseError](intMismatch(v, tag))
+    err[void, ParseError](intMismatch(v, tag, span))
 
-func validateUnsignedInt(v: KdlValue, tag: string, hi: uint64):
+func validateUnsignedInt(v: KdlValue, tag: string, hi: uint64, span: Span):
     Result[void, ParseError] =
   ## Range check an unsigned integer reserved type. Caller supplies the
   ## upper bound; lower bound is implicit 0.
   case v.kind
   of kvInt:
     if v.intVal < 0:
-      return err[void, ParseError](intOutOfRange(v, tag, "0", $hi))
+      return err[void, ParseError](intOutOfRange(v, tag, "0", $hi, span))
     if uint64(v.intVal) > hi:
-      return err[void, ParseError](intOutOfRange(v, tag, "0", $hi))
+      return err[void, ParseError](intOutOfRange(v, tag, "0", $hi, span))
     return ok(void, ParseError)
   of kvBigInt:
     # Already > int64.high; for u8..u32 always out of range; for u64
     # accepted iff hi==0 and not negative. Handled by caller via
     # validateU64Big / validateU128Big helpers.
-    err[void, ParseError](intOutOfRange(v, tag, "0", $hi))
+    err[void, ParseError](intOutOfRange(v, tag, "0", $hi, span))
   else:
-    err[void, ParseError](intMismatch(v, tag))
+    err[void, ParseError](intMismatch(v, tag, span))
 
-func validateU64(v: KdlValue): Result[void, ParseError] =
+func validateU64(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(u64)` — 0 .. 2^64-1. kvBigInt with hi==0 and not negative fits.
   case v.kind
   of kvInt:
     if v.intVal < 0:
-      return err[void, ParseError](intOutOfRange(v, "u64", "0", "18446744073709551615"))
+      return err[void, ParseError](intOutOfRange(v, "u64", "0", "18446744073709551615", span))
     return ok(void, ParseError)
   of kvBigInt:
     if v.bigNegative or v.bigHi != 0:
-      return err[void, ParseError](intOutOfRange(v, "u64", "0", "18446744073709551615"))
+      return err[void, ParseError](intOutOfRange(v, "u64", "0", "18446744073709551615", span))
     return ok(void, ParseError)  # bigLo fits since bigHi == 0
   else:
-    err[void, ParseError](intMismatch(v, "u64"))
+    err[void, ParseError](intMismatch(v, "u64", span))
 
-func validateI64(v: KdlValue): Result[void, ParseError] =
+func validateI64(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(i64)` — kvInt always fits (int64 range is the kvInt range); any
   ## kvBigInt magnitude exceeds it.
   case v.kind
   of kvInt: ok(void, ParseError)
   of kvBigInt:
     err[void, ParseError](intOutOfRange(v, "i64",
-      "-9223372036854775808", "9223372036854775807"))
+      "-9223372036854775808", "9223372036854775807", span))
   else:
-    err[void, ParseError](intMismatch(v, "i64"))
+    err[void, ParseError](intMismatch(v, "i64", span))
 
-func validateI128(v: KdlValue): Result[void, ParseError] =
+func validateI128(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(i128)` — signed 128-bit range: −2^127 .. 2^127 − 1.
   ## Magnitude is (bigHi shl 64) or bigLo; we use a top-bit comparison.
   case v.kind
@@ -133,31 +133,31 @@ func validateI128(v: KdlValue): Result[void, ParseError] =
       if v.bigHi > 0x8000_0000_0000_0000'u64 or
          (v.bigHi == 0x8000_0000_0000_0000'u64 and v.bigLo != 0):
         return err[void, ParseError](intOutOfRange(v, "i128",
-          "-2^127", "2^127-1"))
+          "-2^127", "2^127-1", span))
     else:
       if v.bigHi >= 0x8000_0000_0000_0000'u64:
         return err[void, ParseError](intOutOfRange(v, "i128",
-          "-2^127", "2^127-1"))
+          "-2^127", "2^127-1", span))
     return ok(void, ParseError)
   else:
-    err[void, ParseError](intMismatch(v, "i128"))
+    err[void, ParseError](intMismatch(v, "i128", span))
 
-func validateU128(v: KdlValue): Result[void, ParseError] =
+func validateU128(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(u128)` — 0 .. 2^128 − 1. Any non-negative magnitude fits since
   ## we cap parsing at 128 bits already.
   case v.kind
   of kvInt:
     if v.intVal < 0:
-      return err[void, ParseError](intOutOfRange(v, "u128", "0", "2^128-1"))
+      return err[void, ParseError](intOutOfRange(v, "u128", "0", "2^128-1", span))
     return ok(void, ParseError)
   of kvBigInt:
     if v.bigNegative:
-      return err[void, ParseError](intOutOfRange(v, "u128", "0", "2^128-1"))
+      return err[void, ParseError](intOutOfRange(v, "u128", "0", "2^128-1", span))
     return ok(void, ParseError)  # already capped at 128 bits at parse
   else:
-    err[void, ParseError](intMismatch(v, "u128"))
+    err[void, ParseError](intMismatch(v, "u128", span))
 
-func validateF32(v: KdlValue): Result[void, ParseError] =
+func validateF32(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(f32)` — IEEE-754 single precision. Finite values must fit
   ## ~|3.4028e38|; ±Inf and NaN pass.
   const f32Max = 3.4028234663852886e38
@@ -167,23 +167,23 @@ func validateF32(v: KdlValue): Result[void, ParseError] =
     if f != f: return ok(void, ParseError)  # NaN
     if f == Inf or f == NegInf: return ok(void, ParseError)
     if f > f32Max or f < -f32Max:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(f32) value " & $f & " exceeds IEEE-754 single-precision range"))
     return ok(void, ParseError)
   of kvInt: ok(void, ParseError)
   of kvBigInt: ok(void, ParseError)
   else:
-    err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(f32) requires a numeric value"))
 
-func validateF64(v: KdlValue): Result[void, ParseError] =
+func validateF64(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(f64)` — IEEE-754 double precision. Any KDL float / int fits by
   ## construction (KDL floats are parsed via Nim's parseFloat which is
   ## double-precision).
   case v.kind
   of kvFloat, kvInt, kvBigInt: ok(void, ParseError)
   else:
-    err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(f64) requires a numeric value"))
 
 func isHexDigit(c: char): bool {.inline.} =
@@ -191,27 +191,27 @@ func isHexDigit(c: char): bool {.inline.} =
   of '0'..'9', 'a'..'f', 'A'..'F': true
   else: false
 
-func validateUuid(v: KdlValue): Result[void, ParseError] =
+func validateUuid(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(uuid)` — RFC 4122 §3 UUID textual representation:
   ##   `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX`
   ## where each X is a hex digit. We accept either case (RFC allows
   ## upper or lower) but require the exact 8-4-4-4-12 layout.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(uuid) requires a string value"))
   let s = v.strVal
   if s.len != 36:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(uuid) must be exactly 36 characters (got " & $s.len & ")"))
   const dashAt = [8, 13, 18, 23]
   for i, c in s:
     if i in dashAt:
       if c != '-':
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(uuid) expected '-' at position " & $i))
     else:
       if not isHexDigit(c):
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(uuid) non-hex digit at position " & $i))
   ok(void, ParseError)
 
@@ -240,13 +240,13 @@ func parseIpv4Bytes(s: string): bool =
       if i >= s.len: return false
   octets == 4
 
-func validateIpv4(v: KdlValue): Result[void, ParseError] =
+func validateIpv4(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(ipv4)` — RFC 791 dotted-decimal four-octet address.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(ipv4) requires a string value"))
   if not parseIpv4Bytes(v.strVal):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(ipv4) malformed address: " & v.strVal))
   ok(void, ParseError)
 
@@ -312,15 +312,15 @@ func parseIpv6Bytes(s: string): bool =
     return beforeDouble + afterDouble <= 8
   beforeDouble == 8
 
-func validateIpv6(v: KdlValue): Result[void, ParseError] =
+func validateIpv6(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(ipv6)` — RFC 4291 §2.2 textual address. Accepts the canonical
   ## colon-separated 16-bit groups, `::` zero-run compression, and the
   ## embedded-IPv4 form for the final 32 bits.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(ipv6) requires a string value"))
   if not parseIpv6Bytes(v.strVal):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(ipv6) malformed address: " & v.strVal))
   ok(void, ParseError)
 
@@ -396,51 +396,51 @@ func validateTimeBody(s: string, start: int): tuple[ok: bool, consumed: int] =
     return (true, i - start)
   (false, 0)
 
-func validateDate(v: KdlValue): Result[void, ParseError] =
+func validateDate(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(date)` — RFC 3339 §5.6 full-date.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(date) requires a string value"))
   let s = v.strVal
   if s.len != 10 or not validateDateBody(s, 0):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(date) not a valid RFC 3339 full-date: " & s))
   ok(void, ParseError)
 
-func validateTime(v: KdlValue): Result[void, ParseError] =
+func validateTime(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(time)` — RFC 3339 §5.6 full-time (partial-time + offset).
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(time) requires a string value"))
   let s = v.strVal
   let (okt, consumed) = validateTimeBody(s, 0)
   if not okt or consumed != s.len:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(time) not a valid RFC 3339 time: " & s))
   ok(void, ParseError)
 
-func validateDateTime(v: KdlValue): Result[void, ParseError] =
+func validateDateTime(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(date-time)` — RFC 3339 §5.6 date-time: full-date `T` full-time.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(date-time) requires a string value"))
   let s = v.strVal
   if s.len < 11:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(date-time) too short"))
   if not validateDateBody(s, 0):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(date-time) invalid date portion: " & s))
   if s[10] != 'T' and s[10] != 't':
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(date-time) requires 'T' separator between date and time"))
   let (okt, consumed) = validateTimeBody(s, 11)
   if not okt or consumed != s.len - 11:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(date-time) invalid time portion: " & s))
   ok(void, ParseError)
 
-func validateDuration(v: KdlValue): Result[void, ParseError] =
+func validateDuration(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(duration)` — ISO 8601 §3.4 duration. Form:
   ##   P[nY][nM][nW][nD][T[nH][nM][nS]]
   ## At least one designator must appear (so `P` alone is invalid, but
@@ -448,11 +448,11 @@ func validateDuration(v: KdlValue): Result[void, ParseError] =
   ## per strict ISO 8601 but RFC 3339 (and most real-world parsers)
   ## accept `P1W` standalone; we accept that.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(duration) requires a string value"))
   let s = v.strVal
   if s.len < 2 or s[0] != 'P':
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(duration) must start with 'P': " & s))
   var i = 1
   var inTime = false
@@ -460,7 +460,7 @@ func validateDuration(v: KdlValue): Result[void, ParseError] =
   while i < s.len:
     if s[i] == 'T':
       if inTime:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(duration) duplicate 'T' separator"))
       inTime = true
       inc i
@@ -470,7 +470,7 @@ func validateDuration(v: KdlValue): Result[void, ParseError] =
     while i < s.len and isDigit(s[i]):
       inc i
     if i == numStart:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(duration) expected digits before designator at offset " & $i))
     if i < s.len and s[i] == '.':
       inc i
@@ -478,28 +478,28 @@ func validateDuration(v: KdlValue): Result[void, ParseError] =
       while i < s.len and isDigit(s[i]):
         inc i
       if i == fracStart:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(duration) decimal fraction missing digits"))
     if i >= s.len:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(duration) number without designator"))
     let designator = s[i]
     let validInDate = designator in {'Y', 'M', 'W', 'D'}
     let validInTime = designator in {'H', 'M', 'S'}
     if inTime:
       if not validInTime:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(duration) invalid designator '" & $designator &
           "' in time portion"))
     else:
       if not validInDate:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(duration) invalid designator '" & $designator &
           "' (use 'T' to introduce time portion)"))
     anyDesignator = true
     inc i
   if not anyDesignator:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(duration) 'P' must be followed by at least one designator"))
   ok(void, ParseError)
 
@@ -508,16 +508,16 @@ func isBase64Char(c: char): bool {.inline.} =
   of 'A'..'Z', 'a'..'z', '0'..'9', '+', '/': true
   else: false
 
-func validateBase64(v: KdlValue): Result[void, ParseError] =
+func validateBase64(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(base64)` — RFC 4648 §4 standard alphabet, with `=` padding to a
   ## length multiple of 4. We accept canonical form; URL-safe variant
   ## (RFC 4648 §5) would be a separate tag.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(base64) requires a string value"))
   let s = v.strVal
   if s.len mod 4 != 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(base64) length must be a multiple of 4"))
   # Count trailing `=` (0, 1, or 2 allowed); padding only at end.
   var padCount = 0
@@ -526,11 +526,11 @@ func validateBase64(v: KdlValue): Result[void, ParseError] =
     inc padCount
     dec i
     if padCount > 2:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(base64) at most 2 padding chars allowed"))
   for j in 0 ..< i:
     if not isBase64Char(s[j]):
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(base64) invalid character at position " & $j))
   ok(void, ParseError)
 
@@ -547,17 +547,17 @@ func isBase85Char(c: char): bool {.inline.} =
      '{', '|', '}', '~': true
   else: false
 
-func validateBase85(v: KdlValue): Result[void, ParseError] =
+func validateBase85(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(base85)` — RFC 1924 §3 alphabet. Spec checks alphabet only;
   ## length isn't constrained to a multiple in RFC 1924 (it's intended
   ## for IPv6 specifically, which is exactly 20 chars, but a general
   ## base85 string can be any length).
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(base85) requires a string value"))
   for i, c in v.strVal:
     if not isBase85Char(c):
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(base85) invalid character at position " & $i))
   ok(void, ParseError)
 
@@ -581,26 +581,26 @@ func validateHostnameLabel(label: string): bool =
     if not (isAsciiAlphaNum(c) or c == '-'): return false
   true
 
-func validateHostname(v: KdlValue): Result[void, ParseError] =
+func validateHostname(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(hostname)` — RFC 1035 §2.3.1 preferred-name form. Dot-separated
   ## labels, each 1-63 alphanumerics-plus-hyphens, no leading/trailing
   ## hyphen. Total <= 253 chars.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(hostname) requires a string value"))
   let s = v.strVal
   if s.len == 0 or s.len > 253:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(hostname) length must be 1..253"))
   var labelStart = 0
   for i, c in s:
     if c == '.':
       if not validateHostnameLabel(s[labelStart ..< i]):
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(hostname) invalid label: '" & s[labelStart ..< i] & "'"))
       labelStart = i + 1
   if not validateHostnameLabel(s[labelStart .. ^1]):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(hostname) invalid final label"))
   ok(void, ParseError)
 
@@ -621,27 +621,27 @@ func validateIdnHostnameLabel(label: string): bool =
       return false
   true
 
-func validateIdnHostname(v: KdlValue): Result[void, ParseError] =
+func validateIdnHostname(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(idn-hostname)` — RFC 5891. We accept either ASCII (LDH form,
   ## including `xn--` punycode labels) or Unicode labels. Full IDNA2008
   ## compliance (NFC normalization, BiDi rules) is deferred — this is a
   ## shape check.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(idn-hostname) requires a string value"))
   let s = v.strVal
   if s.len == 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(idn-hostname) empty"))
   var labelStart = 0
   for i, c in s:
     if c == '.':
       if not validateIdnHostnameLabel(s[labelStart ..< i]):
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(idn-hostname) invalid label"))
       labelStart = i + 1
   if not validateIdnHostnameLabel(s[labelStart .. ^1]):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(idn-hostname) invalid final label"))
   ok(void, ParseError)
 
@@ -660,184 +660,184 @@ func isUrlScheme(s: string, last: var int): bool =
     inc i
   false
 
-func validateUrl(v: KdlValue): Result[void, ParseError] =
+func validateUrl(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(url)` — RFC 3986 absolute URI shape: scheme `:` hier-part
   ## [`?` query] [`#` fragment]. Validates scheme syntax and requires
   ## a non-empty body after the scheme.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(url) requires a string value"))
   let s = v.strVal
   if s.len == 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(url) empty"))
   var colonAt = -1
   if not isUrlScheme(s, colonAt):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(url) missing or invalid scheme"))
   if colonAt + 1 >= s.len:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(url) scheme without body"))
   ok(void, ParseError)
 
-func validateUrlReference(v: KdlValue): Result[void, ParseError] =
+func validateUrlReference(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(url-reference)` — RFC 3986 §4.1: either an absolute URI or a
   ## relative-ref. Effectively any non-control string is acceptable
   ## syntactically; the empty string is also a valid relative-ref.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(url-reference) requires a string value"))
   # Allow empty; otherwise just reject ASCII control chars in the
   # reference (matches the URI ABNF's exclusion of CTL).
   for i, c in v.strVal:
     if uint8(c) < 0x20'u8 or uint8(c) == 0x7F'u8:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(url-reference) contains control character at position " & $i))
   ok(void, ParseError)
 
-func validateIrl(v: KdlValue): Result[void, ParseError] =
+func validateIrl(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(irl)` — RFC 3987 IRI. Same as URL but the "iunreserved" set
   ## allows non-ASCII. We require a valid scheme like (url) but accept
   ## any Unicode codepoints (other than disallowed-literal-codepoints
   ## which are already rejected at lex time).
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(irl) requires a string value"))
   let s = v.strVal
   var colonAt = -1
   if not isUrlScheme(s, colonAt):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(irl) missing or invalid scheme"))
   if colonAt + 1 >= s.len:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(irl) scheme without body"))
   ok(void, ParseError)
 
-func validateIrlReference(v: KdlValue): Result[void, ParseError] =
+func validateIrlReference(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(irl-reference)` — RFC 3987 relative-or-absolute IRI. Like
   ## url-reference but Unicode is allowed in the path/query/fragment.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(irl-reference) requires a string value"))
   # Same minimal check as url-reference; non-ASCII is permitted.
   for i, c in v.strVal:
     if uint8(c) < 0x20'u8 or uint8(c) == 0x7F'u8:
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(irl-reference) contains control character at position " & $i))
   ok(void, ParseError)
 
-func validateUrlTemplate(v: KdlValue): Result[void, ParseError] =
+func validateUrlTemplate(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(url-template)` — RFC 6570 URI Template. The literal portions
   ## follow URI rules; the expression portions are `{...}`. We require
   ## balanced `{` `}` (no nesting, no unclosed expression).
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(url-template) requires a string value"))
   var inExpr = false
   for i, c in v.strVal:
     if c == '{':
       if inExpr:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(url-template) nested '{' at position " & $i))
       inExpr = true
     elif c == '}':
       if not inExpr:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(url-template) unmatched '}' at position " & $i))
       inExpr = false
   if inExpr:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(url-template) unclosed expression"))
   ok(void, ParseError)
 
-func validateEmail(v: KdlValue): Result[void, ParseError] =
+func validateEmail(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(email)` — RFC 5322 simplified: exactly one `@` separating a
   ## non-empty local-part from a hostname-shaped domain. Full RFC 5322
   ## grammar (quoted local-parts, comments, etc.) is deferred — this
   ## is the 99% form.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(email) requires a string value"))
   let s = v.strVal
   if s.len == 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(email) empty"))
   var atAt = -1
   for i, c in s:
     if c == '@':
       if atAt >= 0:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(email) multiple '@' chars"))
       atAt = i
   if atAt < 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(email) missing '@'"))
   if atAt == 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(email) empty local-part"))
   if atAt == s.len - 1:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(email) empty domain"))
   # Validate local-part: 1-64 chars, atom-shape (no spaces, no control).
   let local = s[0 ..< atAt]
   if local.len > 64:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(email) local-part exceeds 64 chars"))
   for c in local:
     let b = uint8(c)
     if b < 0x21'u8 or b == 0x7F'u8 or c == '@' or c == ',' or c == '<' or
        c == '>' or c == '"' or c == '\\':
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(email) invalid character in local-part"))
   # Validate domain via hostname rules.
   let domain = s[atAt + 1 .. ^1]
-  let domainV = newStringValue(domain, v.span)
-  let dr = validateHostname(domainV)
+  let domainV = newKdlString(domain)
+  let dr = validateHostname(domainV, span)
   if dr.isErr:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(email) invalid domain: " & domain))
   ok(void, ParseError)
 
-func validateIdnEmail(v: KdlValue): Result[void, ParseError] =
+func validateIdnEmail(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(idn-email)` — RFC 6531. Local-part may include UTF-8; domain
   ## follows IDN hostname rules.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(idn-email) requires a string value"))
   let s = v.strVal
   if s.len == 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(idn-email) empty"))
   var atAt = -1
   for i, c in s:
     if c == '@':
       if atAt >= 0:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(idn-email) multiple '@'"))
       atAt = i
   if atAt <= 0 or atAt == s.len - 1:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(idn-email) malformed"))
   let domain = s[atAt + 1 .. ^1]
-  let domainV = newStringValue(domain, v.span)
-  let dr = validateIdnHostname(domainV)
+  let domainV = newKdlString(domain)
+  let dr = validateIdnHostname(domainV, span)
   if dr.isErr:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(idn-email) invalid domain"))
   ok(void, ParseError)
 
-func validateRegex(v: KdlValue): Result[void, ParseError] =
+func validateRegex(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(regex)` — ECMA-262 RegExp grammar (per spec). We don't run the
   ## regex; we validate the source: balanced `(` `)` and `[` `]`, no
   ## dangling `\` escapes. Full ECMA-262 syntax (named groups,
   ## lookahead, etc.) is implicitly accepted because we don't reject
   ## anything that's syntactically structured.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(regex) requires a string value"))
   let s = v.strVal
   if s.len == 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(regex) empty pattern"))
   var i = 0
   var parenDepth = 0
@@ -846,7 +846,7 @@ func validateRegex(v: KdlValue): Result[void, ParseError] =
     let c = s[i]
     if c == '\\':
       if i + 1 >= s.len:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(regex) dangling backslash"))
       i += 2
       continue
@@ -862,17 +862,17 @@ func validateRegex(v: KdlValue): Result[void, ParseError] =
       inc parenDepth
     of ')':
       if parenDepth == 0:
-        return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+        return err[void, ParseError](initError(peReservedTypeInvalid, span,
           "(regex) unmatched ')'"))
       dec parenDepth
     else:
       discard
     inc i
   if inClass:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(regex) unclosed character class '['"))
   if parenDepth != 0:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(regex) unclosed group '('"))
   ok(void, ParseError)
 
@@ -964,57 +964,57 @@ func inSortedSet(needle: string, haystack: openArray[string]): bool =
     else:     hi = mid - 1
   false
 
-func validateCountry2(v: KdlValue): Result[void, ParseError] =
+func validateCountry2(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(country-2)` — ISO 3166-1 alpha-2 (uppercase, 2 letters).
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-2) requires a string value"))
   if v.strVal.len != 2 or not inSortedSet(v.strVal, Iso3166Alpha2):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-2) not a registered ISO 3166-1 alpha-2 code: " & v.strVal))
   ok(void, ParseError)
 
-func validateCountry3(v: KdlValue): Result[void, ParseError] =
+func validateCountry3(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(country-3)` — ISO 3166-1 alpha-3 (uppercase, 3 letters).
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-3) requires a string value"))
   if v.strVal.len != 3 or not inSortedSet(v.strVal, Iso3166Alpha3):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-3) not a registered ISO 3166-1 alpha-3 code: " & v.strVal))
   ok(void, ParseError)
 
-func validateCountrySubdivision(v: KdlValue): Result[void, ParseError] =
+func validateCountrySubdivision(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(country-subdivision)` — ISO 3166-2 format check: `XX-YYY`, where
   ## XX is a real alpha-2 code and YYY is 1..3 alphanumerics.
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-subdivision) requires a string value"))
   let s = v.strVal
   if s.len < 4 or s[2] != '-':
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-subdivision) must be 'XX-YYY' shape"))
   let prefix = s[0 ..< 2]
   if not inSortedSet(prefix, Iso3166Alpha2):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-subdivision) unknown country prefix: " & prefix))
   let suffix = s[3 .. ^1]
   if suffix.len < 1 or suffix.len > 3:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(country-subdivision) suffix must be 1..3 chars"))
   for c in suffix:
     if not isAsciiAlphaNum(c):
-      return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+      return err[void, ParseError](initError(peReservedTypeInvalid, span,
         "(country-subdivision) suffix must be alphanumeric"))
   ok(void, ParseError)
 
-func validateCurrency(v: KdlValue): Result[void, ParseError] =
+func validateCurrency(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(currency)` — ISO 4217 active currency code (uppercase, 3 chars).
   if v.kind != kvString:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(currency) requires a string value"))
   if v.strVal.len != 3 or not inSortedSet(v.strVal, Iso4217Currency):
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(currency) not a registered ISO 4217 code: " & v.strVal))
   ok(void, ParseError)
 
@@ -1038,7 +1038,7 @@ type DecimalShape = object
   sigDigits: int
   expVal: int
 
-func parseDecimalShape(v: KdlValue, tag: string):
+func parseDecimalShape(v: KdlValue, tag: string, span: Span):
     Result[DecimalShape, ParseError] =
   ## Private: parse a decimal-format string per IEEE 754-2008 §3.3.
   ## Returns the significand digit count + decimal exponent for the
@@ -1046,11 +1046,11 @@ func parseDecimalShape(v: KdlValue, tag: string):
   ## Err immediately.
   if v.kind != kvString:
     return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
-      v.span, "(" & tag & ") requires a string value"))
+      span, "(" & tag & ") requires a string value"))
   let s = v.strVal
   if s.len == 0:
     return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
-      v.span, "(" & tag & ") empty"))
+      span, "(" & tag & ") empty"))
   var i = 0
   if s[0] == '+' or s[0] == '-':
     inc i
@@ -1059,7 +1059,7 @@ func parseDecimalShape(v: KdlValue, tag: string):
     inc i
   if i == intStart:
     return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
-      v.span, "(" & tag & ") integer part required"))
+      span, "(" & tag & ") integer part required"))
   let intEnd = i
   var fracStart = -1
   var fracEnd = -1
@@ -1071,7 +1071,7 @@ func parseDecimalShape(v: KdlValue, tag: string):
     fracEnd = i
     if fracEnd == fracStart:
       return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
-        v.span, "(" & tag & ") fractional digits required after '.'"))
+        span, "(" & tag & ") fractional digits required after '.'"))
   var expVal = 0
   if i < s.len and (s[i] == 'e' or s[i] == 'E'):
     inc i
@@ -1085,14 +1085,14 @@ func parseDecimalShape(v: KdlValue, tag: string):
       inc i
       if expVal > 100000:
         return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
-          v.span, "(" & tag & ") exponent magnitude too large"))
+          span, "(" & tag & ") exponent magnitude too large"))
     if i == eStart:
       return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
-        v.span, "(" & tag & ") exponent digits required"))
+        span, "(" & tag & ") exponent digits required"))
     if expNeg: expVal = -expVal
   if i != s.len:
     return err[DecimalShape, ParseError](initError(peReservedTypeInvalid,
-      v.span, "(" & tag & ") trailing characters: " & s[i .. ^1]))
+      span, "(" & tag & ") trailing characters: " & s[i .. ^1]))
   # Count significant digits: skip leading zeros from int part.
   var sig = 0
   var i2 = intStart
@@ -1102,91 +1102,91 @@ func parseDecimalShape(v: KdlValue, tag: string):
     sig += fracEnd - fracStart
   ok[DecimalShape, ParseError](DecimalShape(sigDigits: sig, expVal: expVal))
 
-func validateDecimalFormat(v: KdlValue, tag: string):
+func validateDecimalFormat(v: KdlValue, tag: string, span: Span):
     Result[void, ParseError] =
   ## Unbounded variant — format check only, no precision / exponent
   ## bounds. Used by `(decimal)` (arbitrary-precision).
-  let r = parseDecimalShape(v, tag)
+  let r = parseDecimalShape(v, tag, span)
   if r.isErr: return err[void, ParseError](r.getErr)
   ok(void, ParseError)
 
 func validateDecimalFormat(v: KdlValue, tag: string,
-                           bounds: DecimalBounds):
+                           bounds: DecimalBounds, span: Span):
     Result[void, ParseError] =
   ## Bounded variant — format check, then precision + exponent-range
   ## bounds. Used by `(decimal64)` / `(decimal128)`. The grouped
   ## `DecimalBounds` makes it impossible to accidentally pass the
   ## precision while leaving the range at `0..0`.
-  let r = parseDecimalShape(v, tag)
+  let r = parseDecimalShape(v, tag, span)
   if r.isErr: return err[void, ParseError](r.getErr)
   let shape = r.get
   if shape.sigDigits > bounds.maxDigits:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(" & tag & ") significand exceeds " & $bounds.maxDigits & " digits"))
   if shape.expVal < bounds.expLow or shape.expVal > bounds.expHigh:
-    return err[void, ParseError](initError(peReservedTypeInvalid, v.span,
+    return err[void, ParseError](initError(peReservedTypeInvalid, span,
       "(" & tag & ") exponent " & $shape.expVal & " out of range [" &
       $bounds.expLow & ", " & $bounds.expHigh & "]"))
   ok(void, ParseError)
 
-func validateDecimal(v: KdlValue): Result[void, ParseError] =
+func validateDecimal(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(decimal)` — arbitrary-precision decimal. No precision / exponent
   ## cap; format check only.
-  validateDecimalFormat(v, "decimal")
+  validateDecimalFormat(v, "decimal", span)
 
-func validateDecimal64(v: KdlValue): Result[void, ParseError] =
+func validateDecimal64(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(decimal64)` — IEEE 754-2008 decimal64: 16 significant digits,
   ## exponent in [-383, 384].
-  validateDecimalFormat(v, "decimal64", Decimal64Bounds)
+  validateDecimalFormat(v, "decimal64", Decimal64Bounds, span)
 
-func validateDecimal128(v: KdlValue): Result[void, ParseError] =
+func validateDecimal128(v: KdlValue, span: Span): Result[void, ParseError] =
   ## `(decimal128)` — IEEE 754-2008 decimal128: 34 significant digits,
   ## exponent in [-6143, 6144].
-  validateDecimalFormat(v, "decimal128", Decimal128Bounds)
+  validateDecimalFormat(v, "decimal128", Decimal128Bounds, span)
 
-func validateReserved*(tag: string, v: KdlValue):
+func validateReserved*(tag: string, v: KdlValue, span: Span):
     Result[void, ParseError] {.noSideEffect.} =
   ## Dispatch a reserved tag to its validator. Returns ok for unknown
   ## tags (open-world per spec) and ok for known tags with valid content.
   case tag
-  of "i8":    validateSignedInt(v, "i8",   -128'i64, 127'i64)
-  of "i16":   validateSignedInt(v, "i16",  -32768'i64, 32767'i64)
-  of "i32":   validateSignedInt(v, "i32",  -2147483648'i64, 2147483647'i64)
-  of "i64":   validateI64(v)
-  of "i128":  validateI128(v)
-  of "u8":    validateUnsignedInt(v, "u8",  255'u64)
-  of "u16":   validateUnsignedInt(v, "u16", 65535'u64)
-  of "u32":   validateUnsignedInt(v, "u32", 4294967295'u64)
-  of "u64":   validateU64(v)
-  of "u128":  validateU128(v)
-  of "isize": validateI64(v)  ## platform-dependent; we treat as int64
-  of "usize": validateU64(v)  ## platform-dependent; we treat as uint64
-  of "f32":   validateF32(v)
-  of "f64":   validateF64(v)
-  of "uuid":  validateUuid(v)
-  of "ipv4":  validateIpv4(v)
-  of "ipv6":  validateIpv6(v)
-  of "date":      validateDate(v)
-  of "time":      validateTime(v)
-  of "date-time": validateDateTime(v)
-  of "duration":  validateDuration(v)
-  of "base64":    validateBase64(v)
-  of "base85":    validateBase85(v)
-  of "hostname":      validateHostname(v)
-  of "idn-hostname":  validateIdnHostname(v)
-  of "url":           validateUrl(v)
-  of "url-reference": validateUrlReference(v)
-  of "irl":           validateIrl(v)
-  of "irl-reference": validateIrlReference(v)
-  of "url-template":  validateUrlTemplate(v)
-  of "email":         validateEmail(v)
-  of "idn-email":     validateIdnEmail(v)
-  of "regex":         validateRegex(v)
-  of "country-2":            validateCountry2(v)
-  of "country-3":            validateCountry3(v)
-  of "country-subdivision":  validateCountrySubdivision(v)
-  of "currency":             validateCurrency(v)
-  of "decimal":              validateDecimal(v)
-  of "decimal64":            validateDecimal64(v)
-  of "decimal128":           validateDecimal128(v)
+  of "i8":    validateSignedInt(v, "i8",   -128'i64, 127'i64, span)
+  of "i16":   validateSignedInt(v, "i16",  -32768'i64, 32767'i64, span)
+  of "i32":   validateSignedInt(v, "i32",  -2147483648'i64, 2147483647'i64, span)
+  of "i64":   validateI64(v, span)
+  of "i128":  validateI128(v, span)
+  of "u8":    validateUnsignedInt(v, "u8",  255'u64, span)
+  of "u16":   validateUnsignedInt(v, "u16", 65535'u64, span)
+  of "u32":   validateUnsignedInt(v, "u32", 4294967295'u64, span)
+  of "u64":   validateU64(v, span)
+  of "u128":  validateU128(v, span)
+  of "isize": validateI64(v, span)  ## platform-dependent; we treat as int64
+  of "usize": validateU64(v, span)  ## platform-dependent; we treat as uint64
+  of "f32":   validateF32(v, span)
+  of "f64":   validateF64(v, span)
+  of "uuid":  validateUuid(v, span)
+  of "ipv4":  validateIpv4(v, span)
+  of "ipv6":  validateIpv6(v, span)
+  of "date":      validateDate(v, span)
+  of "time":      validateTime(v, span)
+  of "date-time": validateDateTime(v, span)
+  of "duration":  validateDuration(v, span)
+  of "base64":    validateBase64(v, span)
+  of "base85":    validateBase85(v, span)
+  of "hostname":      validateHostname(v, span)
+  of "idn-hostname":  validateIdnHostname(v, span)
+  of "url":           validateUrl(v, span)
+  of "url-reference": validateUrlReference(v, span)
+  of "irl":           validateIrl(v, span)
+  of "irl-reference": validateIrlReference(v, span)
+  of "url-template":  validateUrlTemplate(v, span)
+  of "email":         validateEmail(v, span)
+  of "idn-email":     validateIdnEmail(v, span)
+  of "regex":         validateRegex(v, span)
+  of "country-2":            validateCountry2(v, span)
+  of "country-3":            validateCountry3(v, span)
+  of "country-subdivision":  validateCountrySubdivision(v, span)
+  of "currency":             validateCurrency(v, span)
+  of "decimal":              validateDecimal(v, span)
+  of "decimal64":            validateDecimal64(v, span)
+  of "decimal128":           validateDecimal128(v, span)
   else:       return ok(void, ParseError)  # user-defined or not-yet-implemented

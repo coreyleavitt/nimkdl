@@ -64,14 +64,14 @@
 ## - [kdl.dev](https://kdl.dev/) — the KDL v2 spec.
 
 import ./spans
-import ./intern
-import ./ast
+import ./node
+import ./value
 import ./parser
 import ./grammar
 import ./pragmas
 import ./path
 import ./api
-import ./doc_emit
+import ./node_emit
 import ./kdl_block
 # Note: ./lexer and ./typed_parser are NOT imported here on purpose.
 # Lexer keeps Token / TokenKind / Lexer / lex out of the `import nkdl`
@@ -84,9 +84,6 @@ import ./kdl_block
 # Spans / Result / Position / Span — public diagnostic + error vocabulary.
 export spans
 
-# Intern — public for callers that hold InternedStr handles via the AST.
-export intern
-
 # Lexer — internal. Token, Lexer, TokenKind, lex() are implementation
 # details; users go through parser.parse / codegen.decode. The lexer
 # module is still importable directly (``import nkdl/lexer``) for tests
@@ -94,8 +91,8 @@ export intern
 #
 # (No re-export here.)
 
-# AST — the canonical data model.
-export ast
+# Self-contained DOM — the canonical data model (owned strings, no interner).
+export node, value
 
 # Parser — only the public entry point (parse, MaxParserDepth).
 export parser
@@ -105,10 +102,9 @@ export parser
 # kdlDecode for the user's `{.kdlNode.}`-tagged types.
 export api
 
-# Cat 3 OUT — AST → text. `encode(doc, mode = emPreserve)` is the
-# one-call entry (the `EmitMode`-overloaded sibling of typed `encode[T]`);
-# `emitDoc` / `emitDocPreserve` are the lower-level BufferEmitter forms.
-export doc_emit
+# Cat 3 OUT — DOM → text. `encode(doc)` is canonical; `encode(doc, preserve)`
+# and `encode(doc, mode)` (EmitMode) are the byte-lossless-capable forms.
+export node_emit
 
 # kdl: block macro orchestrator — wraps a region of type
 # definitions and emits deriveEncode + deriveDecode for each

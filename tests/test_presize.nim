@@ -14,9 +14,8 @@
 
 import std/[strutils, unittest]
 
-import spans
-import lexer
-import intern
+import ../src/spans
+import ../src/lexer
 
 
 suite "pre-sized tokens — estimator":
@@ -46,7 +45,6 @@ suite "pre-sized tokens — calibration on real fixtures":
     ## After lex, the seq's capacity should be ≥ its length (basic
     ## sanity — pre-sizing didn't under-allocate forcing growth) AND
     ## ≤ 2× its length (heuristic isn't wildly over-sized).
-    var interner = initInterner()
     let stream = lex(source)
     let cap = stream.tokens.len  # Nim 2.x: seq capacity isn't directly
                                  # introspectable without unsafe access.
@@ -73,13 +71,11 @@ suite "pre-sized tokens — calibration on real fixtures":
 suite "pre-sized tokens — edge cases":
 
   test "empty source produces a TokenStream with just tkEof":
-    var interner = initInterner()
     let stream = lex("")
     check stream.tokens.len >= 1
     check stream.tokens[^1].kind == tkEof
 
   test "single-character source doesn't crash":
-    var interner = initInterner()
     let stream = lex("x")
     check stream.tokens.len >= 1
     # `x` should lex as a bare identifier followed by EOF.

@@ -1,0 +1,230 @@
+## node_build.nim — fold cursor events into a self-contained node.KdlDoc.
+##
+## The strangler replacement for `doc_build.buildDoc`: same cursor-event walk,
+## but it builds the owned-string `node`/`value` types (no interner, no
+## `ownerDocument`). When `parser.parse()` swaps onto `parseNodes`, the interned
+## `doc_build` + `ast` core retire (rfc-core-rebuild §SB).
+##
+## This slice covers the structural core — nodes, typed args, props (last-wins),
+## children, node + value type annotations, slashdash discard. The preserve-mode
+## sidecar (span/parseHash) and reserved-tag validation (currently typed to the
+## old `ast.KdlValue`) rejoin in later slices.
+
+import std/options
+import ./value
+import ./node
+import ./cursor
+import ./lexer
+import ./numlit
+import ./token_text
+import ./reserved
+import ./spans
+export node, value, spans  # spans: Result/ParseError accessors used on parseNodes' result
+
+proc buildValueFromTok(tok: Token, stream: TokenStream, source: string):
+    Result[KdlValue, ParseError] {.noSideEffect.} =
+  ## Token → self-contained KdlValue. Mirrors doc_build.buildValueFromTok.
+  case tok.kind
+  of tkString, tkRawString:
+    ok[KdlValue, ParseError](newKdlString(tokenText(stream, tok)))
+  of tkKeyword:
+    let v = case tok.keyword
+      of kwTrue:   newKdlBool(true)
+      of kwFalse:  newKdlBool(false)
+      of kwNull:   newKdlNull()
+      of kwInf:    newKdlFloat(Inf)
+      of kwNegInf: newKdlFloat(NegInf)
+      of kwNan:    newKdlFloat(NaN)
+    ok[KdlValue, ParseError](v)
+  of tkNumber:
+    if looksLikeFloat(numberText(source, tok.span), tok.numBase):
+      let fRes = decodeFloatFromToken(numberText(source, tok.span), tok.span)
+      if fRes.isErr: return err[KdlValue, ParseError](fRes.getErr)
+      ok[KdlValue, ParseError](newKdlFloat(fRes.get))
+    else:
+      let iRes = decodeIntPromoting(numberText(source, tok.span), tok.numBase, tok.span)
+      if iRes.isErr: return err[KdlValue, ParseError](iRes.getErr)
+      let d = iRes.get
+      let v = if d.fits64: newKdlInt(d.intVal)
+              else: newKdlBigInt(d.bigHi, d.bigLo, d.negative)
+      ok[KdlValue, ParseError](v)
+  of tkIdent:
+    ok[KdlValue, ParseError](newKdlString(tokenText(stream, tok)))
+  else:
+    err[KdlValue, ParseError](initError(peParseExpected, tok.span,
+      "unsupported value token kind"))
+
+proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
+    Result[KdlDoc, ParseError] {.noSideEffect.} =
+  ## Fold cursor events into a self-contained KdlDoc via an explicit node stack.
+  var doc = newDoc(sourcePath)
+  doc.sourceText = c.source
+  var stack: seq[KdlNode] = @[]
+  var slashdashDepth = 0
+  while true:
+    let ev = advance(c)
+    if slashdashDepth > 0:
+      # Inside a slashdash bracket all emission is suppressed; just track nesting.
+      case ev.kind
+      of ceSlashdashBegin: inc slashdashDepth
+      of ceSlashdashEnd:   dec slashdashDepth
+      of ceError: return err[KdlDoc, ParseError](ev.err[])
+      of ceEof:   return ok[KdlDoc, ParseError](doc)
+      else: discard
+      continue
+    case ev.kind
+    of ceNodeBegin:
+      let name = tokenAsString(c.stream[].tokens[ev.nodeNameTok], c.stream[], c.source)
+      var typeAnno = none(string)
+      if ev.nodeAnnoTok != -1:
+        typeAnno = some(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
+      stack.add(KdlNode(name: name, typeAnnotation: typeAnno,
+                        entries: @[], childNodes: @[]))
+    of ceArg:
+      let tok = c.stream[].tokens[ev.argTok]
+      let vRes = buildValueFromTok(tok, c.stream[], c.source)
+      if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
+      var val = vRes.get
+      if ev.argAnnoTok != -1:
+        let annoStr = tokenAsString(c.stream[].tokens[ev.argAnnoTok], c.stream[], c.source)
+        val.typeAnnotation = some(annoStr)
+        let rcheck = validateReserved(annoStr, val, tok.span)
+        if rcheck.isErr: return err[KdlDoc, ParseError](rcheck.getErr)
+      if stack.len > 0:
+        stack[^1].entries.add(newArgument(val))
+    of ceProp:
+      let key = tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source)
+      let valTok = c.stream[].tokens[ev.propValueTok]
+      let vRes = buildValueFromTok(valTok, c.stream[], c.source)
+      if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
+      var val = vRes.get
+      if ev.propAnnoTok != -1:
+        let annoStr = tokenAsString(c.stream[].tokens[ev.propAnnoTok], c.stream[], c.source)
+        val.typeAnnotation = some(annoStr)
+        let rcheck = validateReserved(annoStr, val, valTok.span)
+        if rcheck.isErr: return err[KdlDoc, ParseError](rcheck.getErr)
+      if stack.len > 0:
+        # Repeated prop keys: last-wins — drop any earlier entry with this key.
+        var i = 0
+        while i < stack[^1].entries.len:
+          let e = stack[^1].entries[i]
+          if e.kind == keProperty and e.propKey == key:
+            stack[^1].entries.delete(i)
+          else: inc i
+        stack[^1].entries.add(newProperty(key, val))
+    of ceChildrenBegin, ceChildrenEnd:
+      discard  # node nesting handled by Begin/End node pairing
+    of ceNodeEnd:
+      if stack.len == 0: continue  # stray NodeEnd from cursor recovery
+      let n = stack.pop()
+      if stack.len == 0:
+        doc.rootNodes.add(n)
+      else:
+        stack[^1].childNodes.add(n)
+    of ceSlashdashBegin:
+      inc slashdashDepth
+    of ceSlashdashEnd:
+      discard  # only reachable when starting depth was 0 (mid-emission close)
+    of ceEof:
+      return ok[KdlDoc, ParseError](doc)
+    of ceError:
+      return err[KdlDoc, ParseError](ev.err[])
+
+proc parseNodes*(source: string, sourcePath = "<input>"):
+    Result[KdlDoc, ParseError] {.noSideEffect.} =
+  ## lex → cursor → buildNodeDoc. The self-contained-DOM counterpart of
+  ## `parser.parse()`.
+  var stream = lex(source)
+  var c = initStringCursor(addr stream, source)
+  buildNodeDoc(c, sourcePath)
+
+proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
+    Parsed[KdlDoc] {.noSideEffect.} =
+  ## Accumulating variant: cursor must be in cmAccumulating. Each `ceError` is
+  ## collected and the cursor recovers; the returned doc is partial — it holds
+  ## whatever the recovered parses produced. Mirrors `doc_build.buildDocAll`.
+  var doc = newDoc(sourcePath)
+  doc.sourceText = c.source
+  result.value = doc
+  var stack: seq[KdlNode] = @[]
+  var slashdashDepth = 0
+  while true:
+    let ev = advance(c)
+    if slashdashDepth > 0:
+      case ev.kind
+      of ceSlashdashBegin: inc slashdashDepth
+      of ceSlashdashEnd:   dec slashdashDepth
+      of ceError:
+        result.errors.add(ev.err[])
+        slashdashDepth = 0   # recovery clears open slashdash brackets
+      of ceEof: break
+      else: discard
+      continue
+    case ev.kind
+    of ceNodeBegin:
+      let name = tokenAsString(c.stream[].tokens[ev.nodeNameTok], c.stream[], c.source)
+      var typeAnno = none(string)
+      if ev.nodeAnnoTok != -1:
+        typeAnno = some(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
+      stack.add(KdlNode(name: name, typeAnnotation: typeAnno,
+                        entries: @[], childNodes: @[]))
+    of ceArg:
+      let tok = c.stream[].tokens[ev.argTok]
+      let vRes = buildValueFromTok(tok, c.stream[], c.source)
+      if vRes.isErr:
+        result.errors.add(vRes.getErr); continue
+      var val = vRes.get
+      if ev.argAnnoTok != -1:
+        let annoStr = tokenAsString(c.stream[].tokens[ev.argAnnoTok], c.stream[], c.source)
+        val.typeAnnotation = some(annoStr)
+        let rcheck = validateReserved(annoStr, val, tok.span)
+        if rcheck.isErr:
+          result.errors.add(rcheck.getErr); continue
+      if stack.len > 0:
+        stack[^1].entries.add(newArgument(val))
+    of ceProp:
+      let key = tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source)
+      let valTok = c.stream[].tokens[ev.propValueTok]
+      let vRes = buildValueFromTok(valTok, c.stream[], c.source)
+      if vRes.isErr:
+        result.errors.add(vRes.getErr); continue
+      var val = vRes.get
+      if ev.propAnnoTok != -1:
+        let annoStr = tokenAsString(c.stream[].tokens[ev.propAnnoTok], c.stream[], c.source)
+        val.typeAnnotation = some(annoStr)
+        let rcheck = validateReserved(annoStr, val, valTok.span)
+        if rcheck.isErr:
+          result.errors.add(rcheck.getErr); continue
+      if stack.len > 0:
+        var i = 0
+        while i < stack[^1].entries.len:
+          let e = stack[^1].entries[i]
+          if e.kind == keProperty and e.propKey == key:
+            stack[^1].entries.delete(i)
+          else: inc i
+        stack[^1].entries.add(newProperty(key, val))
+    of ceChildrenBegin, ceChildrenEnd:
+      discard
+    of ceNodeEnd:
+      if stack.len == 0: continue   # recovery dropped the open frame
+      let n = stack.pop()
+      if stack.len == 0:
+        result.value.rootNodes.add(n)
+      else:
+        stack[^1].childNodes.add(n)
+    of ceSlashdashBegin:
+      inc slashdashDepth
+    of ceSlashdashEnd:
+      discard
+    of ceEof:
+      break
+    of ceError:
+      result.errors.add(ev.err[])
+
+proc parseNodesAll*(source: string, sourcePath = "<input>"):
+    Parsed[KdlDoc] {.noSideEffect.} =
+  ## Multi-error variant of `parseNodes`. The self-contained-DOM counterpart of
+  ## `parser.parseAll()`.
+  var stream = lex(source)
+  var c = initStringCursor(addr stream, source, mode = cmAccumulating)
+  buildNodeDocAll(c, sourcePath)

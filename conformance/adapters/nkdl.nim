@@ -10,7 +10,7 @@
 ## generator bug — investigate by probing nkdl directly, never by silently
 ## "fixing" the corpus.
 
-import std/[json, unittest, formatfloat, strutils]
+import std/[json, unittest, formatfloat, strutils, options]
 
 import proptest
 
@@ -21,15 +21,14 @@ import ../groups
 import ../negative
 
 import ../../src/parser          # parse
-import ../../src/ast as nast      # KdlDoc/KdlNode/KdlEntry/KdlValue (aliased)
-import ../../src/intern           # Interner, lookup, InvalidInterned
+import ../../src/node as nast     # self-contained KdlDoc/KdlNode/KdlEntry/KdlValue
 import ../../src/spans            # Result.isOk / .get
 
-func annoOf(h: InternedStr, ig: Interner): string =
-  if h == InvalidInterned: "" else: ig.lookup(h)
+func annoOf(anno: Option[string]): string =
+  if anno.isSome: anno.get else: ""
 
-proc mapVal(v: nast.KdlValue, ig: Interner): model.KValue =
-  let anno = annoOf(v.typeAnnotation, ig)
+proc mapVal(v: nast.KdlValue): model.KValue =
+  let anno = annoOf(v.typeAnnotation)
   case v.kind
   of nast.kvString: kStr(v.strVal, anno)
   of nast.kvInt:    kInt(v.intVal, anno)
@@ -49,19 +48,18 @@ proc mapVal(v: nast.KdlValue, ig: Interner): model.KValue =
   of nast.kvNull:   kNull(anno)
   of nast.kvBigInt: kStr("<bigint>", anno)   # generator never emits these yet
 
-proc mapNode(n: nast.KdlNode, ig: Interner): model.KNode =
-  result.name = ig.lookup(n.name)
-  result.typeAnno = annoOf(n.typeAnnotation, ig)
+proc mapNode(n: nast.KdlNode): model.KNode =
+  result.name = n.name
+  result.typeAnno = annoOf(n.typeAnnotation)
   for e in n.entries:
     case e.kind
-    of nast.keArgument: result.entries.add arg(mapVal(e.argValue, ig))
-    of nast.keProperty: result.entries.add prop(ig.lookup(e.propName),
-                                                 mapVal(e.propValue, ig))
+    of nast.keArgument: result.entries.add arg(mapVal(e.argValue))
+    of nast.keProperty: result.entries.add prop(e.propKey, mapVal(e.propValue))
   for c in n.children:
-    result.children.add mapNode(c, ig)
+    result.children.add mapNode(c)
 
 proc mapDoc(d: nast.KdlDoc): model.KDoc =
-  for n in d.nodes: result.add mapNode(n, d.interner)
+  for n in d.nodes: result.add mapNode(n)
 
 suite "conformance — nkdl adapter (clean-room corpus vs nkdl)":
 

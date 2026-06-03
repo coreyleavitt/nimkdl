@@ -8,8 +8,8 @@
 
 import std/[os, strutils, unicode, unittest]
 
-import ../src/ast
 import ../src/lexer
+import ../src/node
 import ../src/parser
 import ../src/spans
 

@@ -3,8 +3,10 @@
 
 import std/[strutils, unittest]
 
-import ../src/ast
-import ../src/intern
+import std/options
+
+import ../src/node
+import ../src/node_emit
 import ../src/parser
 import ../src/spans
 
@@ -24,10 +26,6 @@ template parseErrCheck(src: string, expectedCode: ParseErrorCode) =
   if res.isErr:
     check res.getErr.code == expectedCode
 
-# Helper: resolve a node's name as a string
-proc nameOf(doc: KdlDoc, n: KdlNode): string =
-  doc.interner.lookup(n.name)
-
 suite "parser: empty + trivial":
   test "empty source produces empty doc":
     parseOk(""):
@@ -40,13 +38,13 @@ suite "parser: empty + trivial":
   test "single bare node":
     parseOk("rule"):
       check doc.nodes.len == 1
-      check nameOf(doc, doc.nodes[0]) == "rule"
+      check (doc.nodes[0]).name == "rule"
 
   test "two nodes separated by newline":
     parseOk("a\nb"):
       check doc.nodes.len == 2
-      check nameOf(doc, doc.nodes[0]) == "a"
-      check nameOf(doc, doc.nodes[1]) == "b"
+      check (doc.nodes[0]).name == "a"
+      check (doc.nodes[1]).name == "b"
 
   test "two nodes separated by semicolon":
     parseOk("a; b"):
@@ -58,7 +56,7 @@ suite "parser: empty + trivial":
     # line after the document. Equivalent to `node` followed by EOL.
     parseOk("node \\"):
       check doc.nodes.len == 1
-      check nameOf(doc, doc.nodes[0]) == "node"
+      check (doc.nodes[0]).name == "node"
       check doc.nodes[0].entries.len == 0
 
 suite "parser: arguments":
@@ -86,7 +84,7 @@ suite "parser: arguments":
     check argStr("n \"\"\"\n  a\n  b\n  \"\"\"") == "a\nb" # multiline → payload
     # A node NAME that is a quoted string also resolves correctly.
     parseOk("\"quoted name\" 1"):
-      check doc.interner.lookup(doc.nodes[0].name) == "quoted name"
+      check doc.nodes[0].name == "quoted name"
 
   test "node with number argument":
     parseOk("limit 42"):
@@ -147,8 +145,8 @@ suite "parser: arguments":
     # interning preserves end-to-end identifier resolution.
     parseOk("café-au-lait enabled=#true"):
       let n = doc.nodes[0]
-      check nameOf(doc, n) == "café-au-lait"
-      check doc.interner.lookup(n.entries[0].propName) == "enabled"
+      check (n).name == "café-au-lait"
+      check n.entries[0].propKey == "enabled"
     parseErrCheck("true", peLexReservedKeyword)
 
   test "keywords decode to values":
@@ -172,7 +170,7 @@ suite "parser: properties":
       let n = doc.nodes[0]
       check n.entries.len == 1
       check n.entries[0].kind == keProperty
-      check doc.interner.lookup(n.entries[0].propName) == "enabled"
+      check n.entries[0].propKey == "enabled"
       check n.entries[0].propValue.boolVal
 
   test "multiple properties in source order":
@@ -180,7 +178,7 @@ suite "parser: properties":
       let n = doc.nodes[0]
       var keys: seq[string] = @[]
       for (k, _) in n.properties:
-        keys.add(doc.interner.lookup(k))
+        keys.add(k)
       check keys == @["a", "b", "c"]
 
   test "mixed args and props":
@@ -195,46 +193,46 @@ suite "parser: children":
   test "single child":
     parseOk("rule {\n  action \"inject\"\n}"):
       let n = doc.nodes[0]
-      check n.children.len == 1
-      check nameOf(doc, n.children[0]) == "action"
+      check n.childNodes.len == 1
+      check (n.childNodes[0]).name == "action"
 
   test "multiple children":
     parseOk("rule {\n  a\n  b\n  c\n}"):
       let n = doc.nodes[0]
-      check n.children.len == 3
+      check n.childNodes.len == 3
 
   test "nested children":
     parseOk("outer {\n  middle {\n    inner\n  }\n}"):
       check doc.nodes.len == 1
-      check doc.nodes[0].children.len == 1
-      check doc.nodes[0].children[0].children.len == 1
+      check doc.nodes[0].childNodes.len == 1
+      check doc.nodes[0].childNodes[0].childNodes.len == 1
 
   test "empty children block":
     parseOk("rule {}"):
-      check doc.nodes[0].children.len == 0
+      check doc.nodes[0].childNodes.len == 0
 
 suite "parser: slashdash":
   test "slashdash on node skips it":
     parseOk("/- skipped\nkept"):
       check doc.nodes.len == 1
-      check nameOf(doc, doc.nodes[0]) == "kept"
+      check (doc.nodes[0]).name == "kept"
 
   test "slashdash on entry skips just the entry":
     parseOk("rule /- skipped=1 kept=2"):
       let n = doc.nodes[0]
       check n.entries.len == 1
-      check doc.interner.lookup(n.entries[0].propName) == "kept"
+      check n.entries[0].propKey == "kept"
 
   test "slashdash on children block skips block":
     # Slashdashed children block, then a sibling node — no entries may
     # follow the block (spec corpus slashdash_child_block_before_entry).
     parseOk("rule /- {\n  hidden\n}\nsibling visible=#true"):
       let n = doc.nodes[0]
-      check nameOf(doc, n) == "rule"
-      check n.children.len == 0
+      check (n).name == "rule"
+      check n.childNodes.len == 0
       check n.entries.len == 0
       check doc.nodes.len == 2
-      check nameOf(doc, doc.nodes[1]) == "sibling"
+      check (doc.nodes[1]).name == "sibling"
 
   test "multiple slashdashed children blocks around a real one":
     # Spec corpus slashdash_multiple_child_blocks.kdl: entries followed
@@ -242,10 +240,10 @@ suite "parser: slashdash":
     # block's children survive.
     parseOk("node foo /-{\n    one\n} /-{\n    two\n} {\n    three\n} /-{\n    four\n}"):
       let n = doc.nodes[0]
-      check nameOf(doc, n) == "node"
+      check (n).name == "node"
       check n.entries.len == 1  # only foo
-      check n.children.len == 1
-      check nameOf(doc, n.children[0]) == "three"
+      check n.childNodes.len == 1
+      check (n.childNodes[0]).name == "three"
 
   test "slashdashed children block may abut preceding entry (no ws)":
     # Spec corpus zero_space_before_slashdash_children.kdl: `/-` (and the
@@ -253,42 +251,42 @@ suite "parser: slashdash":
     parseOk("node \"string\"/-{}"):
       check doc.nodes.len == 1
       check doc.nodes[0].entries.len == 1
-      check doc.nodes[0].children.len == 0
+      check doc.nodes[0].childNodes.len == 0
 
   test "slashdashed children block may abut preceding real children":
     parseOk("node \"string\" {}/-{}"):
       check doc.nodes.len == 1
       check doc.nodes[0].entries.len == 1
-      check doc.nodes[0].children.len == 0  # real {} was empty
+      check doc.nodes[0].childNodes.len == 0  # real {} was empty
 
 suite "parser: Unicode bare-ident charset (slice-7, Category A)":
   test "comma is valid in bare ident":
     parseOk("foo,bar weeeee"):
-      check nameOf(doc, doc.nodes[0]) == "foo,bar"
+      check (doc.nodes[0]).name == "foo,bar"
       check doc.nodes[0].entries.len == 1
 
   test "unusual ASCII punctuation is valid in bare ident":
     parseOk("foo123~!@$%^&*.:'|?+<>,`-_ weeeee"):
-      check nameOf(doc, doc.nodes[0]) == "foo123~!@$%^&*.:'|?+<>,`-_"
+      check (doc.nodes[0]).name == "foo123~!@$%^&*.:'|?+<>,`-_"
       check doc.nodes[0].entries.len == 1
 
   test "non-ASCII Unicode codepoints are valid bare-ident chars":
     # ノード is U+30CE U+30FC U+30C9 (3 katakana).
     parseOk("\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89 arg"):
-      check nameOf(doc, doc.nodes[0]) == "\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89"
+      check (doc.nodes[0]).name == "\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89"
 
   test "U+3000 IDEOGRAPHIC SPACE separates idents like whitespace":
     # `ノード　arg` → node `ノード` with arg `arg`.
     parseOk("\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89\xE3\x80\x80 arg"):
-      check nameOf(doc, doc.nodes[0]) == "\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89"
+      check (doc.nodes[0]).name == "\xE3\x83\x8E\xE3\x83\xBC\xE3\x83\x89"
       check doc.nodes[0].entries.len == 1
 
   test "VT (U+000B) separates nodes as a newline":
     # Spec corpus vertical_tab_whitespace.kdl.
     parseOk("node arg\vnode2 arg2"):
       check doc.nodes.len == 2
-      check nameOf(doc, doc.nodes[0]) == "node"
-      check nameOf(doc, doc.nodes[1]) == "node2"
+      check (doc.nodes[0]).name == "node"
+      check (doc.nodes[1]).name == "node2"
 
 suite "parser: token adjacency (G-token-adjacency)":
   test "node name directly abutted by string entry is rejected":
@@ -315,17 +313,17 @@ suite "parser: type annotations":
   test "type annotation on node":
     parseOk("(version)rule"):
       let n = doc.nodes[0]
-      check doc.interner.lookup(n.typeAnnotation) == "version"
+      check n.typeAnnotation.get == "version"
 
   test "type annotation on value":
     parseOk("size (u32)1024"):
       let v = doc.nodes[0].entries[0].argValue
-      check doc.interner.lookup(v.typeAnnotation) == "u32"
+      check v.typeAnnotation.get == "u32"
 
   test "type annotation on property value":
     parseOk("config max=(seconds)30"):
       let v = doc.nodes[0].entries[0].propValue
-      check doc.interner.lookup(v.typeAnnotation) == "seconds"
+      check v.typeAnnotation.get == "seconds"
 
 suite "parser: realistic":
   test "rule fragment":
@@ -340,15 +338,15 @@ rule "compaction" {
     parseOk(src):
       check doc.nodes.len == 1
       let rule = doc.nodes[0]
-      check nameOf(doc, rule) == "rule"
+      check (rule).name == "rule"
       check rule.entries[0].argValue.strVal == "compaction"
-      check rule.children.len == 2
-      check nameOf(doc, rule.children[0]) == "enabled"
-      let act = rule.children[1]
-      check nameOf(doc, act) == "action"
+      check rule.childNodes.len == 2
+      check (rule.childNodes[0]).name == "enabled"
+      let act = rule.childNodes[1]
+      check (act).name == "action"
       check act.entries[0].argValue.strVal == "inject"
-      check act.children.len == 1
-      check act.children[0].entries[0].argValue.strVal ==
+      check act.childNodes.len == 1
+      check act.childNodes[0].entries[0].argValue.strVal ==
             "context pressure rising"
 
 suite "parser: error reporting":
@@ -418,11 +416,9 @@ suite "parser: number literal edges (C1, C2)":
       check doc.nodes[0].entries[0].argValue.floatVal == 1.5e10
 
 suite "parser: round trip preserves structure":
-  test "structural identity check via repr":
-    # We don't have the encoder yet (#524); for now just verify that
-    # parse → repr renders nontrivial output rather than crashing.
+  test "structural identity check via encode":
     parseOk("a 1 b=2 { c }"):
-      let s = $doc
+      let s = encode(doc)
       check "a" in s
       check "1" in s
       check "b=2" in s

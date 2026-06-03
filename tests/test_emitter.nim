@@ -4,10 +4,11 @@
 
 import std/unittest
 
-import ../src/ast
+import std/options
+
 import ../src/cursor
 import ../src/emitter
-import ../src/intern
+import ../src/value
 import ../src/lexer
 import ../src/spans
 
@@ -18,7 +19,6 @@ type CursorFixture = ref object
   cursor*: StringCursor
 
 proc mkCursor(src: string): CursorFixture =
-  var interner = initInterner()
   var sref: ref TokenStream
   new(sref)
   sref[] = lex(src)
@@ -287,76 +287,66 @@ suite "emitter — A8: typed value primitives (string/float/bool/null)":
     e.pushNodeEnd()
     check e.finish() == "cfg name=\"alpha\" enabled=#true scale=2.5 fallback=#null\n"
 
-suite "emitter — A9: KdlValue convenience overload":
+suite "emitter — A9: self-contained KdlValue convenience overload":
 
-  test "pushArg dispatches kvInt":
+  test "pushArgV dispatches kvInt":
     var e = newBufferEmitter()
-    var interner = initInterner()
     e.pushNodeBegin("n")
-    e.pushArg(newIntValue(42), interner)
+    e.pushArgV(newKdlInt(42))
     e.pushNodeEnd()
     check e.finish() == "n 42\n"
 
-  test "pushArg dispatches kvString":
+  test "pushArgV dispatches kvString":
     var e = newBufferEmitter()
-    var interner = initInterner()
     e.pushNodeBegin("n")
-    e.pushArg(newStringValue("hi"), interner)
+    e.pushArgV(newKdlString("hi"))
     e.pushNodeEnd()
     check e.finish() == "n \"hi\"\n"
 
-  test "pushArg dispatches kvFloat":
+  test "pushArgV dispatches kvFloat":
     var e = newBufferEmitter()
-    var interner = initInterner()
     e.pushNodeBegin("n")
-    e.pushArg(newFloatValue(1.5), interner)
+    e.pushArgV(newKdlFloat(1.5))
     e.pushNodeEnd()
     check e.finish() == "n 1.5\n"
 
-  test "pushArg dispatches kvBool":
+  test "pushArgV dispatches kvBool":
     var e = newBufferEmitter()
-    var interner = initInterner()
     e.pushNodeBegin("n")
-    e.pushArg(newBoolValue(true), interner)
+    e.pushArgV(newKdlBool(true))
     e.pushNodeEnd()
     check e.finish() == "n #true\n"
 
-  test "pushArg dispatches kvNull":
+  test "pushArgV dispatches kvNull":
     var e = newBufferEmitter()
-    var interner = initInterner()
     e.pushNodeBegin("n")
-    e.pushArg(newNullValue(), interner)
+    e.pushArgV(newKdlNull())
     e.pushNodeEnd()
     check e.finish() == "n #null\n"
 
-  test "pushArg dispatches kvBigInt":
+  test "pushArgV dispatches kvBigInt":
     var e = newBufferEmitter()
-    var interner = initInterner()
     e.pushNodeBegin("n")
     # uint128 representation of 2^64 = 18446744073709551616
-    e.pushArg(newBigIntValue(hi = 1, lo = 0, negative = false), interner)
+    e.pushArgV(newKdlBigInt(bigHi = 1, bigLo = 0, bigNegative = false))
     e.pushNodeEnd()
     check e.finish() == "n 18446744073709551616\n"
 
-  test "pushArg resolves typeAnnotation via interner":
+  test "pushArgV renders Option[string] typeAnnotation":
     var e = newBufferEmitter()
-    var interner = initInterner()
-    var v = newIntValue(42)
-    let tag = interner.intern("u8")
-    v.typeAnnotation = tag
+    var v = newKdlInt(42)
+    v.typeAnnotation = some("u8")
     e.pushNodeBegin("n")
-    e.pushArg(v, interner)
+    e.pushArgV(v)
     e.pushNodeEnd()
     check e.finish() == "n (u8)42\n"
 
-  test "pushProp dispatches and resolves anno":
+  test "pushPropV dispatches and renders anno":
     var e = newBufferEmitter()
-    var interner = initInterner()
-    var v = newStringValue("/etc")
-    let tag = interner.intern("url")
-    v.typeAnnotation = tag
+    var v = newKdlString("/etc")
+    v.typeAnnotation = some("url")
     e.pushNodeBegin("c")
-    e.pushProp("path", v, interner)
+    e.pushPropV("path", v)
     e.pushNodeEnd()
     check e.finish() == "c path=(url)\"/etc\"\n"
 
