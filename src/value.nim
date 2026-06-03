@@ -72,6 +72,16 @@ func newKdlBool*(b: bool): KdlValue =
 func newKdlNull*(): KdlValue =
   KdlValue(kind: kvNull, typeAnnotation: none(string))
 
+func withAnno*(v: KdlValue, anno: string): KdlValue =
+  ## Return `v` with `anno` layered onto its `typeAnnotation` when `anno` is
+  ## non-empty; an empty `anno` leaves the value's own annotation untouched.
+  ## Used by the kdlScalar encode path to apply a `{.kdlReserved.}` tag to the
+  ## value the user's `kdlEncodeValue` hook returns (the empty-string default
+  ## means "no tag", so a hook-supplied annotation survives).
+  result = v
+  if anno.len > 0:
+    result.typeAnnotation = some(anno)
+
 func newArgument*(v: KdlValue): KdlEntry =
   KdlEntry(kind: keArgument, argValue: v)
 

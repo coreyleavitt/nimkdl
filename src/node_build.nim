@@ -15,44 +15,10 @@ import ./value
 import ./node
 import ./cursor
 import ./lexer
-import ./numlit
 import ./token_text
 import ./reserved
 import ./spans
 export node, value, spans  # spans: Result/ParseError accessors used on parseNodes' result
-
-proc buildValueFromTok(tok: Token, stream: TokenStream, source: string):
-    Result[KdlValue, ParseError] {.noSideEffect.} =
-  ## Token → self-contained KdlValue. Mirrors doc_build.buildValueFromTok.
-  case tok.kind
-  of tkString, tkRawString:
-    ok[KdlValue, ParseError](newKdlString(tokenText(stream, tok)))
-  of tkKeyword:
-    let v = case tok.keyword
-      of kwTrue:   newKdlBool(true)
-      of kwFalse:  newKdlBool(false)
-      of kwNull:   newKdlNull()
-      of kwInf:    newKdlFloat(Inf)
-      of kwNegInf: newKdlFloat(NegInf)
-      of kwNan:    newKdlFloat(NaN)
-    ok[KdlValue, ParseError](v)
-  of tkNumber:
-    if looksLikeFloat(numberText(source, tok.span), tok.numBase):
-      let fRes = decodeFloatFromToken(numberText(source, tok.span), tok.span)
-      if fRes.isErr: return err[KdlValue, ParseError](fRes.getErr)
-      ok[KdlValue, ParseError](newKdlFloat(fRes.get))
-    else:
-      let iRes = decodeIntPromoting(numberText(source, tok.span), tok.numBase, tok.span)
-      if iRes.isErr: return err[KdlValue, ParseError](iRes.getErr)
-      let d = iRes.get
-      let v = if d.fits64: newKdlInt(d.intVal)
-              else: newKdlBigInt(d.bigHi, d.bigLo, d.negative)
-      ok[KdlValue, ParseError](v)
-  of tkIdent:
-    ok[KdlValue, ParseError](newKdlString(tokenText(stream, tok)))
-  else:
-    err[KdlValue, ParseError](initError(peParseExpected, tok.span,
-      "unsupported value token kind"))
 
 proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
     Result[KdlDoc, ParseError] {.noSideEffect.} =
@@ -82,7 +48,7 @@ proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
                         entries: @[], childNodes: @[]))
     of ceArg:
       let tok = c.stream[].tokens[ev.argTok]
-      let vRes = buildValueFromTok(tok, c.stream[], c.source)
+      let vRes = tokenToKdlValue(tok, c.stream[], c.source)
       if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
       var val = vRes.get
       if ev.argAnnoTok != -1:
@@ -95,7 +61,7 @@ proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
     of ceProp:
       let key = tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source)
       let valTok = c.stream[].tokens[ev.propValueTok]
-      let vRes = buildValueFromTok(valTok, c.stream[], c.source)
+      let vRes = tokenToKdlValue(valTok, c.stream[], c.source)
       if vRes.isErr: return err[KdlDoc, ParseError](vRes.getErr)
       var val = vRes.get
       if ev.propAnnoTok != -1:
@@ -170,7 +136,7 @@ proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
                         entries: @[], childNodes: @[]))
     of ceArg:
       let tok = c.stream[].tokens[ev.argTok]
-      let vRes = buildValueFromTok(tok, c.stream[], c.source)
+      let vRes = tokenToKdlValue(tok, c.stream[], c.source)
       if vRes.isErr:
         result.errors.add(vRes.getErr); continue
       var val = vRes.get
@@ -185,7 +151,7 @@ proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
     of ceProp:
       let key = tokenAsString(c.stream[].tokens[ev.propKeyTok], c.stream[], c.source)
       let valTok = c.stream[].tokens[ev.propValueTok]
-      let vRes = buildValueFromTok(valTok, c.stream[], c.source)
+      let vRes = tokenToKdlValue(valTok, c.stream[], c.source)
       if vRes.isErr:
         result.errors.add(vRes.getErr); continue
       var val = vRes.get

@@ -142,10 +142,13 @@ suite "kdl: block — kdlScalar custom hook round-trip (#39 item3)":
   type RGB = object
     r, g, b: uint8
 
-  proc kdlEncodeValue(c: RGB): string =
-    "#" & toHex(c.r.int, 2) & toHex(c.g.int, 2) & toHex(c.b.int, 2)
+  proc kdlEncodeValue(c: RGB): KdlValue =
+    newKdlString("#" & toHex(c.r.int, 2) & toHex(c.g.int, 2) & toHex(c.b.int, 2))
 
-  proc kdlDecodeValue(s: string, T: typedesc[RGB]): Result[RGB, string] =
+  proc kdlDecodeValue(val: KdlValue, T: typedesc[RGB]): Result[RGB, string] =
+    if val.kind != kvString:
+      return err[RGB, string]("expected #rrggbb string")
+    let s = val.strVal
     if s.len == 7 and s[0] == '#':
       try:
         ok[RGB, string](RGB(r: uint8(parseHexInt(s[1..2])),
@@ -171,8 +174,11 @@ suite "kdl: block — kdlScalar + kdlArg positional override (#39 item3)":
   type Hue = object
     deg: uint16
 
-  proc kdlEncodeValue(h: Hue): string = $h.deg & "deg"
-  proc kdlDecodeValue(s: string, T: typedesc[Hue]): Result[Hue, string] =
+  proc kdlEncodeValue(h: Hue): KdlValue = newKdlString($h.deg & "deg")
+  proc kdlDecodeValue(val: KdlValue, T: typedesc[Hue]): Result[Hue, string] =
+    if val.kind != kvString:
+      return err[Hue, string]("expected <n>deg string")
+    let s = val.strVal
     if s.endsWith("deg"):
       try: ok[Hue, string](Hue(deg: uint16(parseInt(s[0 ..< s.len-3]))))
       except CatchableError: err[Hue, string]("bad hue")

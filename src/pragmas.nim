@@ -22,12 +22,18 @@ template kdlSkip*() {.pragma.}
 template kdlScalar*() {.pragma.}
   ## Field-level: encode/decode this field as a single KDL scalar via the
   ## user-provided hook pair, instead of the built-in primitive/child
-  ## dispatch. The user defines, in scope before the type's `kdl:` block:
-  ##   proc kdlEncodeValue(x: T): string
-  ##   proc kdlDecodeValue(s: string; T: typedesc): Result[T, string]
-  ## The macro owns the wire framing (string scalar) + lifts a decode
-  ## error string into a `ParseError` with the value's span. Defaults to a
-  ## property (key = field name); combine with `{.kdlArg.}` for positional.
+  ## dispatch. The hooks exchange the typed `KdlValue` interchange form
+  ## (rfc §8) — so a scalar whose KDL value is a number or bool decodes too,
+  ## not just strings. The user defines, in scope before the type's `kdl:`
+  ## block:
+  ##   proc kdlEncodeValue(v: T): KdlValue
+  ##   proc kdlDecodeValue(val: KdlValue; T: typedesc): Result[T, string]
+  ## `kdlDecodeValue` pattern-matches on `val.kind`; `kdlEncodeValue` returns
+  ## a `KdlValue` (e.g. `newKdlString(...)` / `newKdlInt(...)`). The macro
+  ## owns the wire framing (it builds the `KdlValue` from the token and pushes
+  ## the returned one) + lifts a decode error string into a `ParseError` with
+  ## the value's span. Defaults to a property (key = field name); combine with
+  ## `{.kdlArg.}` for positional.
 
 template kdlRename*(name: string) {.pragma.}
   ## Field-level: KDL name differs from Nim field name.

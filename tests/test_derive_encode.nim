@@ -510,3 +510,43 @@ suite "derive_encode — S0c: no-pragma field inference (mirrors decode classify
     var e = newBufferEmitter()
     kdlEncode(l, e)
     check e.finish() == "library {\n    section \"a\"\n    section \"b\"\n}\n"
+
+import std/strutils
+
+suite "derive_encode — kdlScalar custom hook (rfc §8 KdlValue interchange)":
+
+  type Color = object
+    r, g, b: uint8
+
+  proc kdlEncodeValue(c: Color): KdlValue =
+    newKdlString("#" & toLowerAscii(toHex(c.r.int, 2) & toHex(c.g.int, 2) &
+                                    toHex(c.b.int, 2)))
+
+  type Paint {.kdlNode: "paint".} = object
+    color {.kdlScalar.}: Color
+
+  deriveEncode(Paint)
+
+  test "kdlScalar prop encodes via hook as a string value":
+    var p = Paint(color: Color(r: 255, g: 128, b: 0))
+    var e = newBufferEmitter()
+    kdlEncode(p, e)
+    check e.finish() == "paint color=\"#ff8000\"\n"
+
+  # A kdlEncodeValue returning a NUMERIC KdlValue emits a bare number — the
+  # value-typed push (not pushArgString) is what makes typed scalars possible.
+  type Duration = object
+    millis: int64
+
+  proc kdlEncodeValue(d: Duration): KdlValue = newKdlInt(d.millis)
+
+  type Timeout {.kdlNode: "timeout".} = object
+    after {.kdlScalar.}: Duration
+
+  deriveEncode(Timeout)
+
+  test "kdlScalar hook returning kvInt emits a bare integer":
+    var t = Timeout(after: Duration(millis: 500))
+    var e = newBufferEmitter()
+    kdlEncode(t, e)
+    check e.finish() == "timeout after=500\n"

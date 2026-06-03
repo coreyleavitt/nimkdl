@@ -722,7 +722,10 @@ suite "derive_decode — kdlScalar custom hook (#39 item3)":
   type Color = object
     r, g, b: uint8
 
-  proc kdlDecodeValue(s: string, T: typedesc[Color]): Result[Color, string] =
+  proc kdlDecodeValue(val: KdlValue, T: typedesc[Color]): Result[Color, string] =
+    if val.kind != kvString:
+      return err[Color, string]("expected #rrggbb string")
+    let s = val.strVal
     if s.len == 7 and s[0] == '#':
       try:
         ok[Color, string](Color(r: uint8(parseHexInt(s[1..2])),
@@ -749,4 +752,35 @@ suite "derive_decode — kdlScalar custom hook (#39 item3)":
     let f = mkCursor("paint color=\"nope\"")
     var p: Paint
     let r = kdlDecode(p, f.cursor)
+    check r.isErr
+
+suite "derive_decode — kdlScalar typed numeric input (rfc §8)":
+
+  # The KdlValue interchange form lets a kdlScalar field decode from a KDL
+  # NUMBER — impossible under the old string-only hook, which rejected any
+  # non-string token before the hook ran.
+  type Duration = object
+    millis: int64
+
+  proc kdlDecodeValue(val: KdlValue, T: typedesc[Duration]): Result[Duration, string] =
+    case val.kind
+    of kvInt:    ok[Duration, string](Duration(millis: val.intVal))
+    else:        err[Duration, string]("expected integer milliseconds")
+
+  type Timeout {.kdlNode: "timeout".} = object
+    after {.kdlScalar.}: Duration
+
+  deriveDecode(Timeout)
+
+  test "kdlScalar prop decodes from a bare integer (typed input)":
+    let f = mkCursor("timeout after=500")
+    var t: Timeout
+    let r = kdlDecode(t, f.cursor)
+    check r.isOk
+    check t.after.millis == 500
+
+  test "wrong scalar kind surfaces as decode error":
+    let f = mkCursor("timeout after=\"nope\"")
+    var t: Timeout
+    let r = kdlDecode(t, f.cursor)
     check r.isErr

@@ -33,6 +33,8 @@ import std/macros
 
 import ./derive_common  # shared macro helpers (rfc-derive-vocabulary.md S0a)
 import ./emitter
+import ./value           # withAnno + KdlValue — kdlScalar encode interchange (rfc §8)
+export value             # emitted kdlEncode references withAnno/pushArgV in caller scope
 # Pragma identifiers (kdlNode / kdlArg / kdlProp / kdlChild / kdlSkip /
 # kdlRename / kdlReserved) live in src/pragmas.nim. We don't import it
 # here — the macro only LOOKS at pragmas by name as strings in the AST,
@@ -51,10 +53,12 @@ proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
   ## inlined at macro time so the emitter's bareword/quoted decider
   ## runs once per push call site, not per encode call.
   if scalar:
-    # kdlScalar: render via the user's `kdlEncodeValue(x): string` hook and
-    # push as a string scalar (symmetric with the decode hook).
+    # kdlScalar: the user's `kdlEncodeValue(x): KdlValue` hook returns a typed
+    # interchange value (rfc §8) — pushed via the value-typed `pushArgV`, not
+    # handed the live emitter (a framing-corruption footgun). A non-empty
+    # `annoLit` (kdlReserved tag) is layered onto the value's typeAnnotation.
     pushBody.add quote do:
-      `eSym`.pushArgString(kdlEncodeValue(`valueExpr`), `annoLit`)
+      `eSym`.pushArgV(withAnno(kdlEncodeValue(`valueExpr`), `annoLit`))
     return
   case baseTypeName(fieldType)
   of "string":
@@ -103,7 +107,7 @@ proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
                         fieldType, annoLit: NimNode, scalar: bool = false) =
   if scalar:
     pushBody.add quote do:
-      `eSym`.pushPropString(`keyLit`, kdlEncodeValue(`valueExpr`), `annoLit`)
+      `eSym`.pushPropV(`keyLit`, withAnno(kdlEncodeValue(`valueExpr`), `annoLit`))
     return
   case baseTypeName(fieldType)
   of "string":

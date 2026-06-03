@@ -101,24 +101,23 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
   ## prop-by-key dispatch. For Option[T], decode the inner T and
   ## wrap the result in `some(...)`. For plain T, assign directly.
   if scalar:
-    # kdlScalar: read the token as a string and route through the user's
-    # `kdlDecodeValue(s, T): Result[T, string]` hook. The macro owns the
-    # ParseError construction — the hook's error string is lifted with the
-    # value's span so users never touch span/ParseErrorCode plumbing.
+    # kdlScalar: lift the token to its typed `KdlValue` interchange form and
+    # route through the user's `kdlDecodeValue(val, T): Result[T, string]`
+    # hook (rfc §8 — typed scalar input: numbers/bools, not just strings).
+    # The macro owns the ParseError construction — the hook's error string is
+    # lifted with the value's span so users never touch span/ParseErrorCode
+    # plumbing. A pre-hook lift failure (numeric overflow) carries its own
+    # span-accurate ParseError straight through.
     return quote do:
       let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
-      case tok.kind
-      of tkString, tkRawString, tkIdent:
-        let s = tokenAsString(tok, `cSym`.stream[], `cSym`.source)
-        let hookRes = kdlDecodeValue(s, typeof(`targetIdent`))
-        if hookRes.isErr:
-          return err[void, ParseError](
-            initError(peTypeMismatch, tok.span, hookRes.getErr))
-        `targetIdent` = hookRes.get
-      else:
+      let kvRes = tokenToKdlValue(tok, `cSym`.stream[], `cSym`.source)
+      if kvRes.isErr:
+        return err[void, ParseError](kvRes.getErr)
+      let hookRes = kdlDecodeValue(kvRes.get, typeof(`targetIdent`))
+      if hookRes.isErr:
         return err[void, ParseError](
-          initError(peTypeMismatch, tok.span,
-                    "expected string scalar for kdlScalar field"))
+          initError(peTypeMismatch, tok.span, hookRes.getErr))
+      `targetIdent` = hookRes.get
   if isOptionType(fieldType):
     let inner = innerOfOption(fieldType)
     let tmpSym = genSym(nskVar, "decoded")
