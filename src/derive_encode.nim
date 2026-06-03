@@ -157,6 +157,19 @@ proc isEnumType(t: NimNode): bool =
       discard
   false
 
+proc baseTypeName(t: NimNode): string =
+  ## Resolve a transparent type alias (`type Port = int`) to its
+  ## underlying primitive name so the push dispatch matches on `int`, not
+  ## `Port` (#39 item 5). Mirrors `derive_decode.baseTypeName`. distinct
+  ## types yield `nnkDistinctTy` and fall through to the enum/error path.
+  var cur = t
+  for _ in 0 ..< 16:
+    if cur.kind != nnkSym: break
+    let impl = cur.getTypeImpl
+    if impl.kind == nnkSym and not impl.eqIdent($cur): cur = impl
+    else: break
+  $cur
+
 proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
                        fieldType: NimNode, annoLit: NimNode) =
   ## Inner of the arg-push dispatch: emit the typed push for an
@@ -164,7 +177,7 @@ proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
   ## node ("" for "no annotation", non-empty for kdlReserved tags) —
   ## inlined at macro time so the emitter's bareword/quoted decider
   ## runs once per push call site, not per encode call.
-  case $fieldType
+  case baseTypeName(fieldType)
   of "string":
     pushBody.add quote do:
       `eSym`.pushArgString(`valueExpr`, `annoLit`)
@@ -208,7 +221,7 @@ proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
 
 proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
                         fieldType, annoLit: NimNode) =
-  case $fieldType
+  case baseTypeName(fieldType)
   of "string":
     pushBody.add quote do:
       `eSym`.pushPropString(`keyLit`, `valueExpr`, `annoLit`)

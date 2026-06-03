@@ -11,11 +11,14 @@ byte-exact preserve 243/0); gated `NKDL_PROPTEST=1 nimble test` EXIT=0, 710 OK**
 full property tier rebuilt onto the new core).
 **Done post-cutover:** property-suite migration (P1–P12); §8.7 — name-preserving slot
 inference, `uint`, `eqIdent`, >64-field guard, field-path errors; stable
-`ParseErrorCode`. `encode(doc)` defaults canonical (settled).
-**Remaining (finicky §8.7 polish, diminishing returns):** `ckOption` (Option[object]
-child — `nodeNameOf` needs inner→sym resolution), `ckRef`, `kdlScalar` + mixin
-`kdlDecodeValue`, leaf-field path enrichment, `$fieldType`→`getTypeImpl` dispatch, and
-partial-splice preserve under mutation.
+`ParseErrorCode`. `encode(doc)` defaults canonical (settled). **§8.7 follow-ons (tracked
+in #39, landed on `core-rebuild`):** `ckRef` (ref object as user-facing decode/encode
+type — `cbded0b`, closes #9); leaf-field-path enrichment (`outer.inner.port` —
+`22afb3c`); type-alias→base-primitive dispatch (`baseTypeName`, decode+encode — closes
+#39 item 5).
+**Remaining (finicky §8.7 polish, #39):** `ckOption` (Option[object] child —
+`nodeNameOf` needs inner→sym resolution, item 1), `kdlScalar` + mixin `kdlDecodeValue`
+(item 3), partial-splice preserve under mutation (item 6).
 **Date:** 2026-06-03 (R3 review folded)
 **Supersedes:** the *substrate* sections of `rfc-api-v0.2-hardening.md` (F.0–F.6,
 §2.5 C0-x, the `ownerDocument`/`adopt`/ref-vs-arena material). That RFC's **API

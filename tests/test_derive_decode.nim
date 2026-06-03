@@ -671,3 +671,21 @@ suite "derive_decode — ckRef: ref object as child field (#9/#39)":
     check p.many.len == 2
     check p.many[0].tag == "a"
     check p.many[1].tag == "b"
+
+suite "derive_decode — type aliases resolve to base primitive (#39 item 5)":
+
+  type Port = int
+  type Name = string
+  type AliasHost {.kdlNode: "ahost".} = object
+    title {.kdlArg.}: Name
+    port {.kdlProp.}: Port
+
+  deriveDecode(AliasHost)
+
+  test "aliased arg + prop decode through the underlying primitive":
+    let f = mkCursor("ahost \"web\" port=8")
+    var h: AliasHost
+    let r = kdlDecode(h, f.cursor)
+    check r.isOk
+    check h.title == "web"
+    check h.port == 8

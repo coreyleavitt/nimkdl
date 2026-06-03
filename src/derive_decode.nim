@@ -191,6 +191,21 @@ proc enrichLeafErrors(n: NimNode, fnLit: NimNode) =
   for i in 0 ..< n.len:
     enrichLeafErrors(n[i], fnLit)
 
+proc baseTypeName(t: NimNode): string =
+  ## Resolve a transparent type alias (`type Port = int`) to its
+  ## underlying primitive name, so the value-decode dispatch matches on
+  ## `int` rather than `Port` (#39 item 5). `getTypeImpl` of an alias sym
+  ## yields the underlying sym; distinct types yield `nnkDistinctTy` and
+  ## are left as-is (handled — or rejected — by the caller). The bounded
+  ## loop guards against pathological alias chains.
+  var cur = t
+  for _ in 0 ..< 16:
+    if cur.kind != nnkSym: break
+    let impl = cur.getTypeImpl
+    if impl.kind == nnkSym and not impl.eqIdent($cur): cur = impl
+    else: break
+  $cur
+
 proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
                      fieldType: NimNode, cSym: NimNode): NimNode =
   ## Emit the typed decode of a token at `tokIndexExpr` into
@@ -233,7 +248,7 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
         return err[void, ParseError](
           initError(peTypeMismatch, `tokSym`.span,
                     "expected string value for enum field"))
-  case $fieldType
+  case baseTypeName(fieldType)
   of "string":
     return quote do:
       let tok = `cSym`.stream[].tokens[`tokIndexExpr`]

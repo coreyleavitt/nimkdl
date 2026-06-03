@@ -448,3 +448,19 @@ suite "deriveEncode — ckRef: ref object as the user-facing type (#9)":
     var e = newBufferEmitter()
     kdlEncode(s, e)
     check e.finish() == "rsvc \"web\" port=8\n"
+
+suite "deriveEncode — type aliases resolve to base primitive (#39 item 5)":
+
+  type Port = int
+  type Name = string
+  type AliasHost {.kdlNode: "ahost".} = object
+    title {.kdlArg.}: Name
+    port {.kdlProp.}: Port
+
+  deriveEncode(AliasHost)
+
+  test "aliased arg + prop encode through the underlying primitive":
+    var h = AliasHost(title: "web", port: 8)
+    var e = newBufferEmitter()
+    kdlEncode(h, e)
+    check e.finish() == "ahost \"web\" port=8\n"
