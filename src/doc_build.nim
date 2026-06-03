@@ -103,7 +103,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
   #    one realloc.
   let tokenCount = c.stream[].tokens.len
   let estTopNodes = max(4, tokenCount div 5)
-  doc.nodes = newSeqOfCap[KdlNode](estTopNodes)
+  doc.rootNodes = newSeqOfCap[KdlNode](estTopNodes)
   var stack = newSeqOfCap[KdlNode](16)
   var childHashes = newSeqOfCap[seq[Hash128]](16)
   var slashdashDepth = 0
@@ -118,7 +118,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
       of ceError: return err[KdlDoc, ParseError](ev.err[])
       of ceEof:
         # Unbalanced — cursor should not normally produce this.
-        doc.parseTopLevelCount = int32(doc.nodes.len)
+        doc.parseTopLevelCount = int32(doc.rootNodes.len)
         return ok[KdlDoc, ParseError](doc)
       else: discard
       continue
@@ -137,7 +137,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
         headStart = lparenTok.span.start
       let headEnd = ev.span.finish
       stack.add(KdlNode(name: nameHandle, typeAnnotation: typeAnno,
-                        entries: @[], children: @[],
+                        entries: @[], childNodes: @[],
                         span: initSpan(headStart, headEnd),
                         headLen: uint32(headEnd.offset - headStart.offset)))
       if preserveFormat:
@@ -200,12 +200,12 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
         let ch = childHashes.pop()
         n.parseHash = hashNodeFromChildHashes(n, doc.interner, ch)
       n.parseEntryCount = int32(n.entries.len)
-      n.parseChildCount = int32(n.children.len)
+      n.parseChildCount = int32(n.childNodes.len)
       if stack.len == 0:
-        doc.nodes.add(n)
+        doc.rootNodes.add(n)
       else:
         let h = n.parseHash
-        stack[^1].children.add(n)
+        stack[^1].childNodes.add(n)
         if preserveFormat:
           childHashes[^1].add(h)
     of ceSlashdashBegin:
@@ -213,7 +213,7 @@ proc buildDoc*(c: var StringCursor, sourcePath = "<input>",
     of ceSlashdashEnd:
       discard  # only reachable when starting depth was 0 (mid-emission close); skip
     of ceEof:
-      doc.parseTopLevelCount = int32(doc.nodes.len)
+      doc.parseTopLevelCount = int32(doc.rootNodes.len)
       return ok[KdlDoc, ParseError](doc)
     of ceError:
       return err[KdlDoc, ParseError](ev.err[])
@@ -235,7 +235,7 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
   #    one realloc.
   let tokenCount = c.stream[].tokens.len
   let estTopNodes = max(4, tokenCount div 5)
-  doc.nodes = newSeqOfCap[KdlNode](estTopNodes)
+  doc.rootNodes = newSeqOfCap[KdlNode](estTopNodes)
   var stack = newSeqOfCap[KdlNode](16)
   var childHashes = newSeqOfCap[seq[Hash128]](16)
   var slashdashDepth = 0
@@ -264,7 +264,7 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
         headStart = lparenTok.span.start
       let headEnd = ev.span.finish
       stack.add(KdlNode(name: nameHandle, typeAnnotation: typeAnno,
-                        entries: @[], children: @[],
+                        entries: @[], childNodes: @[],
                         span: initSpan(headStart, headEnd),
                         headLen: uint32(headEnd.offset - headStart.offset)))
       if preserveFormat:
@@ -330,18 +330,18 @@ proc buildDocAll*(c: var StringCursor, sourcePath = "<input>",
         let ch = childHashes.pop()
         n.parseHash = hashNodeFromChildHashes(n, doc.interner, ch)
       n.parseEntryCount = int32(n.entries.len)
-      n.parseChildCount = int32(n.children.len)
+      n.parseChildCount = int32(n.childNodes.len)
       if stack.len == 0:
-        doc.nodes.add(n)
+        doc.rootNodes.add(n)
       else:
         let h = n.parseHash
-        stack[^1].children.add(n)
+        stack[^1].childNodes.add(n)
         if preserveFormat:
           childHashes[^1].add(h)
     of ceSlashdashBegin: inc slashdashDepth
     of ceSlashdashEnd: discard
     of ceEof:
-      doc.parseTopLevelCount = int32(doc.nodes.len)
+      doc.parseTopLevelCount = int32(doc.rootNodes.len)
       break
     of ceError:
       result.errors.add(ev.err[])

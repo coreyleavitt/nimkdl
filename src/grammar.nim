@@ -730,7 +730,7 @@ proc buildNode(node: ParseNode, doc: var KdlDoc, stream: TokenStream,
     else: InvalidInterned
 
   result = KdlNode(name: name, typeAnnotation: anno,
-                   entries: @[], children: @[],
+                   entries: @[], childNodes: @[],
                    span: toSpan(node.consumed, stream.tokens))
 
   for entryMatch in findImmediateAll(node, "entry"):
@@ -770,18 +770,18 @@ proc buildNode(node: ParseNode, doc: var KdlDoc, stream: TokenStream,
       errs.add(initError(peParseUnexpected, result.span,
         "a node may have at most one real children block"))
       continue
-    result.children = buildChildrenBlock(childBlock, doc, stream, errs)
+    result.childNodes = buildChildrenBlock(childBlock, doc, stream, errs)
     realChildrenSeen = true
   # Seed the parse-time content hash so `encode(doc, emPreserve)` can
   # detect unmodified subtrees after this doc round-trips through the
   # reference interpreter too. Counts feed the surgical-splice path
   # in the encoder.
   result.parseEntryCount = int32(result.entries.len)
-  result.parseChildCount = int32(result.children.len)
+  result.parseChildCount = int32(result.childNodes.len)
   # Bottom-up — children's parseHash is already populated by recursive
   # buildNode calls above. See parser.nim:481 for the equivalence rationale.
-  var childHashes = newSeq[Hash128](result.children.len)
-  for i, c in result.children: childHashes[i] = c.parseHash
+  var childHashes = newSeq[Hash128](result.childNodes.len)
+  for i, c in result.childNodes: childHashes[i] = c.parseHash
   result.parseHash = hashNodeFromChildHashes(result, doc.interner, childHashes)
 
 proc buildDocFromParseTree(root: ParseNode, doc: var KdlDoc, stream: TokenStream,
@@ -798,7 +798,7 @@ proc buildDocFromParseTree(root: ParseNode, doc: var KdlDoc, stream: TokenStream
     let isSkipped = slashdashOpt.children.len > 0  # opt matched ⇒ skipped
     if isSkipped: continue
     let nodeMatch = iter.children[1]
-    doc.nodes.add(buildNode(nodeMatch, doc, stream, errs))
+    doc.rootNodes.add(buildNode(nodeMatch, doc, stream, errs))
 
 # ---------------------------------------------------------------------------
 # Semantic validation pass on the built KdlDoc

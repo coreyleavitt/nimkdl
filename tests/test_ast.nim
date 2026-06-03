@@ -126,14 +126,14 @@ suite "KdlNode: cross-doc equality":
   test "docEqual matches when nodes match":
     var a = newDoc()
     var b = newDoc()
-    a.nodes.add(a.newNode("x"))
-    b.nodes.add(b.newNode("x"))
+    a.rootNodes.add(a.newNode("x"))
+    b.rootNodes.add(b.newNode("x"))
     check docEqual(a, b)
 
   test "docEqual rejects differing node counts":
     var a = newDoc()
     var b = newDoc()
-    a.nodes.add(a.newNode("x"))
+    a.rootNodes.add(a.newNode("x"))
     check not docEqual(a, b)
 
 suite "KdlDoc: repr":
@@ -142,7 +142,7 @@ suite "KdlDoc: repr":
     var n = doc.newNode("rule")
     n.entries.add(newArgument(newStringValue("compaction")))
     n.entries.add(doc.newProperty("enabled", newBoolValue(true)))
-    doc.nodes.add(n)
+    doc.rootNodes.add(n)
     let s = $doc
     check "rule" in s
     check "\"compaction\"" in s
@@ -153,8 +153,8 @@ suite "KdlDoc: repr":
     var parent = doc.newNode("rule")
     var child = doc.newNode("action")
     child.entries.add(newArgument(newStringValue("inject")))
-    parent.children.add(child)
-    doc.nodes.add(parent)
+    parent.childNodes.add(child)
+    doc.rootNodes.add(parent)
     let s = $doc
     check "{" in s
     check "action \"inject\"" in s
@@ -167,9 +167,9 @@ suite "KdlDoc: repr":
     var cursor = leaf
     for _ in 0 ..< KdlReprMaxDepth + 5:
       var parent = doc.newNode("layer")
-      parent.children.add(cursor)
+      parent.childNodes.add(cursor)
       cursor = parent
-    doc.nodes.add(cursor)
+    doc.rootNodes.add(cursor)
     let s = $doc
     check "<…>" in s
 

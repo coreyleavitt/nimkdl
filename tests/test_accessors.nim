@@ -18,15 +18,15 @@ template parseOk(src: string, body: untyped) =
     body
 
 suite "string-keyed accessors":
-  test "doc.node(name) returns Some(first top-level) by name":
+  test "doc.node(name) returns the first top-level node by name":
     parseOk("a x=1\nb y=2\na z=3"):
       let n = doc.node("a")
-      check n.isSome
-      check doc.resolveName(n.get) == "a"
+      check n != nil
+      check doc.resolveName(n) == "a"
 
-  test "doc.node(name) returns None when missing":
+  test "doc.node(name) returns nil when missing":
     parseOk("a x=1"):
-      check doc.node("missing").isNone
+      check doc.node("missing") == nil
 
   test "doc.nodes(name) returns all top-level matches in source order":
     parseOk("rule \"first\"\nother\nrule \"second\""):
@@ -60,12 +60,12 @@ suite "string-keyed accessors":
       check n.hasProp(doc, "a")
       check not n.hasProp(doc, "b")
 
-  test "node.child(doc, name) returns Some(first child) by name":
+  test "node.child(doc, name) returns the first child by name":
     parseOk("parent { a \"first\"; b; a \"second\" }"):
       let p = doc.nodes[0]
       let a = p.child(doc, "a")
-      check a.isSome
-      check doc.resolveName(a.get) == "a"
+      check a != nil
+      check doc.resolveName(a) == "a"
 
   test "node.children(doc, name) returns all matching children":
     parseOk("parent { a 1; b; a 2; a 3 }"):
@@ -139,21 +139,21 @@ suite "doc-level node/nodes (M4 — bare-noun renames)":
   test "doc.node(name) finds first matching top-level node":
     parseOk("a 1\nb\na 2"):
       let n = doc.node("a")
-      check n.isSome
-      check doc.resolveName(n.get) == "a"
+      check n != nil
+      check doc.resolveName(n) == "a"
 
-  test "doc.node(missing) returns None":
+  test "doc.node(missing) returns nil":
     parseOk("a"):
-      check doc.node("missing").isNone
+      check doc.node("missing") == nil
 
   test "doc.nodes(name) returns all matches in source order":
     parseOk("rule \"x\"\nother\nrule \"y\""):
       let rules = doc.nodes("rule")
       check rules.len == 2
 
-  test "field doc.nodes and proc doc.nodes(name) coexist":
+  test "doc.nodes and doc.nodes(name) coexist as arity-overloaded procs":
     parseOk("a 1\nb 2\na 3"):
-      # `doc.nodes` (no args) is the field — every top-level node.
+      # `doc.nodes` (no args) is the no-arg accessor proc — every top-level node.
       check doc.nodes.len == 3
       # `doc.nodes(name)` is the filter proc — only matching ones.
       check doc.nodes("a").len == 2

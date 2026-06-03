@@ -109,7 +109,7 @@ type
       propName*: InternedStr
       propValue*: KdlValue
 
-  KdlNode* = object
+  KdlNode* = ref object
     ## A KDL node: name + optional type annotation + entries (args + props,
     ## in source order) + nested children. Span covers the entire node
     ## including children.
@@ -122,10 +122,15 @@ type
     ## mismatch → subtree was mutated, emit canonical. Newly-constructed
     ## nodes leave parseHash at its default zero, which will never match
     ## a freshly-computed hash, so they always emit canonical.
+    ##
+    ## `childNodes` is the raw storage field; use the `children` proc for
+    ## read access and the mutation API procs (addChild, insertChild, etc.)
+    ## for writes. The `children(doc, name)` proc is the blessed filtered
+    ## accessor that overloads on arity without shadowing issues.
     name*: InternedStr
     typeAnnotation*: InternedStr
     entries*: seq[KdlEntry]
-    children*: seq[KdlNode]
+    childNodes*: seq[KdlNode]
     span*: Span
     parseHash*: Hash128
     parseEntryCount*: int32
@@ -156,9 +161,9 @@ type
       ## than embedding these fields inline, which matters because
       ## KdlNode sits on the hot path of parse + decode + encode.
 
-  KdlDoc* = object
+  KdlDoc* = ref object
     ## A parsed KDL document. The interner is owned by the doc; all
-    ## InternedStr handles inside `nodes` reference it.
+    ## InternedStr handles inside `rootNodes` reference it.
     ##
     ## `sourcePath` is the file path (or "<input>" / "<test>" etc.)
     ## for diagnostics; it doesn't open the file.
@@ -175,6 +180,11 @@ type
     ## AST no longer matches the source bytes byte-for-byte. Cleared
     ## by `clearSource(doc)` if the consumer wants to disclaim the
     ## source-preservation property explicitly.
+    ##
+    ## `rootNodes` is the raw storage field; use the `nodes` proc for
+    ## read access and `add`/`insert`/`removeNode`/`replaceNode` for
+    ## writes. The `nodes(name)` proc is the blessed filtered accessor
+    ## that overloads on arity without shadowing issues.
     sourcePath*: string
     sourceText*: string
     mutated*: bool
@@ -187,13 +197,13 @@ type
       ## decode, validation-and-discard, codegen) that never preserves.
     parseTopLevelCount*: int32
       ## Count of top-level nodes at parse time. The encoder's doc-level
-      ## surgical-splice path uses `nodes.len == parseTopLevelCount` to
+      ## surgical-splice path uses `rootNodes.len == parseTopLevelCount` to
       ## decide whether changes were purely in-place (splice each
       ## modified node back into sourceText, preserving comments and
       ## blank lines between siblings) or structural (fall back to a
       ## per-node loop with newline joins).
     interner*: Interner
-    nodes*: seq[KdlNode]
+    rootNodes*: seq[KdlNode]
     removedNodes*: seq[KdlNode]
       ## Doc-level tombstones — same role as `KdlNode.removedChildren`
       ## but for top-level nodes removed via `doc.removeNode` /
@@ -202,15 +212,6 @@ type
       ## nodes without forfeiting inter-node trivia preservation for
       ## surviving siblings.
 
-when defined(probeKdlNodeCopy):
-  # CI guard — compile any consumer with -d:probeKdlNodeCopy and Nim
-  # surfaces every site where a KdlNode (or its enclosing seq[KdlNode])
-  # would be deep-copied. Bug class: `for i, c in seq` binds c by
-  # value-copy; non-sink `Result.get`; non-sink wrap into Result.
-  # Past breach: parse-time hashing + Result.get + for-loop iter were
-  # all silently deep-copying every level of recursion — fixed in
-  # 660fe7a after 30 min with perf record + this probe.
-  proc `=copy`*(dst: var KdlNode, src: KdlNode) {.error: "KdlNode copy detected — use indexed access, .take, sink params, or move() to fix".}
 
 # ---------------------------------------------------------------------------
 # Constructors
@@ -218,12 +219,12 @@ when defined(probeKdlNodeCopy):
 
 func newDoc*(sourcePath = "<input>"): KdlDoc =
   ## A fresh empty document.
-  KdlDoc(sourcePath: sourcePath, interner: initInterner(), nodes: @[])
+  result = KdlDoc(sourcePath: sourcePath, interner: initInterner(), rootNodes: @[])
 
-proc newNode*(doc: var KdlDoc, name: string, span = pointSpan(StartPosition)): KdlNode =
+proc newNode*(doc: KdlDoc, name: string, span = pointSpan(StartPosition)): KdlNode =
   KdlNode(name: doc.interner.intern(name),
           typeAnnotation: InvalidInterned,
-          entries: @[], children: @[], span: span)
+          entries: @[], childNodes: @[], span: span)
 
 func newStringValue*(s: string, span = pointSpan(StartPosition)): KdlValue =
   KdlValue(kind: kvString, strVal: s, span: span,
@@ -253,7 +254,7 @@ func newNullValue*(span = pointSpan(StartPosition)): KdlValue =
 func newArgument*(v: KdlValue, span = pointSpan(StartPosition)): KdlEntry =
   KdlEntry(kind: keArgument, argValue: v, span: span)
 
-proc newProperty*(doc: var KdlDoc, name: string, v: KdlValue,
+proc newProperty*(doc: KdlDoc, name: string, v: KdlValue,
                   span = pointSpan(StartPosition)): KdlEntry =
   KdlEntry(kind: keProperty, propName: doc.interner.intern(name),
            propValue: v, span: span)
@@ -321,14 +322,17 @@ func `==`*(a, b: KdlNode): bool =
   ## Recursive structural equality. Caller is responsible for both nodes
   ## belonging to docs that share an interner OR for ensuring handle
   ## values happen to align — `nodeEqual` does the safer cross-doc form.
+  ## As refs, nil == nil; one nil and one non-nil are unequal.
+  if a.isNil and b.isNil: return true
+  if a.isNil or b.isNil: return false
   if a.name != b.name: return false
   if a.typeAnnotation != b.typeAnnotation: return false
   if a.entries.len != b.entries.len: return false
   for i in 0 ..< a.entries.len:
     if a.entries[i] != b.entries[i]: return false
-  if a.children.len != b.children.len: return false
-  for i in 0 ..< a.children.len:
-    if a.children[i] != b.children[i]: return false
+  if a.childNodes.len != b.childNodes.len: return false
+  for i in 0 ..< a.childNodes.len:
+    if a.childNodes[i] != b.childNodes[i]: return false
   true
 
 proc nodeEqual*(aDoc, bDoc: KdlDoc, a, b: KdlNode): bool =
@@ -354,16 +358,16 @@ proc nodeEqual*(aDoc, bDoc: KdlDoc, a, b: KdlNode): bool =
                           bDoc.interner, be.propName):
         return false
       if not valueEqual(aDoc, bDoc, ae.propValue, be.propValue): return false
-  if a.children.len != b.children.len: return false
-  for i in 0 ..< a.children.len:
-    if not nodeEqual(aDoc, bDoc, a.children[i], b.children[i]): return false
+  if a.childNodes.len != b.childNodes.len: return false
+  for i in 0 ..< a.childNodes.len:
+    if not nodeEqual(aDoc, bDoc, a.childNodes[i], b.childNodes[i]): return false
   true
 
 proc docEqual*(a, b: KdlDoc): bool =
   ## Cross-doc structural equality.
-  if a.nodes.len != b.nodes.len: return false
-  for i in 0 ..< a.nodes.len:
-    if not nodeEqual(a, b, a.nodes[i], b.nodes[i]): return false
+  if a.rootNodes.len != b.rootNodes.len: return false
+  for i in 0 ..< a.rootNodes.len:
+    if not nodeEqual(a, b, a.rootNodes[i], b.rootNodes[i]): return false
   true
 
 # ---------------------------------------------------------------------------
@@ -406,9 +410,9 @@ proc reprNode(n: KdlNode, doc: KdlDoc, depth: int): string =
   for e in n.entries:
     parts.add(reprEntry(e, doc))
   result = parts.join(" ")
-  if n.children.len > 0:
+  if n.childNodes.len > 0:
     var childReprs: seq[string] = @[]
-    for c in n.children:
+    for c in n.childNodes:
       childReprs.add(reprNode(c, doc, depth + 1))
     result &= " { " & childReprs.join("; ") & " }"
 
@@ -416,7 +420,7 @@ proc `$`*(doc: KdlDoc): string =
   ## Debug-readable single-line form. Use the encoder (#524) for
   ## canonical KDL output.
   var reprs: seq[string] = @[]
-  for n in doc.nodes:
+  for n in doc.rootNodes:
     reprs.add(reprNode(n, doc, 0))
   result = reprs.join("\n")
 
@@ -500,6 +504,26 @@ func args*(n: KdlNode): seq[KdlValue] =
     result.add(v)
 
 # ---------------------------------------------------------------------------
+# Zero-copy no-arg accessors (hide raw storage fields behind blessed API)
+# ---------------------------------------------------------------------------
+#
+# `KdlDoc.rootNodes` and `KdlNode.childNodes` are the raw storage fields.
+# These procs expose them under the canonical names `nodes` / `children`
+# so read sites stay ergonomic, while the arity-overloaded filter procs
+# below (`nodes(doc, name)` / `children(n, doc, name)`) compile cleanly
+# without the field shadowing them.
+
+func nodes*(doc: KdlDoc): lent seq[KdlNode] =
+  ## All top-level nodes in `doc`, in source order. Zero-copy read
+  ## accessor over the raw `rootNodes` storage field.
+  doc.rootNodes
+
+func children*(n: KdlNode): lent seq[KdlNode] =
+  ## All child nodes of `n`, in source order. Zero-copy read accessor
+  ## over the raw `childNodes` storage field.
+  n.childNodes
+
+# ---------------------------------------------------------------------------
 # String-keyed convenience accessors
 # ---------------------------------------------------------------------------
 #
@@ -529,48 +553,41 @@ func hasProp*(n: KdlNode, doc: KdlDoc, name: string): bool =
       return true
   false
 
-func child*(n: KdlNode, doc: KdlDoc, name: string): Option[KdlNode] =
-  ## First child with `name`, or `none(KdlNode)` if absent.
-  for c in n.children:
-    if doc.interner.equals(c.name, name): return some(c)
-  none(KdlNode)
-
-func hasChild*(n: KdlNode, doc: KdlDoc, name: string): bool =
-  ## True iff `n` has at least one child with the given name.
-  for c in n.children:
-    if doc.interner.equals(c.name, name): return true
-  false
+func child*(n: KdlNode, doc: KdlDoc, name: string): KdlNode =
+  ## First child with `name`, or `nil` if absent.
+  for c in n.childNodes:
+    if doc.interner.equals(c.name, name): return c
+  nil
 
 func children*(n: KdlNode, doc: KdlDoc, name: string): seq[KdlNode] =
-  for c in n.children:
+  ## All children of `n` with `name`, in source order. Arity-overloaded
+  ## companion to `n.children` (no args, returns all) and `n.child(doc,
+  ## name)` (returns just the first). Iterates the raw `childNodes` field
+  ## directly to avoid any accidental recursion into the no-arg accessor.
+  for c in n.childNodes:
     if doc.interner.equals(c.name, name):
       result.add(c)
 
-func node*(doc: KdlDoc, name: string): Option[KdlNode] =
-  ## First top-level node with `name`, or `none(KdlNode)` if absent.
+func node*(doc: KdlDoc, name: string): KdlNode =
+  ## First top-level node with `name`, or `nil` if absent.
   ## Bare-noun verb form matches the node-level accessor family
   ## (`child` / `prop` / `arg`) — same operation, same vocabulary,
   ## same return-shape pattern.
   ##
-  ## `doc.nodes` (no parens) remains the field accessor for "every
-  ## top-level node"; `doc.nodes(name)` is the filter proc below.
-  ## The field-vs-proc coexistence mirrors `KdlNode.children` (field)
-  ## vs `n.children(doc, name)` (proc) and works the same way.
-  for n in doc.nodes:
-    if doc.interner.equals(n.name, name): return some(n)
-  none(KdlNode)
-
-func hasNode*(doc: KdlDoc, name: string): bool =
-  ## True iff `doc` has at least one top-level node with the given name.
-  for n in doc.nodes:
-    if doc.interner.equals(n.name, name): return true
-  false
+  ## `doc.nodes` (no parens) is the proc accessor for "every top-level
+  ## node"; `doc.nodes(name)` is the filter proc below. Both overload on
+  ## `nodes` — no field-vs-proc shadowing.
+  for n in doc.rootNodes:
+    if doc.interner.equals(n.name, name): return n
+  nil
 
 func nodes*(doc: KdlDoc, name: string): seq[KdlNode] =
   ## All top-level nodes matching `name`, in source order. Companion
-  ## to `doc.node(name)` (returns just the first). The `nodes` field
-  ## on `KdlDoc` (no parens) gives every top-level node unfiltered.
-  for n in doc.nodes:
+  ## to `doc.node(name)` (returns just the first). `doc.nodes` (no args)
+  ## gives every top-level node unfiltered. Iterates the raw `rootNodes`
+  ## field directly to avoid any accidental recursion into the no-arg
+  ## accessor.
+  for n in doc.rootNodes:
     if doc.interner.equals(n.name, name):
       result.add(n)
 
@@ -586,7 +603,7 @@ func nodes*(doc: KdlDoc, name: string): seq[KdlNode] =
 # itself a mutation of the interner. Read-only operations take
 # `KdlDoc`.
 
-template ensureMutState(n: var KdlNode) =
+template ensureMutState(n: KdlNode) =
   ## Lazily allocate the mutation sidecar. Called by every builder-API
   ## mutator on its first touch so `dirty` and tombstones have a home.
   if n.mutState == nil: n.mutState = MutationState()
@@ -595,7 +612,7 @@ func dirty*(n: KdlNode): bool {.inline.} =
   ## Non-nil-aware accessor. Used by encode for the subtreeDirty fold.
   n.mutState != nil and n.mutState.dirty
 
-proc markMutated*(doc: var KdlDoc) =
+proc markMutated*(doc: KdlDoc) =
   ## Disclaim source-byte preservation. Sets `doc.mutated = true` AND
   ## marks every node (recursively) `dirty = true`, so the encoder
   ## can't take the source-bytes fast path on any subtree. The
@@ -606,32 +623,32 @@ proc markMutated*(doc: var KdlDoc) =
   ## inside the encoder's forward walk then catches the actually-
   ## mutated entry and canonical-emits it.
   doc.mutated = true
-  proc dirtyAll(nodes: var seq[KdlNode]) =
-    for n in nodes.mitems:
+  proc dirtyAll(nodes: seq[KdlNode]) =
+    for n in nodes:
       ensureMutState(n); n.mutState.dirty = true
-      dirtyAll(n.children)
-  dirtyAll(doc.nodes)
+      dirtyAll(n.childNodes)
+  dirtyAll(doc.rootNodes)
 
-proc clearSource*(doc: var KdlDoc) {.inline.} =
+proc clearSource*(doc: KdlDoc) {.inline.} =
   ## Disclaim source preservation explicitly: drop the cached sourceText
   ## and mark the doc mutated. Call this if you intend to edit and
   ## don't want emPreserve to carry stale bytes around.
   doc.sourceText = ""
   doc.mutated = true
 
-proc add*(doc: var KdlDoc, n: sink KdlNode) {.inline.} =
+proc add*(doc: KdlDoc, n: KdlNode) {.inline.} =
   ## Append a top-level node.
-  doc.nodes.add(n)
+  doc.rootNodes.add(n)
   doc.mutated = true
 
-proc insert*(doc: var KdlDoc, idx: int, n: sink KdlNode) =
+proc insert*(doc: KdlDoc, idx: int, n: KdlNode) =
   ## Insert a top-level node at `idx`. `idx == doc.nodes.len` appends;
   ## values outside `[0, doc.nodes.len]` clamp to the nearest end.
-  let i = max(0, min(idx, doc.nodes.len))
-  doc.nodes.insert(n, i)
+  let i = max(0, min(idx, doc.rootNodes.len))
+  doc.rootNodes.insert(n, i)
   doc.mutated = true
 
-proc addArg*(n: var KdlNode, doc: var KdlDoc, v: KdlValue) {.inline.} =
+proc addArg*(n: KdlNode, doc: KdlDoc, v: KdlValue) {.inline.} =
   ## Append a positional argument entry.
   ##
   ## **Cross-doc caveat:** if `v.typeAnnotation` was minted from a
@@ -644,7 +661,7 @@ proc addArg*(n: var KdlNode, doc: var KdlDoc, v: KdlValue) {.inline.} =
   ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
-proc setArg*(n: var KdlNode, doc: var KdlDoc, idx: int,
+proc setArg*(n: KdlNode, doc: KdlDoc, idx: int,
              v: KdlValue): bool =
   ## Replace the `idx`-th positional argument's value. Index is among
   ## arguments only (properties skipped). Returns false when out of
@@ -672,7 +689,7 @@ func isParsedEntry*(e: KdlEntry): bool {.inline.} =
 func isParsedNode*(n: KdlNode): bool {.inline.} =
   n.parseHash != default(Hash128) and n.span.length > 0
 
-proc removeArg*(n: var KdlNode, doc: var KdlDoc, idx: int): bool =
+proc removeArg*(n: KdlNode, doc: KdlDoc, idx: int): bool =
   ## Remove the `idx`-th positional argument. Returns false when out of
   ## range. Original entries are tombstoned so the preserving encoder
   ## can skip their source bytes without re-emitting; builder-API-
@@ -691,21 +708,21 @@ proc removeArg*(n: var KdlNode, doc: var KdlDoc, idx: int): bool =
       inc argSeen
   false
 
-proc addChild*(n: var KdlNode, doc: var KdlDoc, c: sink KdlNode) {.inline.} =
+proc addChild*(n: KdlNode, doc: KdlDoc, c: KdlNode) {.inline.} =
   ## Append a child node.
-  n.children.add(c)
+  n.childNodes.add(c)
   ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
-proc insertChild*(n: var KdlNode, doc: var KdlDoc, idx: int,
-                  c: sink KdlNode) =
+proc insertChild*(n: KdlNode, doc: KdlDoc, idx: int,
+                  c: KdlNode) =
   ## Insert a child node at `idx`. Clamps to the seq's bounds.
-  let i = max(0, min(idx, n.children.len))
-  n.children.insert(c, i)
+  let i = max(0, min(idx, n.childNodes.len))
+  n.childNodes.insert(c, i)
   ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
-proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
+proc setProp*(n: KdlNode, doc: KdlDoc, name: string, v: KdlValue) =
   ## Set property `name = v`. If a property with that name already
   ## exists, its value is replaced in place (preserving source order).
   ## Otherwise the property is appended.
@@ -723,7 +740,7 @@ proc setProp*(n: var KdlNode, doc: var KdlDoc, name: string, v: KdlValue) =
   n.entries.add(KdlEntry(kind: keProperty, propName: key, propValue: v,
                          span: n.span))
 
-proc removeProp*(n: var KdlNode, doc: var KdlDoc, name: string): bool =
+proc removeProp*(n: KdlNode, doc: KdlDoc, name: string): bool =
   ## Remove the first property with the given name. Returns true iff
   ## a property was removed. Parsed entries are tombstoned (see
   ## `removeArg`).
@@ -741,16 +758,16 @@ proc removeProp*(n: var KdlNode, doc: var KdlDoc, name: string): bool =
     inc i
   false
 
-proc removeChild*(n: var KdlNode, doc: var KdlDoc, name: string): int =
+proc removeChild*(n: KdlNode, doc: KdlDoc, name: string): int =
   ## Remove every child whose name matches. Returns the number removed.
   ## Parsed children are tombstoned (see `removeArg`).
   var i = 0
-  while i < n.children.len:
-    if doc.interner.equals(n.children[i].name, name):
+  while i < n.childNodes.len:
+    if doc.interner.equals(n.childNodes[i].name, name):
       ensureMutState(n)
-      if isParsedNode(n.children[i]):
-        n.mutState.removedChildren.add(n.children[i])
-      n.children.delete(i)
+      if isParsedNode(n.childNodes[i]):
+        n.mutState.removedChildren.add(n.childNodes[i])
+      n.childNodes.delete(i)
       inc result
     else:
       inc i
@@ -758,50 +775,50 @@ proc removeChild*(n: var KdlNode, doc: var KdlDoc, name: string): int =
     n.mutState.dirty = true
     doc.mutated = true
 
-proc replaceChild*(n: var KdlNode, doc: var KdlDoc, name: string,
-                   replacement: sink KdlNode): bool =
+proc replaceChild*(n: KdlNode, doc: KdlDoc, name: string,
+                   replacement: KdlNode): bool =
   ## Replace the first child with the given name. Returns true iff a
   ## match was found and replaced. The original (if parsed) is
   ## tombstoned so the preserving encoder can skip its source bytes
   ## while emitting the replacement canonically.
-  for i in 0 ..< n.children.len:
-    if doc.interner.equals(n.children[i].name, name):
+  for i in 0 ..< n.childNodes.len:
+    if doc.interner.equals(n.childNodes[i].name, name):
       ensureMutState(n)
-      if isParsedNode(n.children[i]):
-        n.mutState.removedChildren.add(n.children[i])
-      n.children[i] = replacement
+      if isParsedNode(n.childNodes[i]):
+        n.mutState.removedChildren.add(n.childNodes[i])
+      n.childNodes[i] = replacement
       n.mutState.dirty = true
       doc.mutated = true
       return true
   false
 
-proc setName*(n: var KdlNode, doc: var KdlDoc, name: string) {.inline.} =
+proc setName*(n: KdlNode, doc: KdlDoc, name: string) {.inline.} =
   ## Change the node's name. Interns the new name via the doc.
   n.name = doc.interner.intern(name)
   ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
-proc setTypeAnnotation*(n: var KdlNode, doc: var KdlDoc, tag: string) {.inline.} =
+proc setTypeAnnotation*(n: KdlNode, doc: KdlDoc, tag: string) {.inline.} =
   ## Tag the node with a type annotation.
   n.typeAnnotation = doc.interner.intern(tag)
   ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
-proc clearTypeAnnotation*(n: var KdlNode, doc: var KdlDoc) {.inline.} =
+proc clearTypeAnnotation*(n: KdlNode, doc: KdlDoc) {.inline.} =
   n.typeAnnotation = InvalidInterned
   ensureMutState(n); n.mutState.dirty = true
   doc.mutated = true
 
-proc setTypeAnnotation*(v: var KdlValue, doc: var KdlDoc, tag: string) {.inline.} =
+proc setTypeAnnotation*(v: var KdlValue, doc: KdlDoc, tag: string) {.inline.} =
   ## Tag a value with a type annotation (e.g. `(ipv4)"1.2.3.4"`).
   v.typeAnnotation = doc.interner.intern(tag)
   doc.mutated = true
 
-proc clearTypeAnnotation*(v: var KdlValue, doc: var KdlDoc) {.inline.} =
+proc clearTypeAnnotation*(v: var KdlValue, doc: KdlDoc) {.inline.} =
   v.typeAnnotation = InvalidInterned
   doc.mutated = true
 
-proc migrateValue*(srcDoc: KdlDoc, dstDoc: var KdlDoc, v: var KdlValue) =
+proc migrateValue*(srcDoc: KdlDoc, dstDoc: KdlDoc, v: var KdlValue) =
   ## Re-intern `v.typeAnnotation` against `dstDoc`'s interner so that
   ## `v` can be safely inserted into `dstDoc` (via `setProp`, `addArg`,
   ## raw field assignment, etc.) without leaving a foreign handle on
@@ -818,38 +835,37 @@ proc migrateValue*(srcDoc: KdlDoc, dstDoc: var KdlDoc, v: var KdlValue) =
   ## `dstDoc` share an interner (compared by `addr`; we don't have a
   ## stronger identity for value-typed objects).
   if v.typeAnnotation == InvalidInterned: return
-  if cast[pointer](unsafeAddr srcDoc.interner) ==
-     cast[pointer](unsafeAddr dstDoc.interner):
-    return
+  if cast[pointer](srcDoc) == cast[pointer](dstDoc):
+    return  # same doc ref — same interner
   let tagBytes = srcDoc.interner.lookup(v.typeAnnotation)
   v.typeAnnotation = dstDoc.interner.intern(tagBytes)
   dstDoc.mutated = true
 
-proc removeNode*(doc: var KdlDoc, name: string): int =
+proc removeNode*(doc: KdlDoc, name: string): int =
   ## Remove every top-level node with the given name. Returns count.
   ## Parsed nodes are tombstoned (preserves their source spans for the
   ## doc-level shape-change walk).
   var i = 0
-  while i < doc.nodes.len:
-    if doc.interner.equals(doc.nodes[i].name, name):
-      if isParsedNode(doc.nodes[i]):
-        doc.removedNodes.add(doc.nodes[i])
-      doc.nodes.delete(i)
+  while i < doc.rootNodes.len:
+    if doc.interner.equals(doc.rootNodes[i].name, name):
+      if isParsedNode(doc.rootNodes[i]):
+        doc.removedNodes.add(doc.rootNodes[i])
+      doc.rootNodes.delete(i)
       inc result
     else:
       inc i
   if result > 0: doc.mutated = true
 
-proc replaceNode*(doc: var KdlDoc, name: string,
-                  replacement: sink KdlNode): bool =
+proc replaceNode*(doc: KdlDoc, name: string,
+                  replacement: KdlNode): bool =
   ## Replace the first top-level node with the given name. Returns true
   ## iff a match was found and replaced. Parsed originals are
   ## tombstoned.
-  for i in 0 ..< doc.nodes.len:
-    if doc.interner.equals(doc.nodes[i].name, name):
-      if isParsedNode(doc.nodes[i]):
-        doc.removedNodes.add(doc.nodes[i])
-      doc.nodes[i] = replacement
+  for i in 0 ..< doc.rootNodes.len:
+    if doc.interner.equals(doc.rootNodes[i].name, name):
+      if isParsedNode(doc.rootNodes[i]):
+        doc.removedNodes.add(doc.rootNodes[i])
+      doc.rootNodes[i] = replacement
       doc.mutated = true
       return true
   false
