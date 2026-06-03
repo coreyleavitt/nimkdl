@@ -82,20 +82,44 @@ suite "string-keyed accessors":
       check keys == @["enabled", "count", "name"]
 
 suite "positional argument accessors (arg / hasArg)":
-  test "node.arg(idx) returns the idx-th positional value":
+  test "node.arg distinguishes an explicit #null arg from a missing one":
+    # The whole reason arg returns Option (not a kvNull sentinel): a present
+    # `#null` positional and an absent positional are different facts, and a
+    # sentinel conflates them.
+    parseOk("n #null"):
+      let n = doc.nodes[0]
+      check n.arg(0).isSome              # present...
+      check n.arg(0).get.kind == kvNull  # ...and its value is #null
+      check n.arg(1).isNone              # genuinely absent
+
+  test "node.arg(idx) returns some(idx-th positional value)":
     parseOk("n \"first\" 2 \"third\""):
       let n = doc.nodes[0]
-      check n.arg(0).kind == kvString
-      check n.arg(0).strVal == "first"
-      check n.arg(1).kind == kvInt
-      check n.arg(1).intVal == 2
-      check n.arg(2).kind == kvString
-      check n.arg(2).strVal == "third"
+      check n.arg(0).get.kind == kvString
+      check n.arg(0).get.strVal == "first"
+      check n.arg(1).get.kind == kvInt
+      check n.arg(1).get.intVal == 2
+      check n.arg(2).get.kind == kvString
+      check n.arg(2).get.strVal == "third"
 
-  test "node.arg(idx) returns kvNull for out-of-range":
+  test "node.arg(idx) returns none for out-of-range":
     parseOk("n \"only\""):
       let n = doc.nodes[0]
-      check n.arg(99).kind == kvNull
+      check n.arg(1).isNone
+      check n.arg(99).isNone
+
+  test "node.args returns all positionals in order, skipping interleaved props":
+    parseOk("n \"a\" k=1 \"b\" m=2 \"c\""):
+      let a = doc.nodes[0].args
+      check a.len == 3
+      check a[0].strVal == "a"
+      check a[1].strVal == "b"
+      check a[2].strVal == "c"
+
+  test "node.args is empty when the node has no positionals":
+    parseOk("n k=1\nbare"):
+      check doc.nodes[0].args.len == 0   # only a property
+      check doc.nodes[1].args.len == 0   # bare node
 
   test "node.hasArg(idx) reports positional presence":
     parseOk("n \"x\" \"y\""):
@@ -108,7 +132,7 @@ suite "positional argument accessors (arg / hasArg)":
     parseOk("n \"first\" k=1 \"second\" m=2 \"third\""):
       let n = doc.nodes[0]
       check n.hasArg(2)
-      check n.arg(2).strVal == "third"
+      check n.arg(2).get.strVal == "third"
       check not n.hasArg(3)
 
 suite "doc-level node/nodes (M4 — bare-noun renames)":

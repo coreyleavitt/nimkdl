@@ -466,16 +466,20 @@ iterator namedProperties*(n: KdlNode, doc: KdlDoc):
     if e.kind == keProperty:
       yield (doc.interner.lookup(e.propName), e.propValue)
 
-func arg*(n: KdlNode, idx: int): KdlValue =
-  ## The `idx`-th positional argument on `n`, or a `kvNull` value if
-  ## out of range. Properties interleaved among arguments are skipped:
+func arg*(n: KdlNode, idx: int): Option[KdlValue] =
+  ## The `idx`-th positional argument on `n`, or `none(KdlValue)` if out
+  ## of range. Properties interleaved among arguments are skipped:
   ## `arg(0)` is the first positional regardless of preceding `k=v`s.
+  ##
+  ## `Option` (not a `kvNull` sentinel) so callers can distinguish "no
+  ## such argument" from "argument present with an explicit `#null`
+  ## value" — both legal KDL, different facts. Mirrors `prop`.
   var seen = 0
   for e in n.entries:
     if e.kind == keArgument:
-      if seen == idx: return e.argValue
+      if seen == idx: return some(e.argValue)
       inc seen
-  newNullValue()
+  none(KdlValue)
 
 func hasArg*(n: KdlNode, idx: int): bool =
   ## True iff `n` has at least `idx + 1` positional arguments.
@@ -485,6 +489,15 @@ func hasArg*(n: KdlNode, idx: int): bool =
       if seen == idx: return true
       inc seen
   false
+
+func args*(n: KdlNode): seq[KdlValue] =
+  ## All positional arguments on `n`, in source order; properties
+  ## interleaved among them are skipped. The materialized counterpart of
+  ## the `arguments` iterator, pairing with `arg`/`hasArg` the way
+  ## `children`/`nodes` pair with their singular accessors. Empty when
+  ## `n` has no positionals.
+  for v in n.arguments:
+    result.add(v)
 
 # ---------------------------------------------------------------------------
 # String-keyed convenience accessors
