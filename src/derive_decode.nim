@@ -170,6 +170,27 @@ iterator enumVariantSyms(enumType: NimNode): string =
     of nnkEnumFieldDef: yield $v[0]  # fallback for unwrapped enums
     else: discard
 
+proc enrichLeafErrors(n: NimNode, fnLit: NimNode) =
+  ## In-place: wrap every `err[void, ParseError](e)` in `n`'s subtree with
+  ## `e.withField(fnLit)`, so a leaf arg/prop value-decode failure records
+  ## the field name in the error's fieldPath (rfc §10 / #39 item 4). The
+  ## child-boundary enrichment then prepends each enclosing child field as
+  ## the error unwinds, yielding the full `outer.inner.port` path.
+  # `err[void, ParseError](e)` takes two shapes depending on whether the
+  # subtree is sym-bound: untyped it's Call(BracketExpr(err, ...), e);
+  # after quote sym-binds `err` and `[]` it's Call(Call([], err, ...), e).
+  # Match both and wrap the single arg `e` with `e.withField(fnLit)`.
+  if n.kind in {nnkCall, nnkCommand} and n.len == 2:
+    let head = n[0]
+    let isErr =
+      (head.kind == nnkBracketExpr and head.len >= 1 and head[0].eqIdent("err")) or
+      (head.kind in {nnkCall, nnkCommand} and head.len >= 2 and head[1].eqIdent("err"))
+    if isErr:
+      n[1] = newCall(ident("withField"), n[1], fnLit)
+      return   # the wrapped argument holds no further err() sites
+  for i in 0 ..< n.len:
+    enrichLeafErrors(n[i], fnLit)
+
 proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
                      fieldType: NimNode, cSym: NimNode): NimNode =
   ## Emit the typed decode of a token at `tokIndexExpr` into
@@ -484,6 +505,7 @@ macro deriveDecode*(T: typedesc): untyped =
     let tokIndexExpr = quote do: `evSym2`.argTok
     let target = quote do: `vSym`.`fIdent`
     var branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+    enrichLeafErrors(branchBody, newLit(fName))
     if hasVariant and fName == discName:
       let bodyCopy = branchBody
       branchBody = quote do:
@@ -543,6 +565,7 @@ macro deriveDecode*(T: typedesc): untyped =
       let tokIndexExpr = quote do: `evSym2`.propValueTok
       let target = quote do: `vSym`.`fIdent`
       let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym)
+      enrichLeafErrors(decodeBody, newLit(fName))
       let mark = markSlot(slots[i])
       var reservedCheck = newStmtList()
       if reservedTag.len > 0:

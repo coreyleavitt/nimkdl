@@ -16,18 +16,30 @@ kdl:
     port {.kdlProp.}: int
   type Outer {.kdlNode: "outer".} = object
     sect {.kdlChild.}: Inner
+  type ArgHost {.kdlNode: "argh".} = object
+    count {.kdlArg.}: int
 
 suite "decode — field-path errors (rfc §10)":
-  test "nested decode failure carries the child field path":
+  test "nested decode failure carries child + leaf field path":
     let r = decode[Outer]("outer {\n  inner port=\"notanint\"\n}")
     check r.isErr
-    check r.getErr.fieldPath == @["sect"]
+    check r.getErr.fieldPath == @["sect", "port"]
 
   test "field path renders in formatError":
     let src = "outer {\n  inner port=\"x\"\n}"
     let r = decode[Outer](src)
     check r.isErr
-    check "in field: sect" in formatError(r.getErr, src)
+    check "in field: sect.port" in formatError(r.getErr, src)
+
+  test "top-level leaf failure carries just the leaf field":
+    let r = decode[Inner]("inner port=\"x\"")
+    check r.isErr
+    check r.getErr.fieldPath == @["port"]
+
+  test "leaf kdlArg failure carries the arg field name":
+    let r = decode[ArgHost]("argh \"notnum\"")
+    check r.isErr
+    check r.getErr.fieldPath == @["count"]
 
   test "successful decode leaves the field path empty":
     let r = decode[Outer]("outer {\n  inner port=8\n}")
