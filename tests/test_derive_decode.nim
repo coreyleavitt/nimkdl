@@ -689,3 +689,28 @@ suite "derive_decode — type aliases resolve to base primitive (#39 item 5)":
     check r.isOk
     check h.title == "web"
     check h.port == 8
+
+suite "derive_decode — ckOption: Option[object] child (#39 item 1)":
+
+  type OkChild {.kdlNode: "child".} = object
+    tag {.kdlArg.}: string
+  type OptParent {.kdlNode: "parent".} = object
+    sect {.kdlChild.}: Option[OkChild]
+
+  deriveDecode(OkChild)
+  deriveDecode(OptParent)
+
+  test "present optional child → Some":
+    let f = mkCursor("parent {\n  child \"a\"\n}")
+    var p: OptParent
+    let r = kdlDecode(p, f.cursor)
+    check r.isOk
+    check p.sect.isSome
+    check p.sect.get.tag == "a"
+
+  test "absent optional child → None":
+    let f = mkCursor("parent")
+    var p: OptParent
+    let r = kdlDecode(p, f.cursor)
+    check r.isOk
+    check p.sect.isNone

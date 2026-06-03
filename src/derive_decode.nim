@@ -346,7 +346,7 @@ macro deriveDecode*(T: typedesc): untyped =
   let sdDepthSym = ident("sdDepth")
 
   # Collect kdlArg + kdlProp + kdlChild fields by pragma role.
-  type ChildKind = enum ckSingle, ckSeq
+  type ChildKind = enum ckSingle, ckSeq, ckOption
   type ArgField = tuple[name: string, typ: NimNode, reservedTag: string]
   type PropField = tuple[name: string, typ: NimNode, wireKey: string,
                          reservedTag: string]
@@ -389,6 +389,11 @@ macro deriveDecode*(T: typedesc): untyped =
       if fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq"):
         kind = ckSeq
         elemType = fieldType[1]
+      elif isOptionType(fieldType):
+        # Option[Inner] child: peel to Inner so nodeNameOf sees a type sym
+        # (getImpl rejects the BracketExpr wrapper). Absent → None.
+        kind = ckOption
+        elemType = innerOfOption(fieldType)
       else:
         kind = ckSingle
         elemType = fieldType
@@ -409,10 +414,10 @@ macro deriveDecode*(T: typedesc): untyped =
                 fieldName & "' of primitive elements — annotate it with " &
                 "{.kdlArg.} (variadic args) or {.kdlChild.}")
       elif isObjectTypeResolved(ft):
-        if isOptionType(fieldType):
-          error("deriveDecode: inferred optional child for field '" & fieldName &
-                "' (Option[object]) is not yet supported — annotate {.kdlChild.}")
-        childSink.add((name: fieldName, elemType: ft, kind: ckSingle,
+        # Option[object] infers to an optional child (absent → None); plain
+        # object infers to a single required child.
+        let kind = if isOptionType(fieldType): ckOption else: ckSingle
+        childSink.add((name: fieldName, elemType: ft, kind: kind,
                        wireName: nodeNameOf(ft)))
       else:
         # primitive / enum (incl. Option[primitive]) → prop; key = field name.
@@ -499,8 +504,8 @@ macro deriveDecode*(T: typedesc): untyped =
       propSlots.add(claimSlot())
   var childSlots: seq[int]
   for (_, _, kind, _) in childFields:
-    if kind == ckSeq:
-      childSlots.add(-1)  # empty seq is fine
+    if kind in {ckSeq, ckOption}:
+      childSlots.add(-1)  # empty seq / absent Option is fine
     else:
       childSlots.add(claimSlot())
 
@@ -685,6 +690,15 @@ macro deriveDecode*(T: typedesc): untyped =
             let r = kdlDecode(`elemSym`, `cSym`)
             if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
             `vSym`.`fIdent`.add(`elemSym`)
+        of ckOption:
+          let elemSym = genSym(nskVar, "childElem")
+          let elemType = childFields[i].elemType
+          quote do:
+            var `elemSym`: `elemType`
+            let r = kdlDecode(`elemSym`, `cSym`)
+            if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
+            `vSym`.`fIdent` = some(`elemSym`)
+            `mark`
       if rootIf.isNil:
         rootIf = newNimNode(nnkIfStmt)
         rootIf.add(newNimNode(nnkElifBranch).add(cond).add(body))

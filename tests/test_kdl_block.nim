@@ -8,7 +8,7 @@
 ## These tests validate the orchestrator end-to-end by exercising
 ## the emitted procs on both directions.
 
-import std/unittest
+import std/[unittest, options]
 
 import ../src/cursor
 import ../src/derive_decode
@@ -114,3 +114,26 @@ suite "kdl: block — ckRef end-to-end round-trip (#9/#39)":
     check v2 != nil
     check v2.name == "web"
     check v2.port == 80
+
+import std/options
+
+suite "kdl: block — ckOption end-to-end round-trip (#39 item 1)":
+
+  kdl:
+    type OptKid {.kdlNode: "kid".} = object
+      tag {.kdlArg.}: string
+    type OptHost {.kdlNode: "host".} = object
+      kid {.kdlChild.}: Option[OptKid]
+
+  test "present optional child round-trips":
+    let v = OptHost(kid: some(OptKid(tag: "a")))
+    let bytes = encodeOne(v)
+    let v2 = decodeOne[OptHost](bytes)
+    check v2.kid.isSome
+    check v2.kid.get.tag == "a"
+
+  test "absent optional child round-trips as None":
+    let v = OptHost(kid: none(OptKid))
+    let bytes = encodeOne(v)
+    let v2 = decodeOne[OptHost](bytes)
+    check v2.kid.isNone
