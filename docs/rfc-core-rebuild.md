@@ -1,16 +1,21 @@
 # RFC: nkdl core rebuild — self-contained AST + per-category API
 
-**Status:** **LANDED (2026-06-03)** — the cutover is complete and verified. The
-self-contained owned-string core is live; the interned core
-(`ast`/`intern`/`doc_build`/`doc_emit`/`hashing`) is deleted; full suite green
-(`nimble -y test` EXIT=0, conformance 338/338, byte-exact preserve 243/0). Built via
-a strangler migration (parallel pipeline kept continuously green, then cut over).
-Foundation = **owned strings (O)**; SSO measurement (Stage-0) deferred — plain-O
-shipped (the RFC's take-on-tie default). Not yet committed (lands at once).
-**Remaining (post-cutover):** Cat-2 §8.7 codegen hardening (name-preserving slot
-inference / getTypeImpl dispatch / kdlScalar), field-path errors, partial-splice
-preserve under mutation, the NKDL_PROPTEST property-suite rebuild (P1–P12, needs the
-proptest dep), and the final commit.
+**Status:** **LANDED + COMMITTED (2026-06-03)** — the cutover is complete and verified.
+The self-contained owned-string core is live; the interned core
+(`ast`/`intern`/`doc_build`/`doc_emit`/`hashing`) is deleted. Built via a strangler
+migration (parallel pipeline kept continuously green, then cut over). Foundation =
+**owned strings (O)**; SSO measurement (Stage-0) deferred — plain-O shipped (the RFC's
+take-on-tie default). Committed on `core-rebuild` (`776bff2` the rebuild, `7af6e96`
+field-path; not pushed). **Default suite `nimble -y test` EXIT=0 (conformance 338/338,
+byte-exact preserve 243/0); gated `NKDL_PROPTEST=1 nimble test` EXIT=0, 710 OK** (the
+full property tier rebuilt onto the new core).
+**Done post-cutover:** property-suite migration (P1–P12); §8.7 — name-preserving slot
+inference, `uint`, `eqIdent`, >64-field guard, field-path errors; stable
+`ParseErrorCode`. `encode(doc)` defaults canonical (settled).
+**Remaining (finicky §8.7 polish, diminishing returns):** `ckOption` (Option[object]
+child — `nodeNameOf` needs inner→sym resolution), `ckRef`, `kdlScalar` + mixin
+`kdlDecodeValue`, leaf-field path enrichment, `$fieldType`→`getTypeImpl` dispatch, and
+partial-splice preserve under mutation.
 **Date:** 2026-06-03 (R3 review folded)
 **Supersedes:** the *substrate* sections of `rfc-api-v0.2-hardening.md` (F.0–F.6,
 §2.5 C0-x, the `ownerDocument`/`adopt`/ref-vs-arena material). That RFC's **API
