@@ -44,15 +44,22 @@ proc fieldInfo*(identDefs: NimNode, fieldIdx: int):
     result.name = $fieldNameNode
 
 iterator regularFields*(recList: NimNode):
-    tuple[name: string, typ: NimNode, pragmas: seq[NimNode]] =
+    tuple[name: string, typ: NimNode, pragmas: seq[NimNode], default: NimNode] =
   ## Walk a RecList yielding plain (non-variant) fields. Variant
   ## structure (RecCase) is handled separately by `findRecCase`.
+  ##
+  ## `default` is the IdentDefs' trailing default expression (`field = expr`),
+  ## or `newEmptyNode()` when the field has no native default. In an
+  ## `nnkIdentDefs` the layout is `[name…, type, default]`; `default` is the
+  ## last child (`^1`) and is `nnkEmpty` when absent.
   for child in recList:
     if child.kind != nnkIdentDefs: continue
     let fieldType = child[^2]
+    let fieldDefault = child[^1]
     for i in 0 ..< child.len - 2:
       let info = fieldInfo(child, i)
-      yield (name: info.name, typ: fieldType, pragmas: info.pragmas)
+      yield (name: info.name, typ: fieldType, pragmas: info.pragmas,
+             default: fieldDefault)
 
 proc findRecCase*(recList: NimNode): NimNode =
   ## Return the variant's RecCase node, or nil if the object is not a

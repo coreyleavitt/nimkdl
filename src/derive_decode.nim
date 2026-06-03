@@ -310,12 +310,19 @@ macro deriveDecode*(T: typedesc): untyped =
 
   # Collect kdlArg + kdlProp + kdlChild fields by pragma role.
   type ChildKind = enum ckSingle, ckSeq, ckOption
+  # pathExpr = the field's LHS access expression (default `v.<field>`, but
+  # S8 flatten passes a compound base). requiresUncheckedAssign = true only
+  # for the variant discriminator field; a discriminator write must stay
+  # wrapped in `{.cast(uncheckedAssign).}` at every emit site (rfc S0b).
   type ArgField = tuple[name: string, typ: NimNode, reservedTag: string,
-                        scalar: bool]
+                        scalar: bool, pathExpr: NimNode,
+                        requiresUncheckedAssign: bool]
   type PropField = tuple[name: string, typ: NimNode, wireKey: string,
-                         reservedTag: string, scalar: bool]
+                         reservedTag: string, scalar: bool, pathExpr: NimNode,
+                         requiresUncheckedAssign: bool]
   type ChildField = tuple[name: string, elemType: NimNode,
-                          kind: ChildKind, wireName: string]
+                          kind: ChildKind, wireName: string, pathExpr: NimNode,
+                          requiresUncheckedAssign: bool]
   var argFields: seq[ArgField]
   var propFields: seq[PropField]              # plain (non-variant) props
   var childFields: seq[ChildField]            # plain children
@@ -331,7 +338,18 @@ macro deriveDecode*(T: typedesc): untyped =
                 pragmas: seq[NimNode];
                 argSink: var seq[ArgField];
                 propSink: var seq[PropField];
-                childSink: var seq[ChildField]) =
+                childSink: var seq[ChildField];
+                baseExpr: NimNode = nil) =
+    # The field's LHS access expression. With no `baseExpr` (the S0b/default
+    # path) this is `v.<field>`, byte-identical to the prior emit-site
+    # `quote do: vSym.fIdent`. S8 flatten supplies a compound base prefix.
+    let pathExpr =
+      if baseExpr != nil: newDotExpr(baseExpr, ident(fieldName))
+      else: newDotExpr(vSym, ident(fieldName))
+    # The discriminator field is the only one whose assignment must be
+    # wrapped in `{.cast(uncheckedAssign).}` (a discriminator write is
+    # otherwise illegal outside its case branch).
+    let needsUnchecked = hasVariant and fieldName == discName
     let reservedArg = pragmaArg(pragmas, "kdlReserved")
     let reservedTag =
       if reservedArg != nil and reservedArg.kind == nnkStrLit:
@@ -344,7 +362,8 @@ macro deriveDecode*(T: typedesc): untyped =
     let scalar = hasPragma(pragmas, "kdlScalar")
     if hasPragma(pragmas, "kdlArg"):
       argSink.add((name: fieldName, typ: fieldType, reservedTag: reservedTag,
-                   scalar: scalar))
+                   scalar: scalar, pathExpr: pathExpr,
+                   requiresUncheckedAssign: needsUnchecked))
     elif hasPragma(pragmas, "kdlProp") or (scalar and
          not hasPragma(pragmas, "kdlChild")):
       let renameArg = pragmaArg(pragmas, "kdlRename")
@@ -353,7 +372,9 @@ macro deriveDecode*(T: typedesc): untyped =
           renameArg.strVal
         else: fieldName
       propSink.add((name: fieldName, typ: fieldType, wireKey: wireKey,
-                    reservedTag: reservedTag, scalar: scalar))
+                    reservedTag: reservedTag, scalar: scalar,
+                    pathExpr: pathExpr,
+                    requiresUncheckedAssign: needsUnchecked))
     elif hasPragma(pragmas, "kdlChild"):
       var kind: ChildKind
       var elemType: NimNode
@@ -369,7 +390,8 @@ macro deriveDecode*(T: typedesc): untyped =
         kind = ckSingle
         elemType = fieldType
       childSink.add((name: fieldName, elemType: elemType, kind: kind,
-                     wireName: nodeNameOf(elemType)))
+                     wireName: nodeNameOf(elemType), pathExpr: pathExpr,
+                     requiresUncheckedAssign: needsUnchecked))
     else:
       # No routing pragma — infer the slot from the field type (rfc §8.2,
       # name-preserving). Previously this fell through silently, dropping the
@@ -379,7 +401,8 @@ macro deriveDecode*(T: typedesc): untyped =
       if ft.kind == nnkBracketExpr and ft[0].eqIdent("seq"):
         if isObjectTypeResolved(ft[1]):
           childSink.add((name: fieldName, elemType: ft[1], kind: ckSeq,
-                         wireName: nodeNameOf(ft[1])))
+                         wireName: nodeNameOf(ft[1]), pathExpr: pathExpr,
+                         requiresUncheckedAssign: needsUnchecked))
         else:
           error("deriveDecode: cannot infer a KDL slot for seq field '" &
                 fieldName & "' of primitive elements — annotate it with " &
@@ -389,14 +412,17 @@ macro deriveDecode*(T: typedesc): untyped =
         # object infers to a single required child.
         let kind = if isOptionType(fieldType): ckOption else: ckSingle
         childSink.add((name: fieldName, elemType: ft, kind: kind,
-                       wireName: nodeNameOf(ft)))
+                       wireName: nodeNameOf(ft), pathExpr: pathExpr,
+                       requiresUncheckedAssign: needsUnchecked))
       else:
         # primitive / enum (incl. Option[primitive]) → prop; key = field name.
         propSink.add((name: fieldName, typ: fieldType, wireKey: fieldName,
-                      reservedTag: reservedTag, scalar: false))
+                      reservedTag: reservedTag, scalar: false,
+                      pathExpr: pathExpr,
+                      requiresUncheckedAssign: needsUnchecked))
 
   let recList = objectRecList(typeSym)
-  for (fieldName, fieldType, pragmas) in regularFields(recList):
+  for (fieldName, fieldType, pragmas, _) in regularFields(recList):
     classify(fieldName, fieldType, pragmas, argFields, propFields, childFields)
   let recCase = findRecCase(recList)
   if recCase != nil:
@@ -420,7 +446,7 @@ macro deriveDecode*(T: typedesc): untyped =
         elif branch.kind == nnkElse:   branch[0]
         else: newEmptyNode()
       if branchRecList.kind == nnkRecList:
-        for (bf, bt, bp) in regularFields(branchRecList):
+        for (bf, bt, bp, _) in regularFields(branchRecList):
           classify(bf, bt, bp, args2, props2, children2)
       if args2.len > 0 or children2.len > 0:
         error("deriveDecode: branch fields other than kdlProp not yet " &
@@ -462,19 +488,19 @@ macro deriveDecode*(T: typedesc): untyped =
   # discriminator is set; the cursor either provided it or the decode
   # already errored at the type level.
   var argSlots: seq[int]
-  for (fName, fType, _, _) in argFields:
+  for (fName, fType, _, _, _, _) in argFields:
     if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
       argSlots.add(-1)
     else:
       argSlots.add(claimSlot())
   var propSlots: seq[int]
-  for (fName, fType, _, _, _) in propFields:
+  for (fName, fType, _, _, _, _, _) in propFields:
     if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
       propSlots.add(-1)
     else:
       propSlots.add(claimSlot())
   var childSlots: seq[int]
-  for (_, _, kind, _) in childFields:
+  for (_, _, kind, _, _, _) in childFields:
     if kind in {ckSeq, ckOption}:
       childSlots.add(-1)  # empty seq / absent Option is fine
     else:
@@ -490,14 +516,17 @@ macro deriveDecode*(T: typedesc): untyped =
 
   # Build the per-arg dispatch.
   var argCase = newTree(nnkCaseStmt, argIdxSym)
-  for i, (fName, fType, reservedTag, argScalar) in argFields:
-    let fIdent = ident(fName)
+  for i, af in argFields:
+    let fName = af.name
+    let fType = af.typ
+    let reservedTag = af.reservedTag
+    let argScalar = af.scalar
     let idxLit = newIntLitNode(i)
     let tokIndexExpr = quote do: `evSym2`.argTok
-    let target = quote do: `vSym`.`fIdent`
+    let target = af.pathExpr
     var branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym, argScalar)
     enrichLeafErrors(branchBody, newLit(fName))
-    if hasVariant and fName == discName:
+    if af.requiresUncheckedAssign:
       let bodyCopy = branchBody
       branchBody = quote do:
         {.cast(uncheckedAssign).}:
@@ -552,12 +581,16 @@ macro deriveDecode*(T: typedesc): untyped =
       let fName = fields[i].name
       let fType = fields[i].typ
       let reservedTag = fields[i].reservedTag
-      let fIdent = ident(fName)
       let tokIndexExpr = quote do: `evSym2`.propValueTok
-      let target = quote do: `vSym`.`fIdent`
-      let decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym,
+      let target = fields[i].pathExpr
+      var decodeBody = emitTypedDecode(target, tokIndexExpr, fType, cSym,
                                        fields[i].scalar)
       enrichLeafErrors(decodeBody, newLit(fName))
+      if fields[i].requiresUncheckedAssign:
+        let bodyCopy = decodeBody
+        decodeBody = quote do:
+          {.cast(uncheckedAssign).}:
+            `bodyCopy`
       let mark = markSlot(slots[i])
       var reservedCheck = newStmtList()
       if reservedTag.len > 0:
@@ -640,8 +673,11 @@ macro deriveDecode*(T: typedesc): untyped =
   var childDispatchBody: NimNode
   if childFields.len > 0:
     var rootIf: NimNode = nil
-    for i, (fName, _, kind, wireName) in childFields:
-      let fIdent = ident(fName)
+    for i, cf in childFields:
+      let fName = cf.name
+      let kind = cf.kind
+      let wireName = cf.wireName
+      let pathExpr = cf.pathExpr
       let keyLit = newStrLitNode(wireName)
       let cond = quote do:
         bytesEqLit(`cSym`, `childPeekSym`.nodeNameTok, `keyLit`)
@@ -651,7 +687,7 @@ macro deriveDecode*(T: typedesc): untyped =
         case kind
         of ckSingle:
           quote do:
-            let r = kdlDecode(`vSym`.`fIdent`, `cSym`)
+            let r = kdlDecode(`pathExpr`, `cSym`)
             if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
             `mark`
         of ckSeq:
@@ -661,7 +697,7 @@ macro deriveDecode*(T: typedesc): untyped =
             var `elemSym`: `elemType`
             let r = kdlDecode(`elemSym`, `cSym`)
             if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
-            `vSym`.`fIdent`.add(`elemSym`)
+            `pathExpr`.add(`elemSym`)
         of ckOption:
           let elemSym = genSym(nskVar, "childElem")
           let elemType = childFields[i].elemType
@@ -669,7 +705,7 @@ macro deriveDecode*(T: typedesc): untyped =
             var `elemSym`: `elemType`
             let r = kdlDecode(`elemSym`, `cSym`)
             if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
-            `vSym`.`fIdent` = some(`elemSym`)
+            `pathExpr` = some(`elemSym`)
             `mark`
       if rootIf.isNil:
         rootIf = newNimNode(nnkIfStmt)

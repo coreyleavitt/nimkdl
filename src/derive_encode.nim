@@ -267,7 +267,7 @@ macro deriveEncode*(T: typedesc): untyped =
         childFields.add((name: fieldName, typ: fieldType, kind: ckSingle))
   let topRecList = objectRecList(typeSym)
   # Plain non-variant fields first (in declaration order).
-  for (fieldName, fieldType, pragmas) in regularFields(topRecList):
+  for (fieldName, fieldType, pragmas, _) in regularFields(topRecList):
     dispatchField(fieldName, fieldType, pragmas, body)
   # Variant discriminator + per-branch dispatch.
   let recCase = findRecCase(topRecList)
@@ -291,7 +291,7 @@ macro deriveEncode*(T: typedesc): untyped =
         elif branch.kind == nnkElse:   branch[0]
         else: newEmptyNode()
       if branchRecList.kind == nnkRecList:
-        for (fName, fType, fPragmas) in regularFields(branchRecList):
+        for (fName, fType, fPragmas, _) in regularFields(branchRecList):
           dispatchField(fName, fType, fPragmas, branchBody)
       if branchBody.len == 0:
         # Empty branches must still appear in the case to be exhaustive.
