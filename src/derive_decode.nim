@@ -295,6 +295,13 @@ macro deriveDecode*(T: typedesc): untyped =
   ## each to the right field, returns success or the first error.
   let typeSym = T.getTypeInst[1]
   let wireName = nodeNameOf(typeSym)
+  # `ref object` as the user-facing type (#9/#39): the proc receives
+  # `v: var RefT` defaulted to nil, so the field assignments below would
+  # deref nil. Allocate once up front. Value objects need no prologue.
+  let typeIsRef = typeSym.getImpl[2].kind == nnkRefTy
+  let refInit =
+    if typeIsRef: newCall(ident("new"), ident("v"))
+    else: newEmptyNode()
   let vSym = ident("v")
   let cSym = ident("c")
   let evSym = ident("ev")
@@ -657,6 +664,7 @@ macro deriveDecode*(T: typedesc): untyped =
   let body = quote do:
     block:
       var `seenSym`: uint64 = 0
+      `refInit`
       let `evSym` = advance(`cSym`)
       if `evSym`.kind == ceError:
         return err[void, ParseError](`evSym`.err[])

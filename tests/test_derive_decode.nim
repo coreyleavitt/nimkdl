@@ -624,3 +624,50 @@ suite "derive_decode — slashdash entry/children suppression (regression)":
     check res.isOk
     check p.kids.len == 1
     check p.kids[0].tag == "real"
+
+suite "derive_decode — ckRef: ref object as the user-facing type (#9/#39)":
+
+  type RefSvc {.kdlNode: "rsvc".} = ref object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+
+  deriveDecode(RefSvc)
+
+  test "ref object allocates and populates":
+    let f = mkCursor("rsvc \"web\" port=8")
+    var s: RefSvc
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s != nil
+    check s.name == "web"
+    check s.port == 8
+
+suite "derive_decode — ckRef: ref object as child field (#9/#39)":
+
+  type RefKid {.kdlNode: "kid".} = ref object
+    tag {.kdlArg.}: string
+  type RefParent1 {.kdlNode: "parent".} = object
+    one {.kdlChild.}: RefKid
+  type RefParentN {.kdlNode: "parent".} = object
+    many {.kdlChild.}: seq[RefKid]
+
+  deriveDecode(RefKid)
+  deriveDecode(RefParent1)
+  deriveDecode(RefParentN)
+
+  test "single ref child allocates and populates":
+    let f = mkCursor("parent {\n  kid \"a\"\n}")
+    var p: RefParent1
+    let r = kdlDecode(p, f.cursor)
+    check r.isOk
+    check p.one != nil
+    check p.one.tag == "a"
+
+  test "seq of ref children each allocate":
+    let f = mkCursor("parent {\n  kid \"a\"\n  kid \"b\"\n}")
+    var p: RefParentN
+    let r = kdlDecode(p, f.cursor)
+    check r.isOk
+    check p.many.len == 2
+    check p.many[0].tag == "a"
+    check p.many[1].tag == "b"

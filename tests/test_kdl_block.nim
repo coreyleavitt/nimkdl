@@ -98,3 +98,19 @@ suite "kdl: block — E1 helper types without kdlNode pass through":
     let v = decodeOne[Tag]("tag \"alpha\" color=\"red\"")
     check v.name == "alpha"
     check v.color == cRed
+
+suite "kdl: block — ckRef end-to-end round-trip (#9/#39)":
+
+  kdl:
+    type RefHost {.kdlNode: "host".} = ref object
+      name {.kdlArg.}: string
+      port {.kdlProp.}: int
+
+  test "kdl block emits both derives for a ref type; round-trips":
+    let v = RefHost(name: "web", port: 80)
+    let bytes = encodeOne(v)
+    check bytes == "host \"web\" port=80\n"
+    let v2 = decodeOne[RefHost](bytes)
+    check v2 != nil
+    check v2.name == "web"
+    check v2.port == 80

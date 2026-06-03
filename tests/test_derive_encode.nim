@@ -434,3 +434,17 @@ suite "derive_encode — C10: kdlReserved + kdlRename + P8 determinism":
     kdlEncode(s, e1)
     kdlEncode(s, e2)
     check e1.finish() == e2.finish()
+
+suite "deriveEncode — ckRef: ref object as the user-facing type (#9)":
+
+  type RefSvc {.kdlNode: "rsvc".} = ref object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int
+
+  deriveEncode(RefSvc)
+
+  test "ref object encodes through deref":
+    var s = RefSvc(name: "web", port: 8)
+    var e = newBufferEmitter()
+    kdlEncode(s, e)
+    check e.finish() == "rsvc \"web\" port=8\n"
