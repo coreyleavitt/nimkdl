@@ -57,10 +57,9 @@ benchmarks/comparisons/last-run.txt
 benchmarks/comparisons/last-mem.txt
 benchmarks/comparisons/last-corpus.txt
 benchmarks/typed_roundtrip
-tests/probe_vm
+tests/*probe*
 tests/test_*[^.nim]
 benchmarks/spike_bytesEq
-tests/p6probe
 
 # Rust cross-impl adapter build artifacts
 conformance/adapters/kdl-rs/target/
