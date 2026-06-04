@@ -22,6 +22,7 @@
 ## `embed[T]` is a one-line wrapper.
 
 import std/macros  # `error` — compile-time {.error.} emission for embed/embedFile (D1)
+import std/options  # Option access for the node prop/arg lookup (decodeProp/decodeArg, review #10)
 
 import ./cursor
 import ./derive_decode  # for kdlDecode mixin resolution + Result/ParseError
@@ -479,6 +480,36 @@ proc coerce*[T](val: KdlValue): Result[T, ParseError] {.noSideEffect, raises: []
       {.error: "coerce[T]: unsupported scalar type '" & $T & "'. Supported: " &
                "string/bool/int*/uint*/float*/enum, or a custom type with a " &
                "kdlDecodeValue hook.".}
+
+proc decodeProp*[T](node: KdlNode, key: string):
+    Result[T, ParseError] {.raises: [].} =
+  ## Decode node's property `key` into a scalar `T` — the **node-value leg** of
+  ## the typed bridge (rfc-consumer-api §4.6; review #10). Looks up the prop's
+  ## `KdlValue` via `node.prop(key)` and routes it through `coerce[T]`, so this
+  ## reaches `{.kdlScalar.}` custom types that the kind-fixed `propInt`/`propStr`
+  ## family cannot. A missing prop is a `peTypeMissingRequired` error whose hint
+  ## names the key and the node.
+  let v = node.prop(key)
+  if v.isNone:
+    return err[T, ParseError](initError(
+      peTypeMissingRequired, node.span,
+      "no property '" & key & "' on node '" & node.name & "'"))
+  coerce[T](v.get)
+
+proc decodeArg*[T](node: KdlNode, i: int):
+    Result[T, ParseError] {.raises: [].} =
+  ## Decode node's `i`-th positional argument into a scalar `T` — the node-value
+  ## leg's positional twin (rfc-consumer-api §4.6; review #10). Looks up the
+  ## arg's `KdlValue` via `node.arg(i)` (properties interleaved among args are
+  ## skipped) and routes it through `coerce[T]`, reaching `{.kdlScalar.}` types
+  ## that the kind-fixed `argInt`/`argStr` family cannot. An out-of-range index
+  ## is a `peTypeMissingRequired` error whose hint names the index and the node.
+  let v = node.arg(i)
+  if v.isNone:
+    return err[T, ParseError](initError(
+      peTypeMissingRequired, node.span,
+      "no argument at index " & $i & " on node '" & node.name & "'"))
+  coerce[T](v.get)
 
 proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T {.raises: [].} =
   ## Decode `node` into `T`, returning `fallback` on ANY decode error

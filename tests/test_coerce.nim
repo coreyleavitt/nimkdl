@@ -10,6 +10,7 @@ import std/[options, unittest]
 import ../src/api
 import ../src/value
 import ../src/spans
+import ../src/node   # newNode / setProp* / addArg builders for decodeProp/decodeArg tests
 
 suite "coerce — built-in scalars":
 
@@ -193,3 +194,55 @@ suite "coerce negative compile-guards (review #8)":
   test "coerce[Color] (object WITH a kdlDecodeValue hook) DOES compile":
     # The hook is the scalar contract — object targets that carry it are allowed.
     check(compiles(coerce[Color](newKdlString("#fff"))))
+
+suite "decodeProp[T](node, key) — typed node property accessor (review #10)":
+
+  test "decodeProp[int] of a present int prop":
+    let n = newNode("server")
+    n.setPropInt("port", 8080)
+    let r = decodeProp[int](n, "port")
+    check r.isOk
+    check r.get == 8080
+
+  test "decodeProp to a {.kdlScalar.} type — what propInt/propStr can't reach":
+    let n = newNode("swatch")
+    n.setPropStr("shade", "#ff8000")
+    let r = decodeProp[Color](n, "shade")   # custom scalar via the kdlDecodeValue hook
+    check r.isOk
+    check r.get == Color(r: 255, g: 128, b: 0)
+
+  test "decodeProp of a missing prop → peTypeMissingRequired":
+    let n = newNode("server")
+    let r = decodeProp[int](n, "port")
+    check r.isErr
+    check r.getErr.code == peTypeMissingRequired
+
+  test "decodeProp surfaces a kind mismatch from coerce":
+    let n = newNode("server")
+    n.setPropStr("port", "nope")
+    let r = decodeProp[int](n, "port")
+    check r.isErr
+    check r.getErr.code == peTypeMismatch
+
+suite "decodeArg[T](node, i) — typed node positional-arg accessor (review #10)":
+
+  test "decodeArg[string] of the 0th arg":
+    let n = newNode("server")
+    n.addArg(newKdlString("localhost"))
+    let r = decodeArg[string](n, 0)
+    check r.isOk
+    check r.get == "localhost"
+
+  test "decodeArg to a {.kdlScalar.} type":
+    let n = newNode("swatch")
+    n.addArg(newKdlString("#00ff00"))
+    let r = decodeArg[Color](n, 0)
+    check r.isOk
+    check r.get == Color(r: 0, g: 255, b: 0)
+
+  test "decodeArg out-of-range index → peTypeMissingRequired":
+    let n = newNode("server")
+    n.addArg(newKdlString("localhost"))
+    let r = decodeArg[string](n, 3)
+    check r.isErr
+    check r.getErr.code == peTypeMissingRequired
