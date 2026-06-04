@@ -13,6 +13,7 @@
 
 import std/unittest
 import std/options
+import std/strutils
 
 import ../src/api
 import ../src/parser
@@ -206,3 +207,77 @@ suite "decodeNode[T](node) re-emit round-trip hazard pins (§8 N2f)":
     let r = decodeNode[Swatch](n)
     check r.isOk
     check r.get.shade == Hue(v: 200)
+
+suite "decodeChild[T](doc, parent, childName) — first-wins child decode (N3)":
+
+  test "decodes the named child of a parent node to T":
+    let src = "service {\n" &
+              "  daemon \"web\" port=80\n" &
+              "}\n"
+    let d = parseDoc(src)
+    let parent = d.nodes[0]
+    let r = decodeChild[Daemon](d, parent, "daemon")
+    check r.isOk
+    check r.get.name == "web"
+    check r.get.port == 80
+
+  test "first-wins: duplicate children named 'daemon' → picks child #1":
+    let src = "service {\n" &
+              "  daemon \"first\" port=1\n" &
+              "  daemon \"second\" port=2\n" &
+              "}\n"
+    let d = parseDoc(src)
+    let parent = d.nodes[0]
+    let r = decodeChild[Daemon](d, parent, "daemon")
+    check r.isOk
+    check r.get.name == "first"   # first-wins, not "second"
+    check r.get.port == 1
+
+  test "missing child → clear error (peTypeMissingRequired) with helpful hint":
+    let src = "service {\n" &
+              "  daemon \"web\" port=80\n" &
+              "}\n"
+    let d = parseDoc(src)
+    let parent = d.nodes[0]
+    let r = decodeChild[Permissions](d, parent, "permissions")
+    check r.isErr
+    let e = r.getErr
+    check e.code == peTypeMissingRequired
+    check e.hint.contains("permissions")   # the missing child name
+    check e.hint.contains("service")        # the parent name for context
+
+  test "decoded child error rebases to the child's true file line/col":
+    let src = "service {\n" &
+              "  daemon \"web\" port=\"oops\"\n" &   # port wants int → line 2
+              "}\n"
+    let d = parseDoc(src)
+    let parent = d.nodes[0]
+    let r = decodeChild[Daemon](d, parent, "daemon")
+    check r.isErr
+    check r.getErr.line == 2
+
+suite "decodeOr[T](doc, node, fallback) — value or fallback, never errs (N3)":
+
+  test "good node → the decoded value (fallback ignored)":
+    let src = "daemon \"web\" port=80\n"
+    let d = parseDoc(src)
+    let fallback = Daemon(name: "DEFAULT", port: 0)
+    let v = decodeOr[Daemon](d, d.nodes[0], fallback)
+    check v.name == "web"
+    check v.port == 80
+
+  test "bad node (wrong type) → exactly the fallback, no error surfaced":
+    let src = "daemon \"web\" port=\"oops\"\n"   # port wants int → decode fails
+    let d = parseDoc(src)
+    let fallback = Daemon(name: "DEFAULT", port: 42)
+    let v = decodeOr[Daemon](d, d.nodes[0], fallback)
+    check v == fallback
+    check v.name == "DEFAULT"
+    check v.port == 42
+
+  test "name-mismatch node → fallback (decode would error on name check)":
+    let src = "permissions \"rw\"\n"
+    let d = parseDoc(src)
+    let fallback = Daemon(name: "DEFAULT", port: 7)
+    let v = decodeOr[Daemon](d, d.nodes[0], fallback)
+    check v == fallback

@@ -248,3 +248,38 @@ proc decodeNode*[T](node: KdlNode):
   ##   The §8 N2f round-trip property tests pin these hazards so the path stays
   ##   honest even though the call site can't see the degradation.
   reEmitDecodeNode[T](node)
+
+proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string):
+    Result[T, ParseError] =
+  # NOTE(H1): inherits the same raises deferral as `decodeNode(doc, node)` —
+  # the found child may have `span.length == 0` (a hand-built parent's child),
+  # in which case `decodeNode` delegates to the re-emit fallback whose
+  # `encode(node)` infers raises:[Exception] (the H1 boundary, rfc §4.5). Left
+  # honestly unconstrained — no escape hatch — until H1 folds the emit chain.
+  ## Decode the FIRST child of `parent` named `childName` into `T`
+  ## (rfc-consumer-api §4.2, N3). **First-wins on duplicate children** — reuses
+  ## the `node.child(name)` lookup, which returns the first match in source
+  ## order. The found child is decoded via `decodeNode[T](doc, node)`, so a
+  ## parsed child carries true source line/col on errors (and a hand-built
+  ## child's `span.length == 0` routes through the re-emit fallback).
+  ##
+  ## If `parent` has no child named `childName`, returns a `peTypeMissingRequired`
+  ## error whose `hint` names the missing child and its parent for context.
+  let kid = parent.child(childName)
+  if kid.isNil:
+    return err[T, ParseError](initError(
+      peTypeMissingRequired, parent.span,
+      "no child named '" & childName & "' in node '" & parent.name & "'"))
+  decodeNode[T](doc, kid)
+
+proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T =
+  # NOTE(H1): inherits the `decodeNode(doc, node)` raises deferral (re-emit
+  # fallback when node.span.length == 0). No escape hatch; folded under
+  # {.raises:[].} at H1 with the rest of the decode surface.
+  ## Decode `node` into `T`, returning `fallback` on ANY decode error
+  ## (rfc-consumer-api §4.2, N3). Never surfaces a `ParseError` to the caller —
+  ## the total-by-construction "value or default" leg of the bridge. Routes
+  ## through `decodeNode[T](doc, node)` (true source spans for parsed nodes;
+  ## re-emit fallback for hand-built ones), discarding the error on `isErr`.
+  let r = decodeNode[T](doc, node)
+  if r.isErr: fallback else: r.get
