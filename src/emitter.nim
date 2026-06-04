@@ -6,6 +6,15 @@ import ./lexer  # isBareword + isDisallowedControl — emitter is the dual of le
 import ./numlit  # formatInt / formatFloat / formatBigInt — numeric value → wire bytes
 import ./spec_literals  # KdlKeywordLiterals + KdlSlashdash — wire bytes single source of truth
 
+# H1 (rfc-consumer-api §4.5): the emitter primitives are the LEAVES of the
+# encode chain. They are pure byte-appends over an in-memory buffer —
+# structurally total. `func` already gave `{.noSideEffect.}`, but `func` does
+# NOT imply `raises:[]`; making it explicit here is what lets the whole encode
+# surface (`encode[T]` → derive `kdlEncode` → pushArg*) fold under
+# `{.raises:[].}` at the public boundary. Any genuine raiser the compiler finds
+# here gets fixed at the root, not hatched.
+{.push raises: [].}
+
 ## emitter — symmetric OUT-side inverse of `KdlCursor`.
 ##
 ## A KdlEmitter accepts push events (NodeBegin / Arg / Prop /

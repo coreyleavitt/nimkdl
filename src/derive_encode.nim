@@ -479,5 +479,16 @@ macro deriveEncode*(T: typedesc): untyped =
     params = @[newEmptyNode(),
                newIdentDefs(vSym, typeSym),
                newIdentDefs(eSym, nnkVarTy.newTree(ident("BufferEmitter")))],
-    body = body
+    body = body,
+    # H1 (rfc-consumer-api §4.5): emit `{.raises:[].}` on the generated
+    # kdlEncode. Its body is nothing but calls into the now-`{.raises:[].}`
+    # emitter primitives (pushArg*/pushProp*/pushNodeBegin/…) plus the user's
+    # `kdlEncodeValue` scalar hook (itself emitter-leaf-only) — structurally
+    # total. Making it explicit (rather than relying on Nim's raises inference)
+    # is what lets `encode[T]` → kdlEncode fold under `{.raises:[].}` at the
+    # public boundary: inference would otherwise re-open the question at every
+    # instantiation site. A user `kdlScalar` hook that genuinely raises will now
+    # fail HERE with a precise raises-effect error — the correct, honest place.
+    pragmas = nnkPragma.newTree(
+      nnkExprColonExpr.newTree(ident("raises"), nnkBracket.newTree()))
   )

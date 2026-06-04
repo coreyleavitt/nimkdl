@@ -17,6 +17,14 @@ import ./value
 import ./emitter
 export emitter   # BufferEmitter, newBufferEmitter, finish
 
+# H1 (rfc-consumer-api §4.5): the node-emit walk is a pure tree traversal over
+# the emitter leaves (now {.raises:[].}). emitNode/emitDoc/encode are total —
+# `func` gave noSideEffect, this makes raises:[] explicit so the re-emit
+# fallback (reEmitDecodeNode → encode(node)) and the public encode(node) entry
+# can fold under {.raises:[].} in api.nim. The `encode(doc, ...)` preserve
+# overloads are `proc` (they branch on docClean) but remain non-raising.
+{.push raises: [].}
+
 func emitNode(n: KdlNode, e: var BufferEmitter) =
   e.pushNodeBeginV(n.name, n.typeAnnotation)
   for entry in n.entries:

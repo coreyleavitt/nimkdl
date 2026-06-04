@@ -114,8 +114,7 @@ proc decodeFile*[T](path: string):
         "could not read '" & path & "': " & e.msg))
   decode[T](content, path)
 
-proc encode*[T](v: T): string =
-  # TODO(H1): fold under {.raises:[].} once emitter chain is triaged
+proc encode*[T](v: T): string {.raises: [].} =
   ## Encode `v` to KDL wire bytes.
   ##
   ## For object types with `{.kdlNode.}`, emits a single top-level node.
@@ -226,15 +225,7 @@ template embedFile*[T](path: static[string]): T =
   embedFileImpl(T, path)
 
 proc reEmitDecodeNode*[T](node: KdlNode):
-    Result[T, ParseError] =
-  # TODO(H1): fold under {.raises:[].} once the emitter chain is triaged.
-  # `encode(node)` transitively infers `raises:[Exception]` (the H1 boundary
-  # flagged in rfc-consumer-api §4.5 / §7) — `func` gives noSideEffect, NOT
-  # raises:[]. Left honestly unconstrained (no CatchableError/Exception escape
-  # hatch) exactly as `encode[T]` is, until H1 brings the emit surface under
-  # the invariant. The slice path of `decodeNode` (the §4.2 centerpiece) does
-  # NOT touch this and is itself raises-clean; only this re-emit fallback (and
-  # the decodeNode that may delegate to it) inherits the deferral.
+    Result[T, ParseError] {.raises: [].} =
   ## Re-emit fallback for a node with **no source** (hand-built, `span.length
   ## == 0`): canonical-`encode` the node back to KDL text (N1's `encode(node)`),
   ## then `decode[T]` that text. Errors enrich against the re-emitted text,
@@ -248,13 +239,7 @@ proc reEmitDecodeNode*[T](node: KdlNode):
   decode[T](encode(node))
 
 proc decodeNode*[T](doc: KdlDoc, node: KdlNode):
-    Result[T, ParseError] =
-  # NOTE(H1): the slice path below is fully raises-clean (decodeInternal +
-  # rebased + enriched are all {.raises:[].}). The `span.length == 0` branch
-  # delegates to `reEmitDecodeNode`, whose `encode(node)` infers
-  # raises:[Exception] — the H1 boundary (rfc §4.5). So this proc inherits the
-  # deferral and stays honestly unconstrained until H1 folds the emit chain
-  # under {.raises:[].}. No escape hatch — matching `encode[T]`.
+    Result[T, ParseError] {.raises: [].} =
   ## Decode a single DOM `node` into `T`, reusing the one decoder over the
   ## node's **original source bytes** (rfc-consumer-api §4.2, the centerpiece).
   ##
@@ -284,12 +269,7 @@ proc decodeNode*[T](doc: KdlDoc, node: KdlNode):
   r
 
 proc decodeNode*[T](node: KdlNode):
-    Result[T, ParseError] =
-  # TODO(H1): same deferral as `reEmitDecodeNode` / `decodeNode(doc, node)`.
-  # This overload is a thin call into `reEmitDecodeNode[T]`, whose `encode(node)`
-  # transitively infers `raises:[Exception]` (the H1 boundary, rfc §4.5). Left
-  # honestly unconstrained — no CatchableError/Exception escape hatch — until H1
-  # folds the emit chain under {.raises:[].}.
+    Result[T, ParseError] {.raises: [].} =
   ##
   ## .. warning:: **Doc-less re-emit fallback — lossier than `decodeNode(doc, node)`.**
   ##   This overload exists for nodes built **programmatically** (no source span:
@@ -313,12 +293,7 @@ proc decodeNode*[T](node: KdlNode):
   reEmitDecodeNode[T](node)
 
 proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string):
-    Result[T, ParseError] =
-  # NOTE(H1): inherits the same raises deferral as `decodeNode(doc, node)` —
-  # the found child may have `span.length == 0` (a hand-built parent's child),
-  # in which case `decodeNode` delegates to the re-emit fallback whose
-  # `encode(node)` infers raises:[Exception] (the H1 boundary, rfc §4.5). Left
-  # honestly unconstrained — no escape hatch — until H1 folds the emit chain.
+    Result[T, ParseError] {.raises: [].} =
   ## Decode the FIRST child of `parent` named `childName` into `T`
   ## (rfc-consumer-api §4.2, N3). **First-wins on duplicate children** — reuses
   ## the `node.child(name)` lookup, which returns the first match in source
@@ -418,10 +393,7 @@ proc coerce*[T](val: KdlValue): Result[T, ParseError] {.noSideEffect, raises: []
                "string/bool/int*/uint*/float*/enum, or a custom type with a " &
                "kdlDecodeValue hook.".}
 
-proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T =
-  # NOTE(H1): inherits the `decodeNode(doc, node)` raises deferral (re-emit
-  # fallback when node.span.length == 0). No escape hatch; folded under
-  # {.raises:[].} at H1 with the rest of the decode surface.
+proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T {.raises: [].} =
   ## Decode `node` into `T`, returning `fallback` on ANY decode error
   ## (rfc-consumer-api §4.2, N3). Never surfaces a `ParseError` to the caller —
   ## the total-by-construction "value or default" leg of the bridge. Routes

@@ -11,6 +11,9 @@ import ../src/api
 import ../src/kdl_block
 import ../src/pragmas
 import ../src/spans
+import ../src/node          # KdlNode / KdlDoc for the H1 raises compile-proof
+import ../src/parser        # parse — to obtain a real doc/node in the proof
+import ../src/value         # KdlValue — coerce leg of the proof
 
 # kdl: at module scope so the emitted kdlDecode is visible to the
 # `decode[Service]` generic instantiation site below.
@@ -188,3 +191,34 @@ suite "C2 — decodeFile[T]":
     proc onlyResults(p: string): bool {.raises: [].} =
       decodeFile[Service](p).isErr
     check onlyResults("does/not/exist.kdl")
+
+suite "H1 — whole public surface is {.raises:[].} (rfc-consumer-api §4.5/§7)":
+  # The "test" of H1 is compile-driven: `useSurface` is a {.raises:[].} proc
+  # that exercises EVERY public api.nim entry — decode (source), encode (the
+  # triaged emit chain), the node↔T bridge (decodeNode both overloads,
+  # decodeChild, decodeOr, reEmitDecodeNode), and the value leg (coerce). It
+  # compiles ONLY if every one of them is genuinely non-raising; a single
+  # raises-leaky callee anywhere in the encode/emit chain would fail this proc
+  # at compile time. Mirrors the C2 {.raises:[].} wrapper-proof pattern.
+  proc useSurface(src: string, val: KdlValue) {.raises: [].} =
+    # encode[T] — the H1 deferral's centerpiece (emit chain triaged to raises:[])
+    let bytes = encode(Service(name: "web", port: 80))
+    # decode[T] — source → T
+    discard decode[Service](bytes)
+    discard decode[Service](src)
+    # node↔T bridge. Parse to obtain a real doc + node.
+    let pr = parse(src)
+    if pr.isOk:
+      let doc = pr.get
+      if doc.rootNodes.len > 0:
+        let n = doc.rootNodes[0]
+        discard decodeNode[Service](doc, n)              # source-slice path
+        discard decodeNode[Service](n)                   # doc-less re-emit overload
+        discard reEmitDecodeNode[Service](n)             # explicit re-emit fallback
+        discard decodeChild[Service](doc, n, "service")  # child lookup leg
+        discard decodeOr[Service](doc, n, Service(name: "fallback", port: 0))
+    # coerce — value → T (scalar leg)
+    discard coerce[string](val)
+
+  test "useSurface compiles + runs (proof the whole surface is raises-clean)":
+    useSurface("service \"web\" port=80", newKdlString("hi"))
