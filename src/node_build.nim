@@ -219,6 +219,13 @@ proc parseNodesAll*(source: string, sourcePath = "<input>"):
   var c = initStringCursor(addr stream, source, mode = cmAccumulating)
   # Public boundary: enrich every collected error with line/col + sourcePath
   # once, here, where `source` is in hand (rfc-consumer-api §4.4).
+  # Build the LineMap ONCE over `source`, not per erroring node: the
+  # `enriched(source, ...)` overload rescans the whole source on each call, so
+  # an error-dense source paid O(N·n) (the same DoS class as decodeAll, review
+  # #3-residual). Enrich every collected error through the prebuilt-map overload
+  # instead — O(n + N·log n). Coordinates are byte-identical (same lineColOf over
+  # the same absolute offset).
   result = buildNodeDocAll(c, sourcePath)
+  let lm = buildLineMap(source)
   for i in 0 ..< result.errors.len:
-    result.errors[i] = result.errors[i].enriched(source, sourcePath)
+    result.errors[i] = result.errors[i].enriched(lm, sourcePath)
