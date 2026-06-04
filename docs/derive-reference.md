@@ -133,7 +133,8 @@ path) into a `peIOError` `ParseError` rather than raising. `decodeAll` returns a
 proc decodeNode*[T](doc: KdlDoc, node: KdlNode): Result[T, ParseError]
 proc decodeNode*[T](node: KdlNode): Result[T, ParseError]
 proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string): Result[T, ParseError]
-proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T
+proc decodeProp*[T](node: KdlNode, key: string): Result[T, ParseError]
+proc decodeArg*[T](node: KdlNode, i: int): Result[T, ParseError]
 proc coerce*[T](val: KdlValue): Result[T, ParseError]
 ```
 
@@ -153,8 +154,19 @@ proc coerce*[T](val: KdlValue): Result[T, ParseError]
 - `decodeChild[T](doc, parent, childName)` — decode `parent`'s **first** child
   named `childName` (first-wins on duplicates) via `decodeNode`. A missing child
   is a `peTypeMissingRequired` error naming the child and parent.
-- `decodeOr[T](doc, node, fallback)` — decode `node`, returning `fallback` on
-  **any** error. Never surfaces a `ParseError`.
+  To return a default instead of an error, compose with `Result.valueOr`:
+  `decodeNode[T](doc, n).valueOr(fallback)` — strictly more general than a
+  dedicated combinator and composes over the whole `Result` surface.
+- `decodeProp[T](node, key)` — decode a single **property** value into scalar
+  `T`: the value leg's named twin. Carries error currency and reaches
+  `{.kdlScalar.}` / enum types. A missing prop is a `peTypeMissingRequired`
+  error naming the key and node.
+- `decodeArg[T](node, i)` — decode the `i`-th **positional argument** into scalar
+  `T` (properties interleaved among args are skipped). Same error currency and
+  `{.kdlScalar.}` / enum reach as `decodeProp`; an out-of-range index errors.
+- `propInt`/`propStr`/`argInt`/`argStr` (`src/node.nim`) — by contrast, are
+  quick **optional peeks** that return `Option[…]` where *absent* and
+  *wrong-kind* both collapse to `none` (no error, no `{.kdlScalar.}` reach).
 - `coerce[T](val)` — coerce a single **scalar** `KdlValue` into `T`: the value
   leg of the bridge (`string`/`bool`/`int*`/`uint*`/`float*`/`enum`, or a custom
   type with a `kdlDecodeValue` hook in scope). Instantiating it with an aggregate

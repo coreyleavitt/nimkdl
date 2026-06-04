@@ -111,8 +111,17 @@ the decode boundary, so the error outlives the source string.
 | `decodeNode[T](doc, node) -> Result[T, ParseError]` | Decode a parsed node from its verbatim source bytes (true line/col on errors). |
 | `decodeNode[T](node) -> Result[T, ParseError]` | Doc-less overload for **hand-built** nodes (re-emits then decodes; lossier — see `derive-reference.md`). |
 | `decodeChild[T](doc, parent, childName) -> Result[T, ParseError]` | Decode `parent`'s first child named `childName`. |
-| `decodeOr[T](doc, node, fallback) -> T` | Decode, or return `fallback` on any error — never raises. |
+| `decodeProp[T](node, key) -> Result[T, ParseError]` | Decode a single property value into scalar `T` (the value leg's named twin). |
+| `decodeArg[T](node, i) -> Result[T, ParseError]` | Decode the `i`-th positional argument into scalar `T`. |
 | `coerce[T](val: KdlValue) -> Result[T, ParseError]` | Coerce a single scalar `KdlValue` into `T` (the value leg of the bridge). |
+
+To return a default instead of an error, compose with `Result.valueOr`:
+`decodeNode[Daemon](doc, n).valueOr(Daemon(name: "DEFAULT", port: 0))`.
+
+`decodeProp[T]`/`decodeArg[T]` carry error currency and reach `{.kdlScalar.}` /
+enum types; the kind-fixed `propInt`/`propStr`/`argInt`/`argStr` family
+(`src/node.nim`) are quick optional peeks where *absent* and *wrong-kind* both
+collapse to `none`.
 
 ## Spec coverage
 

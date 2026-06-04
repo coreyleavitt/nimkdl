@@ -123,6 +123,16 @@ proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string): Result[T,
 proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T            ## value or fallback, never errs
 ```
 
+> **Post-review amendment (R2):** `decodeOr` (slice N3) and the later
+> review-follow-up `DocView` (+ `view`/`.nodes`/`.decode`/`.child`) were **CUT**
+> after round-2 review. `decodeOr` is subsumed by `Result.valueOr`
+> (`decodeNode[T](doc, n).valueOr(fb)` — strictly more general); `DocView` was
+> doc-capturing sugar longer than the free `decodeNode[T](doc, n)` and collided
+> with `KdlDoc.nodes`. The shipped node-decode surface is `decodeNode` (both
+> overloads) + `decodeChild` + the scalar twins `decodeProp`/`decodeArg`. The
+> blessed heterogeneous-dispatch idiom is the plain `for n in doc.nodes:
+> case n.name` loop.
+
 **Distinct name `decodeNode`** (round-1 design — not a `decode` overload; different
 error-attribution warrants a distinct entry). Takes the **doc** because `KdlNode` is
 doc-free, so the source + span live on the doc, not the node — a clean,
@@ -262,7 +272,7 @@ proc coerce*[T](val: KdlValue): Result[T, ParseError]  ## KdlValue → T via the
 
 ## 5. Best-in-class checklist (settled)
 
-- **In scope:** §5.5 per-node span (S); `decodeNode`/`decodeChild`/`decodeOr` (A);
+- **In scope:** §5.5 per-node span (S); `decodeNode`/`decodeChild` (A) (`decodeOr` CUT — see §4.2 amendment);
   `sourcePath`+`decodeFile`+`Parsed[T]`+`peIOError` (C); rich `ParseError`+`$err`
   (B); `{.raises:[].}` (H); `encode(node)` (E); `coerce` (V); embed + `encode[T]`→bare
   (D); heterogeneous-dispatch doc pattern.
@@ -292,7 +302,7 @@ fallback where no source exists.
 | C1 | `sourcePath` on `decode`/`decodeAll`; `decodeAll → Parsed[T]`; `peIOError` in `ParseErrorCode` | med |
 | N2 | `decodeNode[T](doc, node)` source-slice + `rebased` + `enriched` (seq-guard, name-check) | high |
 | N2f | `decodeNode[T](node)` re-emit fallback (overload; hazard doc-comment per §9.3) | med |
-| N3 | `decodeChild[T]` + `decodeOr[T]` | low |
+| N3 | `decodeChild[T]` + ~~`decodeOr[T]`~~ (CUT R2 — use `Result.valueOr`; see §4.2) | low |
 | V1 | `coerce[T](KdlValue)` | low |
 | C2 | `decodeFile[T]` | low |
 | D1 | `embedFile[T]` macro; `embed[T]` `{.error.}` on failure | med |
