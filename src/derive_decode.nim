@@ -159,7 +159,7 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
     let elseErr = quote do:
       return err[void, ParseError](
         initError(peTypeEnumInvalid, `tokSym`.span,
-                  "value does not match any enum variant"))
+                  msgEnumNoVariant))
     caseStmt.add(newTree(nnkElse, elseErr))
     return quote do:
       let `tokSym` = `cSym`.stream[].tokens[`tokIndexExpr`]
@@ -180,14 +180,14 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
         `targetIdent` = tokenAsString(tok, `cSym`.stream[], `cSym`.source)
       else:
         return err[void, ParseError](
-          initError(peTypeMismatch, tok.span, "expected string value"))
+          initError(peTypeMismatch, tok.span, msgExpectedString))
   of "int", "int8", "int16", "int32", "int64":
     let typeNode = fieldType
     return quote do:
       let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
       if tok.kind != tkNumber:
         return err[void, ParseError](
-          initError(peTypeMismatch, tok.span, "expected integer value"))
+          initError(peTypeMismatch, tok.span, msgExpectedInt))
       let decoded = decodeIntFromToken(
         numberText(`cSym`.source, tok.span), tok.numBase, tok.span)
       if decoded.isErr:
@@ -199,7 +199,7 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
       let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
       if tok.kind != tkNumber:
         return err[void, ParseError](
-          initError(peTypeMismatch, tok.span, "expected unsigned integer value"))
+          initError(peTypeMismatch, tok.span, msgExpectedUint))
       let decoded = decodeIntFromToken(
         numberText(`cSym`.source, tok.span), tok.numBase, tok.span)
       if decoded.isErr:
@@ -207,7 +207,7 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
       if decoded.get < 0:
         return err[void, ParseError](
           initError(peTypeMismatch, tok.span,
-                    "expected unsigned (non-negative) integer"))
+                    msgExpectedUintNonNeg))
       `targetIdent` = `typeNode`(decoded.get)
   of "float", "float32", "float64":
     let typeNode = fieldType
@@ -227,22 +227,22 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
         of kwNan:    `targetIdent` = `typeNode`(NaN)
         else:
           return err[void, ParseError](
-            initError(peTypeMismatch, tok.span, "expected float value"))
+            initError(peTypeMismatch, tok.span, msgExpectedFloat))
       else:
         return err[void, ParseError](
-          initError(peTypeMismatch, tok.span, "expected float value"))
+          initError(peTypeMismatch, tok.span, msgExpectedFloat))
   of "bool":
     return quote do:
       let tok = `cSym`.stream[].tokens[`tokIndexExpr`]
       if tok.kind != tkKeyword:
         return err[void, ParseError](
-          initError(peTypeMismatch, tok.span, "expected bool value"))
+          initError(peTypeMismatch, tok.span, msgExpectedBool))
       case tok.keyword
       of kwTrue:  `targetIdent` = true
       of kwFalse: `targetIdent` = false
       else:
         return err[void, ParseError](
-          initError(peTypeMismatch, tok.span, "expected bool value"))
+          initError(peTypeMismatch, tok.span, msgExpectedBool))
   else:
     error("deriveDecode: field type " & $fieldType &
           " not yet supported (D1-D3 cover string/int/float/bool)")

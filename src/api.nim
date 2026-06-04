@@ -372,16 +372,16 @@ func builtinScalarFromValue*[T](v: KdlValue): Result[T, ParseError]
       if $e == v.strVal:
         return ok[T, ParseError](e)
     return err[T, ParseError](initError(peTypeEnumInvalid, Span(),
-      "value does not match any enum variant"))
+      msgEnumNoVariant))
   elif T is string:
     if v.kind != kvString:
       return err[T, ParseError](initError(peTypeMismatch, Span(),
-        "expected string value"))
+        msgExpectedString))
     return ok[T, ParseError](v.strVal)
   elif T is bool:
     if v.kind != kvBool:
       return err[T, ParseError](initError(peTypeMismatch, Span(),
-        "expected bool value"))
+        msgExpectedBool))
     return ok[T, ParseError](v.boolVal)
   elif T is SomeFloat:
     case v.kind
@@ -390,47 +390,47 @@ func builtinScalarFromValue*[T](v: KdlValue): Result[T, ParseError]
     of kvBigInt: return ok[T, ParseError](T(bigIntToFloat(v)))  # bigint→float (review #5)
     else:
       return err[T, ParseError](initError(peTypeMismatch, Span(),
-        "expected float value"))
+        msgExpectedFloat))
   elif T is SomeSignedInt:
     case v.kind
     of kvInt:
       if v.intVal < low(T).int64 or v.intVal > high(T).int64:
         return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
-          "integer value out of range for target type"))
+          codeMessage(peTypeIntegerOverflow)))
       return ok[T, ParseError](T(v.intVal))
     of kvBigInt:
       # A kvBigInt is produced only when a literal overflows int64; its
       # magnitude is therefore outside the range of EVERY int64-bounded signed
       # target (int8..int64). Honest overflow, NOT a kind mismatch (review #5).
       return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
-        "integer value out of range for target type"))
+        codeMessage(peTypeIntegerOverflow)))
     else:
       return err[T, ParseError](initError(peTypeMismatch, Span(),
-        "expected integer value"))
+        msgExpectedInt))
   elif T is SomeUnsignedInt:
     case v.kind
     of kvInt:
       if v.intVal < 0:
         return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected unsigned (non-negative) integer"))
+          msgExpectedUintNonNeg))
       if uint64(v.intVal) > high(T).uint64:
         return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
-          "integer value out of range for target type"))
+          codeMessage(peTypeIntegerOverflow)))
       return ok[T, ParseError](T(v.intVal))
     of kvBigInt:
       if v.bigNegative:
         return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected unsigned (non-negative) integer"))
+          msgExpectedUintNonNeg))
       # Non-negative bigint: fits target iff magnitude <= high(T). bigHi != 0
       # means >= 2^64 > any uint64-bounded target; bigHi == 0 means magnitude
       # is bigLo, fits iff bigLo <= high(T).
       if v.bigHi == 0 and v.bigLo <= high(T).uint64:
         return ok[T, ParseError](T(v.bigLo))
       return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
-        "integer value out of range for target type"))
+        codeMessage(peTypeIntegerOverflow)))
     else:
       return err[T, ParseError](initError(peTypeMismatch, Span(),
-        "expected unsigned integer value"))
+        msgExpectedUint))
   else:
     {.error: "builtinScalarFromValue[T]: unsupported scalar type '" & $T & "'. " &
              "Supported: string/bool/int*/uint*/float*/enum.".}

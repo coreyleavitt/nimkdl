@@ -307,6 +307,21 @@ func rebased*(err: ParseError, delta: int): ParseError {.raises: [].} =
   result = err
   result.span = initSpan(err.span.offset + delta, err.span.length)
 
+const
+  ## Single source of truth for value→scalar coercion expectation messages
+  ## (review #7). Referenced from BOTH the value leg
+  ## (`api.builtinScalarFromValue`) and the token leg (`derive_decode`'s
+  ## `quote do:` blocks), so the two dispatchers cannot drift in wording.
+  ## The overflow text stays in `codeMessage(peTypeIntegerOverflow)` below —
+  ## use that, do not re-inline it.
+  msgExpectedString*     = "expected string value"
+  msgExpectedBool*       = "expected bool value"
+  msgExpectedFloat*      = "expected float value"
+  msgExpectedInt*        = "expected integer value"
+  msgExpectedUintNonNeg* = "expected unsigned (non-negative) integer"
+  msgExpectedUint*       = "expected unsigned integer value"
+  msgEnumNoVariant*      = "value does not match any enum variant"
+
 func codeMessage*(code: ParseErrorCode): string =
   case code
   of peLexUnexpectedChar:    "unexpected character"

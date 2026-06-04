@@ -89,6 +89,12 @@ suite "coerce — kvBigInt (review #5)":
     check r.isErr
     check r.getErr.code == peTypeMismatch
 
+  test "coerce[uint64] of a bigint that fits uint64 (bigHi==0) -> succeeds":
+    # A value in (int64_max, uint64_max] is represented as a non-negative bigint
+    # with bigHi==0; the bigHi==0 and bigLo<=high(T) SUCCESS branch (review R2).
+    let v = newKdlBigInt(0'u64, 9223372036854775809'u64, false)  # 2^63+1
+    check coerce[uint64](v).get == 9223372036854775809'u64
+
   test "coerce[int8] of an in-range int → succeeds":
     let r = coerce[int8](newKdlInt(100))
     check r.isOk
