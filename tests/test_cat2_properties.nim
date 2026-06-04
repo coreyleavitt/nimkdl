@@ -9,7 +9,7 @@
 ##
 ## Gated by NKDL_PROPTEST=1.
 
-import std/[options, unittest]
+import std/[options, unittest, strutils]
 
 import proptest
 
@@ -43,6 +43,15 @@ kdl:
   type Defaulted {.kdlNode: "dfl".} = object
     name {.kdlArg.}: string
     port {.kdlProp.}: int = 8080
+
+  # S7: a type with a {.kdlSkipEncode.} field. The field is never written to
+  # KDL, so encode(v) omits it; decode(encode(v)) therefore leaves it at its
+  # zero/default value regardless of what `v` held. The field is Option[string]
+  # so decode of the (field-absent) bytes is not a missing-required error — it
+  # round-trips to None, the canonical "back to zero" outcome for skipEncode.
+  type SkipEnc {.kdlNode: "ske".} = object
+    name {.kdlArg.}: string
+    cached {.kdlSkipEncode, kdlProp.}: Option[string]
 
 suite "P7 — typed-T encode-decode identity (forAll)":
 
@@ -176,3 +185,22 @@ suite "S5 — native field defaults (forAll)":
     ensure r.get.name == nm
     if present: ensure r.get.port == port
     else:       ensure r.get.port == 8080
+
+suite "S7 — kdlSkipEncode returns the field to zero after round-trip (forAll)":
+
+  property "a kdlSkipEncode field is absent from the bytes; decode leaves it zero":
+    # The field's value in v0 must NOT survive a round-trip — it's never
+    # emitted, so decode of the emitted bytes can't repopulate it. Use a
+    # quote/backslash-free lowercase alphabet for both fields so the
+    # hand-checked invariant isn't muddied by string-escaping.
+    with Settings(maxExamples: 300, testId: "s7-skip-encode")
+    given nm in strings(intervals([(0x61'i32, 0x7a'i32)]), 1, 24),
+          cachedV in strings(intervals([(0x61'i32, 0x7a'i32)]), 1, 24)
+    let v0 = SkipEnc(name: nm, cached: some(cachedV))
+    let bytes = encode(v0).get
+    # The skipped field's value never appears on the wire.
+    ensure "cached" notin bytes
+    let r = decode[SkipEnc](bytes)
+    ensure r.isOk
+    ensure r.get.name == nm
+    ensure r.get.cached.isNone       # back to zero — it was never encoded

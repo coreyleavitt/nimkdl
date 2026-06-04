@@ -767,3 +767,79 @@ suite "derive_encode — S2b: kdlRenameAll convention applied to prop keys":
     kdlEncode(v, e)
     # node name stays multi-word-node (nodeNameOf kebab), prop screams.
     check e.finish() == "multi-word-node MAX_RETRIES=3\n"
+
+suite "derive_encode — S7: directional skip (kdlSkipEncode)":
+
+  type SkipEProp {.kdlNode: "sep".} = object
+    name {.kdlArg.}: string
+    secret {.kdlSkipEncode, kdlProp.}: string
+
+  deriveEncode(SkipEProp)
+
+  test "kdlSkipEncode prop emits nothing — output omits the field":
+    var v = SkipEProp(name: "web", secret: "leaked")
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    let s = e.finish()
+    check s == "sep \"web\"\n"
+    check "secret" notin s
+    check "leaked" notin s
+
+  type Leaf {.kdlNode: "leaf".} = object
+    label {.kdlArg.}: string
+  deriveEncode(Leaf)
+
+  type SkipEChild {.kdlNode: "sec".} = object
+    name {.kdlArg.}: string
+    inner {.kdlSkipEncode, kdlChild.}: Leaf
+
+  deriveEncode(SkipEChild)
+
+  test "kdlSkipEncode child emits nothing":
+    var v = SkipEChild(name: "web", inner: Leaf(label: "x"))
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    let s = e.finish()
+    check s == "sec \"web\"\n"
+    check "leaf" notin s
+
+  type SkipBothE {.kdlNode: "sbe".} = object
+    name {.kdlArg.}: string
+    hidden {.kdlSkip, kdlProp.}: string
+
+  deriveEncode(SkipBothE)
+
+  test "kdlSkip (both) emits nothing on encode":
+    var v = SkipBothE(name: "web", hidden: "x")
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    check e.finish() == "sbe \"web\"\n"
+
+suite "derive_encode — S7: kdlSkipEncode + kdlArg is a compile error":
+
+  test "a valid skipEncode-on-prop type compiles (sanity)":
+    check compiles((
+      block:
+        type Ok {.kdlNode: "ok".} = object
+          a {.kdlArg.}: string
+          b {.kdlSkipEncode, kdlProp.}: string
+        deriveEncode(Ok)
+    ))
+
+  test "kdlSkipEncode on a positional kdlArg field is rejected":
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          a {.kdlArg.}: string
+          weight {.kdlSkipEncode, kdlArg.}: int
+        deriveEncode(Bad)
+    ))
+
+  test "kdlSkip (both) on a kdlArg field is allowed (symmetric drop)":
+    check compiles((
+      block:
+        type Ok2 {.kdlNode: "ok2".} = object
+          a {.kdlArg.}: string
+          weight {.kdlSkip, kdlArg.}: int
+        deriveEncode(Ok2)
+    ))

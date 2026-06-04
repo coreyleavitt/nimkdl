@@ -271,23 +271,35 @@ macro deriveDecode*(T: typedesc): untyped =
   # field's slot bit stayed unset (absent from the wire). `isBranchField`
   # excludes variant-branch fields from the global default post-loop
   # (assigning an inactive branch's field corrupts the object).
+  # `skipDecode` (rfc S7): a {.kdlSkipDecode.}/{.kdlSkip.} positional field is
+  # KEPT in argFields so its positional index is preserved (the argIdx counter
+  # must still advance past it, or every subsequent arg shifts), but its decode
+  # body is empty (the wire value is consumed-and-ignored) and it claims no
+  # required slot — it keeps its Nim default / native S5 default.
   type ArgField = tuple[name: string, typ: NimNode, reservedTag: string,
                         scalar: bool, pathExpr: NimNode,
                         requiresUncheckedAssign: bool,
-                        default: NimNode, isBranchField: bool]
+                        default: NimNode, isBranchField: bool,
+                        skipDecode: bool]
   # `aliases` (rfc S6): extra DECODE-ONLY exact wire-key literals. Each gets an
   # additional `bytesEqLit` arm routing to this same field's decode body; encode
   # ignores them entirely (canonical `wireKey` only). Aliases are NEVER run
   # through `kdlRenameAll` — they are verbatim literals (§3.5.3).
+  # `skipDecode` (rfc S7): a {.kdlSkipDecode.}/{.kdlSkip.} prop/child field is
+  # KEPT in its sink (so its wire key/name is still RECOGNIZED and consumed —
+  # not an unknown-field error under strict mode) but with `skipDecode = true`:
+  # the dispatch body is a no-op, no slot is claimed, the field keeps its
+  # default. Encode-only skip is handled in derive_encode.
   type PropField = tuple[name: string, typ: NimNode, wireKey: string,
                          reservedTag: string, scalar: bool, pathExpr: NimNode,
                          requiresUncheckedAssign: bool,
                          default: NimNode, isBranchField: bool,
-                         aliases: seq[string]]
+                         aliases: seq[string], skipDecode: bool]
   type ChildField = tuple[name: string, elemType: NimNode,
                           kind: ChildKind, wireName: string, pathExpr: NimNode,
                           requiresUncheckedAssign: bool,
-                          default: NimNode, isBranchField: bool]
+                          default: NimNode, isBranchField: bool,
+                          skipDecode: bool]
   var argFields: seq[ArgField]
   var propFields: seq[PropField]              # plain (non-variant) props
   var childFields: seq[ChildField]            # plain children
@@ -356,6 +368,21 @@ macro deriveDecode*(T: typedesc): untyped =
     let scalar = hasPragma(pragmas, "kdlScalar")
     # S6: decode-only alias keys (exact literals, never convention-transformed).
     let aliases = pragmaStrArgs(pragmas, "kdlAlias")
+    # S7: field-level directional skip. {.kdlSkipDecode.} (or {.kdlSkip.}) drops
+    # the field from the decode sinks — it is never read, keeps its Nim default
+    # / native S5 default, and claims no required slot. For a kdlArg field the
+    # arg slot is preserved (counter advances) via the `skipDecode` placeholder
+    # below; for prop/child/inferred fields we return early (keyed, so position
+    # is irrelevant).
+    let skipDecode = hasPragma(pragmas, "kdlSkipDecode") or
+                     hasPragma(pragmas, "kdlSkip")
+    # Whether encode also drops the field (so the wire never carries it). For a
+    # kdlArg field this decides placeholder-vs-drop: a skipDecode-only arg keeps
+    # a positional placeholder (encode still emits it, decode must step over it);
+    # a fully-skipped arg ({.kdlSkip.} / +{.kdlSkipEncode.}) is dropped outright
+    # (the wire has no such positional, so reserving a slot would eat a real arg).
+    let skipEncode = hasPragma(pragmas, "kdlSkipEncode") or
+                     hasPragma(pragmas, "kdlSkip")
     let isSeqField =
       fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")
     # {.kdlVariadic.}: collects all remaining positional args into seq[T].
@@ -387,10 +414,20 @@ macro deriveDecode*(T: typedesc): untyped =
       error("{.kdlArg.} on a seq field '" & fieldName &
             "' consumes only one argument. Did you mean {.kdlVariadic.}?")
     if hasPragma(pragmas, "kdlArg"):
+      # S7: a fully-skipped arg (decode AND encode) is dropped outright — the
+      # wire carries no such positional, so reserving a slot would consume a
+      # real arg. A skipDecode-ONLY arg stays in argFields with `skipDecode =
+      # true`: encode still emits it, so decode must step over the positional
+      # (argIdx advances) with an empty branch body and no slot — the field
+      # keeps its default.
+      if skipDecode and skipEncode:
+        return
       argSink.add((name: fieldName, typ: fieldType, reservedTag: reservedTag,
                    scalar: scalar, pathExpr: pathExpr,
                    requiresUncheckedAssign: needsUnchecked,
-                   default: fDefault, isBranchField: isBranchField))
+                   default: fDefault, isBranchField: isBranchField,
+                   skipDecode: skipDecode))
+      return
     elif hasPragma(pragmas, "kdlProp") or (scalar and
          not hasPragma(pragmas, "kdlChild")):
       # S2b: kdlRename wins; else the type-level convention is applied.
@@ -400,7 +437,7 @@ macro deriveDecode*(T: typedesc): untyped =
                     pathExpr: pathExpr,
                     requiresUncheckedAssign: needsUnchecked,
                     default: fDefault, isBranchField: isBranchField,
-                    aliases: aliases))
+                    aliases: aliases, skipDecode: skipDecode))
     elif hasPragma(pragmas, "kdlChild"):
       var kind: ChildKind
       var elemType: NimNode
@@ -418,7 +455,8 @@ macro deriveDecode*(T: typedesc): untyped =
       childSink.add((name: fieldName, elemType: elemType, kind: kind,
                      wireName: nodeNameOf(elemType), pathExpr: pathExpr,
                      requiresUncheckedAssign: needsUnchecked,
-                     default: fDefault, isBranchField: isBranchField))
+                     default: fDefault, isBranchField: isBranchField,
+                     skipDecode: skipDecode))
     else:
       # No routing pragma — infer the slot from the field type (rfc §8.2,
       # name-preserving). Previously this fell through silently, dropping the
@@ -430,7 +468,8 @@ macro deriveDecode*(T: typedesc): untyped =
           childSink.add((name: fieldName, elemType: ft[1], kind: ckSeq,
                          wireName: nodeNameOf(ft[1]), pathExpr: pathExpr,
                          requiresUncheckedAssign: needsUnchecked,
-                         default: fDefault, isBranchField: isBranchField))
+                         default: fDefault, isBranchField: isBranchField,
+                         skipDecode: skipDecode))
         else:
           error("deriveDecode: cannot infer a KDL slot for seq field '" &
                 fieldName & "' of primitive elements — annotate it with " &
@@ -442,7 +481,8 @@ macro deriveDecode*(T: typedesc): untyped =
         childSink.add((name: fieldName, elemType: ft, kind: kind,
                        wireName: nodeNameOf(ft), pathExpr: pathExpr,
                        requiresUncheckedAssign: needsUnchecked,
-                       default: fDefault, isBranchField: isBranchField))
+                       default: fDefault, isBranchField: isBranchField,
+                       skipDecode: skipDecode))
       else:
         # primitive / enum (incl. Option[primitive]) → prop; key via
         # wireKeyOf (S2b: type-level convention, or field name verbatim).
@@ -452,7 +492,7 @@ macro deriveDecode*(T: typedesc): untyped =
                       pathExpr: pathExpr,
                       requiresUncheckedAssign: needsUnchecked,
                       default: fDefault, isBranchField: isBranchField,
-                      aliases: aliases))
+                      aliases: aliases, skipDecode: skipDecode))
 
   let recList = objectRecList(typeSym)
   for (fieldName, fieldType, pragmas, fieldDefault) in regularFields(recList):
@@ -564,9 +604,24 @@ macro deriveDecode*(T: typedesc): untyped =
   # (S5) claims a non-required slot and registers in `defaultedFields`
   # (top-level only — branch defaults apply inside the per-branch path).
   proc hasDefault(d: NimNode): bool = d != nil and d.kind != nnkEmpty
+  # S7: a skipDecode field's slot bit is never marked (its dispatch is a no-op),
+  # so if it carries a native S5 default, claiming a non-required slot makes that
+  # default ALWAYS apply post-decode (the bit stays 0). Without a default it gets
+  # slot -1 and keeps its zero value. This is the S5-composition contract.
+  # (Inlined per-sink below — a closure over `defaultedFields`/`claimSlot` trips
+  # a generic-seq destructor codegen path, so we keep it as straight-line code.)
   var argSlots: seq[int]
   for af in argFields:
-    if isOptionalKdlArgOrProp(af.typ) or (hasVariant and af.name == discName):
+    if af.skipDecode:
+      if hasDefault(af.default):
+        let s = claimSlot(required = false)
+        argSlots.add(s)
+        if not af.isBranchField:
+          defaultedFields.add((slot: s, pathExpr: af.pathExpr,
+                               defaultExpr: af.default))
+      else:
+        argSlots.add(-1)
+    elif isOptionalKdlArgOrProp(af.typ) or (hasVariant and af.name == discName):
       argSlots.add(-1)
     elif hasDefault(af.default):
       let s = claimSlot(required = false)
@@ -580,7 +635,16 @@ macro deriveDecode*(T: typedesc): untyped =
       requiredSlotKeys.add((slot: s, wireKey: af.name))  # positional → field name
   var propSlots: seq[int]
   for pf in propFields:
-    if isOptionalKdlArgOrProp(pf.typ) or (hasVariant and pf.name == discName):
+    if pf.skipDecode:
+      if hasDefault(pf.default):
+        let s = claimSlot(required = false)
+        propSlots.add(s)
+        if not pf.isBranchField:
+          defaultedFields.add((slot: s, pathExpr: pf.pathExpr,
+                               defaultExpr: pf.default))
+      else:
+        propSlots.add(-1)
+    elif isOptionalKdlArgOrProp(pf.typ) or (hasVariant and pf.name == discName):
       propSlots.add(-1)
     elif hasDefault(pf.default):
       let s = claimSlot(required = false)
@@ -594,7 +658,16 @@ macro deriveDecode*(T: typedesc): untyped =
       requiredSlotKeys.add((slot: s, wireKey: pf.wireKey))
   var childSlots: seq[int]
   for cf in childFields:
-    if cf.kind in {ckSeq, ckOption}:
+    if cf.skipDecode:
+      if hasDefault(cf.default):
+        let s = claimSlot(required = false)
+        childSlots.add(s)
+        if not cf.isBranchField:
+          defaultedFields.add((slot: s, pathExpr: cf.pathExpr,
+                               defaultExpr: cf.default))
+      else:
+        childSlots.add(-1)
+    elif cf.kind in {ckSeq, ckOption}:
       childSlots.add(-1)  # empty seq / absent Option is fine
     elif hasDefault(cf.default):
       let s = claimSlot(required = false)
@@ -625,6 +698,13 @@ macro deriveDecode*(T: typedesc): untyped =
     let idxLit = newIntLitNode(i)
     let tokIndexExpr = quote do: `evSym2`.argTok
     let target = af.pathExpr
+    if af.skipDecode:
+      # S7: consume-and-ignore this positional slot. The branch exists only so
+      # `argIdx` advances over it (subsequent args keep their indices); no
+      # decode, no slot mark, no reserved check. The field keeps its default.
+      argCase.add(newTree(nnkOfBranch, idxLit,
+        newStmtList(newNimNode(nnkDiscardStmt).add(newEmptyNode()))))
+      continue
     var branchBody = emitTypedDecode(target, tokIndexExpr, fType, cSym, argScalar)
     enrichLeafErrors(branchBody, newLit(fName))
     if af.requiresUncheckedAssign:
@@ -704,6 +784,11 @@ macro deriveDecode*(T: typedesc): untyped =
     if fields.len == 0:
       return unknownProp()
     proc branchBodyFor(i: int): NimNode =
+      # S7: a skipDecode prop is recognized (so it's not an unknown-field error)
+      # but its value is consumed-and-ignored — the ceProp event is already past
+      # the value, so a no-op body is the whole behavior. No mark, no assign.
+      if fields[i].skipDecode:
+        return newStmtList(newNimNode(nnkDiscardStmt).add(newEmptyNode()))
       let fName = fields[i].name
       let fType = fields[i].typ
       let reservedTag = fields[i].reservedTag
@@ -820,7 +905,7 @@ macro deriveDecode*(T: typedesc): untyped =
         bytesEqLit(`cSym`, `childPeekSym`.nodeNameTok, `keyLit`)
       let mark = markSlot(childSlots[i])
       let fNameLit = newStrLitNode(fName)   # field-path enrichment (rfc §10)
-      let body =
+      let decodeBody =
         case kind
         of ckSingle:
           quote do:
@@ -844,6 +929,11 @@ macro deriveDecode*(T: typedesc): untyped =
             if r.isErr: return err[void, ParseError](r.getErr.withField(`fNameLit`))
             `pathExpr` = some(`elemSym`)
             `mark`
+      # S7: a skipDecode child is recognized by wire-name but consumed-and-
+      # ignored (skip the whole node) — no decode into the field, no slot mark.
+      let body =
+        if cf.skipDecode: (quote do: skip(`cSym`))
+        else: decodeBody
       if rootIf.isNil:
         rootIf = newNimNode(nnkIfStmt)
         rootIf.add(newNimNode(nnkElifBranch).add(cond).add(body))

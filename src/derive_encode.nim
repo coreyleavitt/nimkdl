@@ -205,6 +205,20 @@ macro deriveEncode*(T: typedesc): untyped =
     let scalar = hasPragma(pragmas, "kdlScalar")
     let isSeqField =
       fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")
+    # S7: {.kdlSkipEncode.} (explicit, NOT via {.kdlSkip.}) on a positional
+    # {.kdlArg.} field is a compile error — dropping one arg shifts every later
+    # arg index, silently corrupting round-trips on decode (§3.5.5.1). The
+    # symmetric {.kdlSkip.} (both directions) is allowed: the positional simply
+    # vanishes from the wire in both directions, so nothing shifts.
+    if hasPragma(pragmas, "kdlSkipEncode") and not hasPragma(pragmas, "kdlSkip") and
+       hasPragma(pragmas, "kdlArg"):
+      error("{.kdlSkipEncode.} on positional-arg field '" & fieldName &
+            "' would shift arg indices and corrupt round-trips. Use {.kdlSkip.}.")
+    # S7: {.kdlSkipEncode.} or {.kdlSkip.} excludes the field from encode — emit
+    # nothing. (For a kdlArg this is reachable only via {.kdlSkip.}; the explicit
+    # skipEncode+kdlArg combo errored just above.)
+    if hasPragma(pragmas, "kdlSkipEncode") or hasPragma(pragmas, "kdlSkip"):
+      return
     if hasPragma(pragmas, "kdlVariadic"):
       # Mirror decode's guards (rfc §3.5.5.1) so a misuse fails the same way
       # in either direction.

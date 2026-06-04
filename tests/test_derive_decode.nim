@@ -1204,3 +1204,71 @@ suite "derive_decode — S6: kdlAlias macro-error guards":
           b {.kdlProp, kdlAlias: "dup".}: string
         deriveDecode(Bad)
     ))
+
+suite "derive_decode — S7: directional skip (kdlSkipDecode)":
+
+  type SkipDProp {.kdlNode: "sdp".} = object
+    name {.kdlArg.}: string
+    secret {.kdlSkipDecode, kdlProp.}: string
+
+  deriveDecode(SkipDProp)
+
+  test "kdlSkipDecode prop ignores any wire value, keeps zero/default":
+    # `secret=...` is present on the wire but must NOT be read.
+    let f = mkCursor("sdp \"web\" secret=\"leaked\"")
+    var s: SkipDProp
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.name == "web"
+    check s.secret == ""           # untouched — kept its zero value
+
+  test "kdlSkipDecode prop with no wire value is not a missing-required error":
+    let f = mkCursor("sdp \"web\"")
+    var s: SkipDProp
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.secret == ""
+
+  type SkipDDefault {.kdlNode: "sdd".} = object
+    name {.kdlArg.}: string
+    mode {.kdlSkipDecode, kdlProp.}: string = "fallback"
+
+  deriveDecode(SkipDDefault)
+
+  test "kdlSkipDecode composes with an S5 native default (kept, wire ignored)":
+    let f = mkCursor("sdd \"web\" mode=\"override\"")
+    var s: SkipDDefault
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.mode == "fallback"     # native default, not the wire "override"
+
+  type SkipDArg {.kdlNode: "sda".} = object
+    first {.kdlArg.}: string
+    skipped {.kdlSkipDecode, kdlArg.}: string
+    third {.kdlArg.}: int
+
+  deriveDecode(SkipDArg)
+
+  test "kdlSkipDecode on a kdlArg advances the positional counter (no shift)":
+    # Wire has THREE positionals; the middle one is consumed-and-ignored so
+    # `third` still binds the 3rd arg, not the 2nd.
+    let f = mkCursor("sda \"a\" \"ignored\" 99")
+    var s: SkipDArg
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.first == "a"
+    check s.skipped == ""          # kept its default
+    check s.third == 99            # bound the 3rd positional, not the 2nd
+
+  type SkipBoth {.kdlNode: "sb".} = object
+    name {.kdlArg.}: string
+    hidden {.kdlSkip, kdlProp.}: string
+
+  deriveDecode(SkipBoth)
+
+  test "kdlSkip (both) ignores wire value on decode too":
+    let f = mkCursor("sb \"web\" hidden=\"x\"")
+    var s: SkipBoth
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.hidden == ""

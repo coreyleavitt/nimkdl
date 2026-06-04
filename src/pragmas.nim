@@ -87,7 +87,32 @@ template kdlChild*() {.pragma.}
   ## Field-level: serialize/parse as a child node (default for objects + seq).
 
 template kdlSkip*() {.pragma.}
-  ## Field-level: do not parse — keep Nim's default.
+  ## Field-level: exclude the field from BOTH directions. It is never read
+  ## from KDL (keeps its Nim default / zero value on decode) and never
+  ## written to KDL (emits nothing on encode). Equivalent to applying both
+  ## `{.kdlSkipDecode.}` and `{.kdlSkipEncode.}`. A skipped field never
+  ## claims a required slot, so its absence on the wire is not an error.
+
+template kdlSkipDecode*() {.pragma.}
+  ## Field-level: exclude the field from DECODE only (rfc S7). The decoder
+  ## does not read the field from KDL — it keeps its Nim default / zero
+  ## value (composing with a native `field = expr` default, S5), and never
+  ## claims a required slot. Any wire value matching its name/position is
+  ## ignored. ENCODE is unaffected — the field is still written out. On a
+  ## `{.kdlArg.}` field this is allowed: the positional arg counter still
+  ## advances over the slot, so subsequent args keep their indices, and the
+  ## field simply retains its default. Combine with `{.kdlSkipEncode.}` for
+  ## the both-directions behavior of `{.kdlSkip.}`.
+
+template kdlSkipEncode*() {.pragma.}
+  ## Field-level: exclude the field from ENCODE only (rfc S7). The encoder
+  ## emits nothing for the field; DECODE is unaffected — a value present on
+  ## the wire is still read into the field. **Compile-time error on a
+  ## `{.kdlArg.}` field:** dropping a positional arg on encode shifts every
+  ## subsequent arg index, so the round-trip silently decodes the wrong
+  ## values into the wrong fields. Use `{.kdlSkip.}` (both directions) for a
+  ## positional field you want fully excluded. Combine with
+  ## `{.kdlSkipDecode.}` for the both-directions behavior of `{.kdlSkip.}`.
 
 template kdlScalar*() {.pragma.}
   ## Field-level: encode/decode this field as a single KDL scalar via the
