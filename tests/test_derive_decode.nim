@@ -1417,3 +1417,95 @@ suite "derive_decode — S8a: kdlFlatten macro-error guards":
           sub {.kdlFlatten.}: Sub
         deriveDecode(Clash)
     ))
+
+suite "derive_decode — S9: untagged variants ({.kdlUntagged.})":
+
+  type Payload = enum
+    plText = "text"
+    plNum = "num"
+
+  type Msg {.kdlNode: "msg", kdlUntagged.} = object
+    case kind: Payload
+    of plText:
+      body {.kdlProp.}: string
+    of plNum:
+      value {.kdlProp.}: int
+
+  deriveDecode(Msg)
+
+  test "untagged — first branch (plText) matches when its prop is on the wire":
+    let f = mkCursor("msg body=\"hi\"")
+    var m: Msg
+    let r = kdlDecode(m, f.cursor)
+    check r.isOk
+    check m.kind == plText
+    check m.body == "hi"
+
+  test "untagged — second branch (plNum) matches when its prop is on the wire":
+    let f = mkCursor("msg value=42")
+    var m: Msg
+    let r = kdlDecode(m, f.cursor)
+    check r.isOk
+    check m.kind == plNum
+    check m.value == 42
+
+  test "untagged — no branch matches → peTypeNoVariantMatch":
+    let f = mkCursor("msg other=1")
+    var m: Msg
+    let r = kdlDecode(m, f.cursor)
+    check r.isErr
+    check r.getErr.code == peTypeNoVariantMatch
+
+  test "untagged — empty node (no required prop) → no branch matches":
+    let f = mkCursor("msg")
+    var m: Msg
+    let r = kdlDecode(m, f.cursor)
+    check r.isErr
+    check r.getErr.code == peTypeNoVariantMatch
+
+  # Gate: a branch carrying a seq child is rejected at macro time.
+  test "untagged with a seq child branch is rejected (gate)":
+    check not compiles((
+      block:
+        type Inner = object
+          x {.kdlProp.}: int
+        type Bad {.kdlNode: "bad", kdlUntagged.} = object
+          case kind: bool
+          of true:
+            items {.kdlChild.}: seq[Inner]
+          of false:
+            n {.kdlProp.}: int
+        deriveDecode(Bad)
+    ))
+
+  # Gate: Σ field counts > 20 is rejected at macro time.
+  test "untagged exceeding 20 total branch fields is rejected (gate)":
+    check not compiles((
+      block:
+        type Big {.kdlNode: "big", kdlUntagged.} = object
+          case kind: bool
+          of true:
+            a01 {.kdlProp.}: int
+            a02 {.kdlProp.}: int
+            a03 {.kdlProp.}: int
+            a04 {.kdlProp.}: int
+            a05 {.kdlProp.}: int
+            a06 {.kdlProp.}: int
+            a07 {.kdlProp.}: int
+            a08 {.kdlProp.}: int
+            a09 {.kdlProp.}: int
+            a10 {.kdlProp.}: int
+            a11 {.kdlProp.}: int
+          of false:
+            b01 {.kdlProp.}: int
+            b02 {.kdlProp.}: int
+            b03 {.kdlProp.}: int
+            b04 {.kdlProp.}: int
+            b05 {.kdlProp.}: int
+            b06 {.kdlProp.}: int
+            b07 {.kdlProp.}: int
+            b08 {.kdlProp.}: int
+            b09 {.kdlProp.}: int
+            b10 {.kdlProp.}: int
+        deriveDecode(Big)
+    ))

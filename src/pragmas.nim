@@ -63,6 +63,33 @@ template kdlIgnoreUnknown*() {.pragma.}
   ## Affects decode only; encode never emits unknown data. The `/-` slashdash
   ## path is unaffected (it suppresses decoding regardless).
 
+template kdlUntagged*() {.pragma.}
+  ## Type-level (on a `case` object): the discriminator is NOT written to the
+  ## wire. On DECODE the decoder tries each `of`-branch in declaration order,
+  ## rewinding the cursor between attempts; the FIRST branch that fully decodes
+  ## (all its required fields satisfied, no unknown/mismatch errors) wins and
+  ## sets the discriminator + that branch's fields. If NO branch matches, the
+  ## decode fails with `peTypeNoVariantMatch`. On ENCODE the active branch's
+  ## fields are emitted (the discriminator selects the branch via the `case`),
+  ## but the discriminator field itself is never written.
+  ##
+  ## This distinguishes an untagged variant from the default (tagged) variant,
+  ## where the discriminator IS an on-wire `{.kdlArg.}`/`{.kdlProp.}` whose value
+  ## names the branch directly.
+  ##
+  ## **Complexity gate (compile-time):** `{.kdlUntagged.}` is supported only for
+  ## "small, flat" variants — Σ(field counts across all branches) ≤ 20 AND no
+  ## branch contains a `seq` child (`{.kdlChild.}` seq) or a nested variant.
+  ## A type exceeding the gate is a compile error directing the user to add an
+  ## explicit discriminator (a tagged variant) instead. The bound exists because
+  ## the decode mechanism re-runs each branch from a saved cursor position; an
+  ## unbounded/ambiguous branch set (e.g. seq children whose partial consumption
+  ## straddles a rewind) is not cleanly try-and-rewind decodable.
+  ##
+  ## **embed[T]/VM:** the rewind primitives (`pos`/`seek`) are side-effect-free
+  ## and VM-evaluable, so a `{.kdlUntagged.}` type decodes at compile time inside
+  ## `embed[T]` just like any other derived type.
+
 template kdlArg*() {.pragma.}
   ## Field-level: serialize/parse as a positional argument.
 

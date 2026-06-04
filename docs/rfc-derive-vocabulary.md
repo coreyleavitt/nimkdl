@@ -305,16 +305,39 @@ Encode emits flattened entries inline (compound `pathExpr` + value-typed pushes)
 parent, `kdlIgnoreUnknown`×flatten (unknown = parent namespace), `Option[FlatObj]`
 flatten (whole sub-tree absent → None).
 
-### S9 — untagged variants (optional; concrete gate)
+### S9 — untagged variants (optional; concrete gate) — **IMPLEMENTED**
 
-Try each `of`-branch in declaration order (cursor `Checkpoint`/`seek` rewind);
+Try each `of`-branch in declaration order (cursor `pos`/`seek` rewind);
 first full decode wins; encode emits the active branch; no-match →
 `peTypeNoVariantMatch`.
 
-- **Gate (macro-time, countable):** implement iff Σ(branch field counts) ≤ 20 **and**
-  no branch has a `ckSeq` or nested variant; else document + defer.
-- **VM-safety AC:** verify `Checkpoint`/`seek` carry `{.noSideEffect.}`, else
-  document S9 types as `embed[T]`-incompatible.
+- **Trigger:** type-level `{.kdlUntagged.}` pragma on a `case` object. Distinguishes
+  the untagged path from the existing discriminator-driven (tagged) variant decode.
+- **Gate (macro-time, countable):** implemented — supported iff Σ(branch field
+  counts) ≤ 20 **and** no branch has a `ckSeq` (seq child) or nested variant; a
+  violating type is a macro `{.error.}` directing the user to add an explicit
+  discriminator.
+- **Mechanism:** the single-node decode-body construction was factored into a
+  `buildNodeBody` closure (called once for plain/tagged, once per branch for
+  untagged with branch fields treated as required top-level fields). Each branch
+  attempt is wrapped in a labelled `block`; a `rewriteReturnsToBreak` AST pass
+  lifts the skeleton's `return <Result>` exits into `attemptRes = …; break <label>`
+  so the wrapper can inspect the Result, `seek` back, and try the next branch
+  rather than returning from the whole proc. The discriminator is force-assigned
+  per attempt under `{.cast(uncheckedAssign).}` (it is not on the wire). Encode
+  reuses the existing tagged `case v.disc` dispatch but skips emitting the
+  discriminator field for `{.kdlUntagged.}` types.
+- **VM-safety AC:** verified — `pos`/`seek` are side-effect-free (Nim infers
+  `noSideEffect`; they touch only their params) and VM-evaluable, so the emitted
+  `{.noSideEffect.}` decoder compiles AND a `{.kdlUntagged.}` type decodes inside
+  `embed[T]` at compile time (proven by `tests/test_embed.nim`). S9 types are NOT
+  `embed[T]`-incompatible — the escape-hatch defer was not needed.
+- **Error code:** new `peTypeNoVariantMatch = 18` (appended past `peOther`;
+  bijection lint in `tests/test_error_codes.nim` updated; bound is now 0..18).
+- **Tests:** `tests/test_derive_decode.nim` (S9 suite: per-branch decode, no-match,
+  empty-node, two gate macro-errors), `tests/test_derive_encode.nim` (S9 suite:
+  per-branch encode without discriminator + round-trip), `tests/test_embed.nim`
+  (compile-time VM proof).
 
 ### S10 — inherited-field defaults
 
@@ -341,7 +364,7 @@ per level. Classify uses it. Decision: handle if clean; else a clear compile err
 | S7 | directional skip (+ kdlArg guard) | low |
 | S8a | `kdlFlatten` decode | high |
 | S8b | `kdlFlatten` encode + interaction matrix | high |
-| S9 | untagged variants (gated) | high |
+| S9 | untagged variants (gated) — **IMPLEMENTED** (gate met; VM-safe; not deferred) | high |
 | S10 | inherited defaults (`allFields`) | med |
 | S-doc | consolidated pragma reference | low |
 

@@ -51,6 +51,24 @@ type Job {.kdlNode: "job".} = object
 
 deriveDecode(Job)
 
+# --- S9 untagged variant decode in VM ---
+# The try-each-branch decoder uses cursor pos/seek to rewind between branch
+# attempts. Both are side-effect-free + VM-evaluable, so an untagged variant
+# decodes at compile time like any other derived type (S9 VM-safety AC).
+
+type Payload = enum
+  plText = "text"
+  plNum = "num"
+
+type Msg {.kdlNode: "msg", kdlUntagged.} = object
+  case kind: Payload
+  of plText:
+    body {.kdlProp.}: string
+  of plNum:
+    value {.kdlProp.}: int
+
+deriveDecode(Msg)
+
 # Compile-time evaluations. If any of these fail to compile, embed[T]
 # is broken — these are the proof.
 const bareWeb = embed[Bare]("bare \"web\"")
@@ -58,6 +76,8 @@ const svcWeb = embed[Service]("service \"web\" port=80 enabled=#true")
 const svcApi = embed[Service]("service \"api\" port=443 enabled=#false")
 const treeRoot = embed[Tree]("tree \"root\" {\n    tree \"a\"\n    tree \"b\" {\n        tree \"b1\"\n    }\n}")
 const jobOk = embed[Job]("job \"compaction\" state=\"ok\"")
+const msgText = embed[Msg]("msg body=\"hi\"")
+const msgNum = embed[Msg]("msg value=5")
 
 suite "embed[T] — compile-time decode":
 
@@ -84,3 +104,9 @@ suite "embed[T] — compile-time decode":
   test "enum field with string-mapped variants":
     check jobOk.name == "compaction"
     check jobOk.state == sOk
+
+  test "S9 untagged variant decodes at compile time (try-each-branch in VM)":
+    check msgText.kind == plText
+    check msgText.body == "hi"
+    check msgNum.kind == plNum
+    check msgNum.value == 5

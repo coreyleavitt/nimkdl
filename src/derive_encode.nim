@@ -371,14 +371,21 @@ macro deriveEncode*(T: typedesc): untyped =
       for `elemSym` in `varBase`.`varIdent`:
         `elemPush`
   # Variant discriminator + per-branch dispatch.
+  # S9: an {.kdlUntagged.} type does NOT write its discriminator to the wire —
+  # the `case` still selects the active branch's fields, but the discriminator
+  # field itself is skipped (decode recovers it by trying each branch). A tagged
+  # variant emits the discriminator like a normal kdlArg/kdlProp.
+  let untagged = typeHasFlagPragma(typeSym, "kdlUntagged")
   let recCase = findRecCase(topRecList)
   if recCase != nil:
     # recCase[0] is the discriminator IdentDefs. Emit the discriminator
-    # field itself like a normal kdlArg/kdlProp at its declared position.
+    # field itself like a normal kdlArg/kdlProp at its declared position —
+    # unless the type is {.kdlUntagged.} (then it never goes on the wire).
     let discDefs = recCase[0]
     let discType = discDefs[^2]
     let (discName, discPragmas) = fieldInfo(discDefs, 0)
-    dispatchField(discName, discType, discPragmas, body)
+    if not untagged:
+      dispatchField(discName, discType, discPragmas, body)
     # Build a `case v.<disc>: of <branchVal>: <branch body>` dispatch.
     # Per-branch fields emit their kdlArg/kdlProp/kdlChild contributions
     # inside the matching branch body.

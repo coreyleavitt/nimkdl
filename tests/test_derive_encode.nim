@@ -919,3 +919,55 @@ suite "derive_encode — S8b: kdlFlatten encode (mirror of S8a decode)":
     var e = newBufferEmitter()
     kdlEncode(cr, e)
     check e.finish() == "crate \"c1\" note=\"n\" {\n    item \"x\"\n}\n"
+
+suite "derive_encode — S9: untagged variants ({.kdlUntagged.})":
+
+  type Payload9 = enum
+    plText9 = "text"
+    plNum9 = "num"
+
+  type Msg9 {.kdlNode: "msg", kdlUntagged.} = object
+    case kind: Payload9
+    of plText9:
+      body {.kdlProp.}: string
+    of plNum9:
+      value {.kdlProp.}: int
+
+  deriveEncode(Msg9)
+  deriveDecode(Msg9)
+
+  test "untagged encode — text branch emits its prop, no discriminator on wire":
+    var m = Msg9(kind: plText9, body: "hi")
+    var e = newBufferEmitter()
+    kdlEncode(m, e)
+    check e.finish() == "msg body=\"hi\"\n"
+
+  test "untagged encode — num branch emits its prop, no discriminator on wire":
+    var m = Msg9(kind: plNum9, value: 42)
+    var e = newBufferEmitter()
+    kdlEncode(m, e)
+    check e.finish() == "msg value=42\n"
+
+  proc roundtrip9(src: string): Msg9 =
+    var sref: ref TokenStream
+    new(sref)
+    sref[] = lex(src)
+    var c = initStringCursor(addr sref[], src)
+    let r = kdlDecode(result, c)
+    check r.isOk
+
+  test "untagged round-trip — text branch":
+    let m = roundtrip9("msg body=\"hello\"")
+    check m.kind == plText9
+    check m.body == "hello"
+    var e = newBufferEmitter()
+    kdlEncode(m, e)
+    check e.finish() == "msg body=\"hello\"\n"
+
+  test "untagged round-trip — num branch":
+    let m = roundtrip9("msg value=7")
+    check m.kind == plNum9
+    check m.value == 7
+    var e = newBufferEmitter()
+    kdlEncode(m, e)
+    check e.finish() == "msg value=7\n"

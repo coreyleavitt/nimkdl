@@ -84,6 +84,14 @@ type
                            ## kind doesn't match its Nim field type) —
                            ## here the shape itself is the issue.
     peOther                = 17
+    peTypeNoVariantMatch   = 18  ## a {.kdlUntagged.} case object's node matched
+                           ## NONE of its `of`-branches: every branch's decode
+                           ## attempt failed (wrong fields / wrong shape for that
+                           ## branch). The discriminator is not on the wire, so
+                           ## the decoder tried each branch in declaration order
+                           ## and exhausted them. Distinct from
+                           ## peTypeDiscriminatorBad (a TAGGED variant whose
+                           ## explicit discriminator value names no branch).
 
   ParseError* = object
     ## Structured error.
@@ -256,6 +264,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peTypeDiscriminatorBad: "unrecognized variant discriminator"
   of peEncodeUnsupported:    "typed encoder does not support this Nim shape"
   of peOther:                "parse error"
+  of peTypeNoVariantMatch:   "no untagged-variant branch matched the input"
 
 func lineSlice(source: string, line: int): string =
   if line < 1: return ""
