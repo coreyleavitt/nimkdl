@@ -85,10 +85,11 @@ let startOff =
   else:
     ev.span.offset  # name-token offset = node start for plain nodes
 ```
-End offset comes from `ceNodeEnd`: `ev.span.offset + ev.span.length` (inclusive end of
-the terminator token = exclusive byte past the node). The span covers the **full node
-text including its children block** (the `{...}` if present) — required by the S1
-property test (§8).
+End offset comes from `ceNodeEnd`: `ev.span.offset`. `ceNodeEnd` emits a **zero-length
+point span** positioned just *before* the terminator (newline/semicolon/EOF/`}`), so its
+`offset` is already the exclusive byte past the node content — there is no `length` to add.
+The resulting node span covers the **full node text including its children block** (the
+`{...}` if present) — required by the S1 property test (§8).
 
 ```nim
 of ceNodeBegin:
@@ -99,7 +100,7 @@ of ceNodeBegin:
 of ceNodeEnd:
   if stack.len == 0: continue
   var n = stack.pop()
-  let endOff = ev.span.offset + ev.span.length
+  let endOff = ev.span.offset            # zero-length point span before terminator
   n.span = initSpan(n.span.offset, endOff - n.span.offset)
   ...
 ```
