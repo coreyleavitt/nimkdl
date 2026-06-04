@@ -861,3 +861,66 @@ suite "derive_decode — S1: kdlVariadic macro-error guards":
           port {.kdlVariadic.}: int
         deriveDecode(Bad)
     ))
+
+suite "derive_decode — S2b: kdlRenameAll convention on prop keys":
+
+  type RetryCfg {.kdlNode: "retry", kdlRenameAll: kcKebabCase.} = object
+    maxRetries {.kdlProp.}: int
+
+  deriveDecode(RetryCfg)
+
+  test "kdlRenameAll: kcKebabCase decodes max-retries=3":
+    let f = mkCursor("retry max-retries=3")
+    var v: RetryCfg
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.maxRetries == 3
+
+  test "the un-renamed wire key is no longer accepted":
+    let f = mkCursor("retry maxRetries=3")
+    var v: RetryCfg
+    let r = kdlDecode(v, f.cursor)
+    check r.isErr
+
+  type RetryScream {.kdlNode: "retry", kdlRenameAll: kcScreamingSnakeCase.} = object
+    maxRetries {.kdlProp.}: int
+
+  deriveDecode(RetryScream)
+
+  test "kdlRenameAll: kcScreamingSnakeCase decodes MAX_RETRIES=3":
+    let f = mkCursor("retry MAX_RETRIES=3")
+    var v: RetryScream
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.maxRetries == 3
+
+  type RetryKeep {.kdlNode: "retry", kdlRenameAll: kcKebabCase.} = object
+    maxRetries {.kdlProp, kdlRename: "keep".}: int
+
+  deriveDecode(RetryKeep)
+
+  test "kdlRename overrides kdlRenameAll on decode (stays 'keep')":
+    let f = mkCursor("retry keep=3")
+    var v: RetryKeep
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.maxRetries == 3
+
+  test "the convention-transformed key is NOT accepted when kdlRename set":
+    let f = mkCursor("retry max-retries=3")
+    var v: RetryKeep
+    let r = kdlDecode(v, f.cursor)
+    check r.isErr
+
+  # node name unaffected by kdlRenameAll
+  type MultiWordNode {.kdlRenameAll: kcScreamingSnakeCase.} = object
+    maxRetries {.kdlProp.}: int
+
+  deriveDecode(MultiWordNode)
+
+  test "kdlRenameAll does not affect the node name (decode)":
+    let f = mkCursor("multi-word-node MAX_RETRIES=3")
+    var v: MultiWordNode
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.maxRetries == 3

@@ -162,6 +162,10 @@ macro deriveEncode*(T: typedesc): untyped =
   ## subsequent cycles.
   let typeSym = T.getTypeInst[1]
   let wireName = nodeNameOf(typeSym)
+  # S2b: type-level {.kdlRenameAll: kcX.} convention string (or "" if
+  # absent), threaded into every prop key via wireKeyOf. Node name above
+  # is independent.
+  let typeConvention = typeConventionOf(typeSym)
   let vSym = ident("v")
   let eSym = ident("e")
   var body = newStmtList()
@@ -195,13 +199,9 @@ macro deriveEncode*(T: typedesc): untyped =
         newStrLitNode(annoArg.strVal)
       else:
         newStrLitNode("")
-    # Wire key: kdlRename overrides the field name (for kdlProp).
-    let renameArg = pragmaArg(pragmas, "kdlRename")
-    let wireKey =
-      if renameArg != nil and renameArg.kind == nnkStrLit:
-        renameArg.strVal
-      else:
-        fieldName
+    # Wire key (for kdlProp): kdlRename wins, else the type-level
+    # convention is applied to the field name (S2b, §3.5.3).
+    let wireKey = wireKeyOf(fieldName, pragmas, typeConvention)
     let scalar = hasPragma(pragmas, "kdlScalar")
     let isSeqField =
       fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")

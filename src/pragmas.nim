@@ -7,6 +7,29 @@
 template kdlNode*(name: string) {.pragma.}
   ## Type-level: explicit KDL node name. Defaults to type-name lowercased.
 
+type KdlNamingConvention* = enum
+  ## Naming convention applied by type-level `{.kdlRenameAll.}` to every
+  ## field's canonical wire key. The `kc` prefix matches the codebase's
+  ## 2-letter enum convention (`kv`, `tk`, `pe`, `ck`, …). A garbage
+  ## convention is unrepresentable — no runtime failure mode.
+  kcVerbatim,           ## field name unchanged (identity / documents intent)
+  kcKebabCase,          ## maxRetries → max-retries
+  kcCamelCase,          ## max_retries → maxRetries   (lower first letter)
+  kcSnakeCase,          ## maxRetries → max_retries
+  kcPascalCase,         ## max_retries → MaxRetries   (upper first letter)
+  kcScreamingSnakeCase  ## maxRetries → MAX_RETRIES
+
+template kdlRenameAll*(conv: KdlNamingConvention) {.pragma.}
+  ## Type-level: apply a `KdlNamingConvention` to EVERY field's canonical
+  ## wire key (the prop key on encode + the accepted key on decode),
+  ## derived from the Nim field name. A field carrying its own
+  ## `{.kdlRename: "x".}` is exempt — `kdlRename` sets the exact wire key
+  ## and WINS over the convention (see `wireKeyOf`, rfc §3.5.3). The
+  ## convention affects field/prop keys only; it does NOT rename the node
+  ## itself (`{.kdlNode.}` / `nodeNameOf` are independent). Example:
+  ##   type RetryCfg {.kdlNode: "retry", kdlRenameAll: kcKebabCase.} = object
+  ##     maxRetries {.kdlProp.}: int      # wire key: max-retries
+
 template kdlArg*() {.pragma.}
   ## Field-level: serialize/parse as a positional argument.
 

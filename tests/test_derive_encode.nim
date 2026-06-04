@@ -4,7 +4,7 @@
 ## a time. Each test defines a type, derives kdlEncode, constructs a
 ## value, runs it through a BufferEmitter, and asserts the wire bytes.
 
-import std/[options, unittest]
+import std/[options, unittest, macros]
 
 import ../src/derive_encode
 import ../src/derive_decode  # S1 round-trip: encode → decode (re-exports cursor/lexer/spans)
@@ -663,3 +663,107 @@ suite "derive_encode — S2a: acronym-aware default node name (BREAKING)":
       doAssert splitWords("Service2")   == @["Service2"]
       doAssert splitWords("A")          == @["A"]
       doAssert splitWords("")           == newSeq[string]()
+
+suite "derive_common — S2b: case engine joins (maxRetries → each convention)":
+
+  test "case-engine join tables":
+    static:
+      let w = splitWords("maxRetries")
+      doAssert w == @["max", "Retries"]
+      doAssert toKebab(w)          == "max-retries"
+      doAssert toCamel(w)          == "maxRetries"
+      doAssert toSnake(w)          == "max_retries"
+      doAssert toPascal(w)         == "MaxRetries"
+      doAssert toScreamingSnake(w) == "MAX_RETRIES"
+
+  test "acronym-bearing name through each convention":
+    static:
+      let w = splitWords("HTTPServer")  # ["HTTP", "Server"]
+      doAssert toKebab(w)          == "http-server"
+      doAssert toCamel(w)          == "httpServer"
+      doAssert toSnake(w)          == "http_server"
+      doAssert toPascal(w)         == "HttpServer"
+      doAssert toScreamingSnake(w) == "HTTP_SERVER"
+
+  test "single-word names":
+    static:
+      let w = splitWords("port")  # ["port"]
+      doAssert toKebab(w)          == "port"
+      doAssert toCamel(w)          == "port"
+      doAssert toSnake(w)          == "port"
+      doAssert toPascal(w)         == "Port"
+      doAssert toScreamingSnake(w) == "PORT"
+
+suite "derive_common — S2b: wireKeyOf resolver (§3.5.3)":
+
+  test "no pragma, no convention → field name verbatim":
+    static:
+      doAssert wireKeyOf("maxRetries", @[], "") == "maxRetries"
+      doAssert wireKeyOf("maxRetries", @[], "kcVerbatim") == "maxRetries"
+
+  test "convention applied to field name when no kdlRename":
+    static:
+      doAssert wireKeyOf("maxRetries", @[], "kcKebabCase") == "max-retries"
+      doAssert wireKeyOf("maxRetries", @[], "kcSnakeCase") == "max_retries"
+      doAssert wireKeyOf("maxRetries", @[], "kcCamelCase") == "maxRetries"
+      doAssert wireKeyOf("maxRetries", @[], "kcPascalCase") == "MaxRetries"
+      doAssert wireKeyOf("maxRetries", @[], "kcScreamingSnakeCase") == "MAX_RETRIES"
+
+  test "kdlRename WINS over convention":
+    static:
+      # build a {.kdlRename: "keep".} pragma node
+      let renamePragma = nnkExprColonExpr.newTree(ident("kdlRename"),
+                                                  newLit("keep"))
+      doAssert wireKeyOf("maxRetries", @[renamePragma], "kcKebabCase") == "keep"
+      doAssert wireKeyOf("maxRetries", @[renamePragma], "kcScreamingSnakeCase") == "keep"
+
+suite "derive_encode — S2b: kdlRenameAll convention applied to prop keys":
+
+  type RetryCfg {.kdlNode: "retry", kdlRenameAll: kcKebabCase.} = object
+    maxRetries {.kdlProp.}: int
+
+  deriveEncode(RetryCfg)
+
+  test "kdlRenameAll: kcKebabCase encodes max-retries":
+    var v = RetryCfg(maxRetries: 3)
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    check e.finish() == "retry max-retries=3\n"
+
+  type RetryScream {.kdlNode: "retry", kdlRenameAll: kcScreamingSnakeCase.} = object
+    maxRetries {.kdlProp.}: int
+
+  deriveEncode(RetryScream)
+
+  test "kdlRenameAll: kcScreamingSnakeCase encodes MAX_RETRIES":
+    var v = RetryScream(maxRetries: 3)
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    check e.finish() == "retry MAX_RETRIES=3\n"
+
+  type RetryKeep {.kdlNode: "retry", kdlRenameAll: kcKebabCase.} = object
+    maxRetries {.kdlProp, kdlRename: "keep".}: int
+
+  deriveEncode(RetryKeep)
+
+  test "kdlRename overrides kdlRenameAll on encode":
+    var v = RetryKeep(maxRetries: 3)
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    check e.finish() == "retry keep=3\n"
+
+  # The node name must NOT be convention-transformed. This type has no
+  # explicit kdlNode; with kdlRenameAll active the node name must still
+  # come from nodeNameOf (its own kebab fallback), unaffected by the prop
+  # convention.
+  type MultiWordNode {.kdlRenameAll: kcScreamingSnakeCase.} = object
+    maxRetries {.kdlProp.}: int
+
+  deriveEncode(MultiWordNode)
+
+  test "kdlRenameAll does not affect the node name":
+    var v = MultiWordNode(maxRetries: 3)
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    # node name stays multi-word-node (nodeNameOf kebab), prop screams.
+    check e.finish() == "multi-word-node MAX_RETRIES=3\n"

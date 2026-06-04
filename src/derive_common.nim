@@ -127,6 +127,92 @@ proc toKebab*(words: seq[string]): string =
       if c in {'A'..'Z'}: result.add(char(uint8(c) + 32))
       else: result.add(c)
 
+proc capitalizeWord(w: string): string =
+  ## Uppercase the first letter, lowercase the rest. Pure; ASCII only
+  ## (KDL identifiers + Nim field names are ASCII in practice).
+  for i, c in w:
+    if i == 0 and c in {'a'..'z'}: result.add(char(uint8(c) - 32))
+    elif i > 0 and c in {'A'..'Z'}: result.add(char(uint8(c) + 32))
+    else: result.add(c)
+
+proc lowerWord(w: string): string =
+  for c in w:
+    if c in {'A'..'Z'}: result.add(char(uint8(c) + 32))
+    else: result.add(c)
+
+proc upperWord(w: string): string =
+  for c in w:
+    if c in {'a'..'z'}: result.add(char(uint8(c) - 32))
+    else: result.add(c)
+
+proc toCamel*(words: seq[string]): string =
+  ## camelCase: first word lowercased, the rest Capitalized, no separator.
+  ## `["max","Retries"] → maxRetries`. Companion to `splitWords` (S2b).
+  for wi, w in words:
+    if wi == 0: result.add(lowerWord(w))
+    else: result.add(capitalizeWord(w))
+
+proc toPascal*(words: seq[string]): string =
+  ## PascalCase: every word Capitalized, no separator.
+  ## `["max","Retries"] → MaxRetries`.
+  for w in words:
+    result.add(capitalizeWord(w))
+
+proc toSnake*(words: seq[string]): string =
+  ## snake_case: lowercase each word, join with '_'.
+  ## `["max","Retries"] → max_retries`.
+  for wi, w in words:
+    if wi > 0: result.add('_')
+    result.add(lowerWord(w))
+
+proc toScreamingSnake*(words: seq[string]): string =
+  ## SCREAMING_SNAKE_CASE: uppercase each word, join with '_'.
+  ## `["max","Retries"] → MAX_RETRIES`.
+  for wi, w in words:
+    if wi > 0: result.add('_')
+    result.add(upperWord(w))
+
+proc wireKeyOf*(fieldName: string, pragmas: seq[NimNode],
+                convention: string): string =
+  ## Single resolver for a field's canonical wire key (rfc §3.5.3). Pure;
+  ## unit-tested directly.
+  ##
+  ## Precedence: an explicit `{.kdlRename: "x".}` WINS — it sets the exact
+  ## wire bytes and the convention is ignored. Otherwise the (non-empty,
+  ## non-`kcVerbatim`) `convention` string is applied to `fieldName` via the
+  ## case engine. `convention` is the `KdlNamingConvention` enum value's
+  ## identifier as a string (e.g. "kcKebabCase"), read off the type's
+  ## `{.kdlRenameAll.}` pragma by the caller; "" or "kcVerbatim" → verbatim.
+  let renameArg = pragmaArg(pragmas, "kdlRename")
+  if renameArg != nil and renameArg.kind == nnkStrLit:
+    return renameArg.strVal
+  case convention
+  of "", "kcVerbatim": fieldName
+  of "kcKebabCase": toKebab(splitWords(fieldName))
+  of "kcCamelCase": toCamel(splitWords(fieldName))
+  of "kcSnakeCase": toSnake(splitWords(fieldName))
+  of "kcPascalCase": toPascal(splitWords(fieldName))
+  of "kcScreamingSnakeCase": toScreamingSnake(splitWords(fieldName))
+  else:
+    error("kdlRenameAll: unknown naming convention '" & convention & "'")
+
+proc typeConventionOf*(typeSym: NimNode): string =
+  ## Read the type-level `{.kdlRenameAll: kcX.}` pragma's argument as a
+  ## string (e.g. "kcKebabCase"), or "" if the type has no such pragma.
+  ## Threaded into `wireKeyOf` as the `convention` for every field. The
+  ## pragma value parses as an `nnkExprColonExpr` (the colon form) or an
+  ## `nnkCall` (the paren form); the ident at [1] is the enum value.
+  let impl = typeSym.getImpl
+  expectKind(impl, nnkTypeDef)
+  let nameNode = impl[0]
+  if nameNode.kind == nnkPragmaExpr:
+    for p in nameNode[1]:
+      let head = pragmaHead(p)
+      if $head == "kdlRenameAll" and
+         p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2:
+        return $p[1]
+  ""
+
 proc nodeNameOf*(typeSym: NimNode): string =
   ## Read `kdlNode: "name"` pragma or fall back to the type name run through
   ## acronym-aware word-split → kebab-case (`HTTPServer → http-server`; S2a).

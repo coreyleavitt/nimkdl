@@ -237,6 +237,10 @@ macro deriveDecode*(T: typedesc): untyped =
   ## each to the right field, returns success or the first error.
   let typeSym = T.getTypeInst[1]
   let wireName = nodeNameOf(typeSym)
+  # S2b: type-level {.kdlRenameAll: kcX.} convention string (e.g.
+  # "kcKebabCase"), or "" if absent. Threaded into every field's wireKey
+  # via wireKeyOf. Affects prop keys only — never the node name above.
+  let typeConvention = typeConventionOf(typeSym)
   # `ref object` as the user-facing type (#9/#39): the proc receives
   # `v: var RefT` defaulted to nil, so the field assignments below would
   # deref nil. Allocate once up front. Value objects need no prologue.
@@ -347,11 +351,8 @@ macro deriveDecode*(T: typedesc): untyped =
                    requiresUncheckedAssign: needsUnchecked))
     elif hasPragma(pragmas, "kdlProp") or (scalar and
          not hasPragma(pragmas, "kdlChild")):
-      let renameArg = pragmaArg(pragmas, "kdlRename")
-      let wireKey =
-        if renameArg != nil and renameArg.kind == nnkStrLit:
-          renameArg.strVal
-        else: fieldName
+      # S2b: kdlRename wins; else the type-level convention is applied.
+      let wireKey = wireKeyOf(fieldName, pragmas, typeConvention)
       propSink.add((name: fieldName, typ: fieldType, wireKey: wireKey,
                     reservedTag: reservedTag, scalar: scalar,
                     pathExpr: pathExpr,
@@ -396,8 +397,10 @@ macro deriveDecode*(T: typedesc): untyped =
                        wireName: nodeNameOf(ft), pathExpr: pathExpr,
                        requiresUncheckedAssign: needsUnchecked))
       else:
-        # primitive / enum (incl. Option[primitive]) → prop; key = field name.
-        propSink.add((name: fieldName, typ: fieldType, wireKey: fieldName,
+        # primitive / enum (incl. Option[primitive]) → prop; key via
+        # wireKeyOf (S2b: type-level convention, or field name verbatim).
+        propSink.add((name: fieldName, typ: fieldType,
+                      wireKey: wireKeyOf(fieldName, pragmas, typeConvention),
                       reservedTag: reservedTag, scalar: false,
                       pathExpr: pathExpr,
                       requiresUncheckedAssign: needsUnchecked))
