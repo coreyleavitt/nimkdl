@@ -241,6 +241,10 @@ macro deriveDecode*(T: typedesc): untyped =
   # "kcKebabCase"), or "" if absent. Threaded into every field's wireKey
   # via wireKeyOf. Affects prop keys only — never the node name above.
   let typeConvention = typeConventionOf(typeSym)
+  # S4: type-level {.kdlIgnoreUnknown.} relaxes the default strict-unknown
+  # behavior. When false (default), an unknown prop or child node errors with
+  # peTypeUnknownField; when true, both are skipped/consumed and ignored.
+  let ignoreUnknown = typeHasFlagPragma(typeSym, "kdlIgnoreUnknown")
   # `ref object` as the user-facing type (#9/#39): the proc receives
   # `v: var RefT` defaulted to nil, so the field assignments below would
   # deref nil. Allocate once up front. Value objects need no prologue.
@@ -564,6 +568,19 @@ macro deriveDecode*(T: typedesc): untyped =
       result = result xor uint32(uint8(ch))
       result = result * 0x01000193'u32
 
+  # S4: an unknown prop key. Strict by default; under {.kdlIgnoreUnknown.}
+  # the ceProp event (key + value) is already consumed by the loop's advance,
+  # so ignoring is a no-op that falls through to the next event. Built fresh
+  # per call site (the same node is spliced into several else branches).
+  proc unknownProp(): NimNode =
+    if ignoreUnknown:
+      newStmtList(quote do: discard)
+    else:
+      quote do:
+        return err[void, ParseError](
+          initError(peTypeUnknownField, `evSym2`.span,
+                    "unknown property"))
+
   proc buildPropIf(fields: seq[PropField], slots: seq[int]): NimNode =
     ## ≤8 fields → bytesEqLit if-elif chain (compiler-folded inline).
     ## >8 fields with no macro-time hash collisions → case-on-FNV-32
@@ -572,10 +589,7 @@ macro deriveDecode*(T: typedesc): untyped =
     ## bytesEqLit takes the literal directly (no lifted-let plumbing);
     ## the macro expands to per-byte compares the compiler folds.
     if fields.len == 0:
-      return quote do:
-        return err[void, ParseError](
-          initError(peTypeUnknownField, `evSym2`.span,
-                    "unknown property"))
+      return unknownProp()
     proc branchBodyFor(i: int): NimNode =
       let fName = fields[i].name
       let fType = fields[i].typ
@@ -629,18 +643,13 @@ macro deriveDecode*(T: typedesc): untyped =
         # bytesEqLit confirmation guards against runtime hash collisions
         # from unknown keys that happen to map to a known field's hash.
         # The literal is inlined; compiler folds the per-byte checks.
-        let confirmed = quote do:
-          if bytesEqLit(`cSym`, `evSym2`.propKeyTok, `keyLit`):
-            `decodeBlock`
-          else:
-            return err[void, ParseError](
-              initError(peTypeUnknownField, `evSym2`.span,
-                        "unknown property"))
+        let confirmed = newTree(nnkIfStmt,
+          newTree(nnkElifBranch,
+            quote do: bytesEqLit(`cSym`, `evSym2`.propKeyTok, `keyLit`),
+            decodeBlock),
+          newTree(nnkElse, unknownProp()))
         caseStmt.add(newTree(nnkOfBranch, hLit, confirmed))
-      caseStmt.add(newTree(nnkElse, quote do:
-        return err[void, ParseError](
-          initError(peTypeUnknownField, `evSym2`.span,
-                    "unknown property"))))
+      caseStmt.add(newTree(nnkElse, unknownProp()))
       return caseStmt
     # Default: if-elif chain.
     var ifNode = newNimNode(nnkIfStmt)
@@ -648,10 +657,7 @@ macro deriveDecode*(T: typedesc): untyped =
       let keyLit = newStrLitNode(fields[i].wireKey)
       let cond = quote do: bytesEqLit(`cSym`, `evSym2`.propKeyTok, `keyLit`)
       ifNode.add(newNimNode(nnkElifBranch).add(cond).add(branchBodyFor(i)))
-    ifNode.add(newNimNode(nnkElse).add(quote do:
-      return err[void, ParseError](
-        initError(peTypeUnknownField, `evSym2`.span,
-                  "unknown property"))))
+    ifNode.add(newNimNode(nnkElse).add(unknownProp()))
     ifNode
 
   var propDispatch = newStmtList()
@@ -711,12 +717,30 @@ macro deriveDecode*(T: typedesc): untyped =
         rootIf.add(newNimNode(nnkElifBranch).add(cond).add(body))
       else:
         rootIf.add(newNimNode(nnkElifBranch).add(cond).add(body))
-    rootIf.add(newNimNode(nnkElse).add(quote do:
-      skip(`cSym`)))
+    # S4: a real ceNodeBegin matching no kdlChild field. Strict by default
+    # (peTypeUnknownField); skip()'d only under {.kdlIgnoreUnknown.}. The
+    # separate slashdash branch in the caller is unaffected.
+    let unknownChild =
+      if ignoreUnknown:
+        quote do: skip(`cSym`)
+      else:
+        quote do:
+          return err[void, ParseError](
+            initError(peTypeUnknownField, `childPeekSym`.span,
+                      "unknown child node"))
+    rootIf.add(newNimNode(nnkElse).add(unknownChild))
     childDispatchBody = rootIf
   else:
-    childDispatchBody = quote do:
-      skip(`cSym`)
+    # No kdlChild fields: any child node is unknown. Same strict-by-default
+    # rule as the unmatched-else above.
+    childDispatchBody =
+      if ignoreUnknown:
+        quote do: skip(`cSym`)
+      else:
+        quote do:
+          return err[void, ParseError](
+            initError(peTypeUnknownField, `childPeekSym`.span,
+                      "unknown child node"))
 
   let requiredMaskLit = newLit(requiredMask)
   let wireNameLit = newStrLitNode(wireName)

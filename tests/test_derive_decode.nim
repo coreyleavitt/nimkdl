@@ -924,3 +924,75 @@ suite "derive_decode — S2b: kdlRenameAll convention on prop keys":
     let r = kdlDecode(v, f.cursor)
     check r.isOk
     check v.maxRetries == 3
+
+suite "derive_decode — S4 step 1: unknown child nodes are strict":
+
+  type S4Child {.kdlNode: "known".} = object
+    label {.kdlArg.}: string
+
+  deriveDecode(S4Child)
+
+  type S4Parent {.kdlNode: "parent".} = object
+    known {.kdlChild.}: S4Child
+
+  deriveDecode(S4Parent)
+
+  test "unknown child node (type WITH a child field) → peTypeUnknownField":
+    let f = mkCursor("parent {\n    known \"ok\"\n    mystery \"x\"\n}")
+    var p: S4Parent
+    let r = kdlDecode(p, f.cursor)
+    check r.isErr
+    check r.getErr.code == peTypeUnknownField
+
+  test "known child still decodes when it is the only child":
+    let f = mkCursor("parent {\n    known \"ok\"\n}")
+    var p: S4Parent
+    let r = kdlDecode(p, f.cursor)
+    check r.isOk
+    check p.known.label == "ok"
+
+  type S4NoKids {.kdlNode: "leaf".} = object
+    id {.kdlArg.}: string
+
+  deriveDecode(S4NoKids)
+
+  test "unknown child node (type with NO child fields) → peTypeUnknownField":
+    let f = mkCursor("leaf \"a\" {\n    surprise 1\n}")
+    var v: S4NoKids
+    let r = kdlDecode(v, f.cursor)
+    check r.isErr
+    check r.getErr.code == peTypeUnknownField
+
+suite "derive_decode — S4 step 2: kdlIgnoreUnknown opt-out":
+
+  type S4IgChild {.kdlNode: "known".} = object
+    label {.kdlArg.}: string
+
+  deriveDecode(S4IgChild)
+
+  type S4Lenient {.kdlNode: "lenient", kdlIgnoreUnknown.} = object
+    name {.kdlProp.}: string
+    known {.kdlChild.}: S4IgChild
+
+  deriveDecode(S4Lenient)
+
+  test "kdlIgnoreUnknown ignores both unknown prop and unknown child":
+    let f = mkCursor(
+      "lenient name=\"hi\" extra=99 {\n    known \"ok\"\n    mystery \"x\"\n}")
+    var v: S4Lenient
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.name == "hi"
+    check v.known.label == "ok"
+
+  type S4LenientNoKids {.kdlNode: "lleaf", kdlIgnoreUnknown.} = object
+    id {.kdlArg.}: string
+
+  deriveDecode(S4LenientNoKids)
+
+  test "kdlIgnoreUnknown on a type with no child fields skips unknown child":
+    let f = mkCursor("lleaf \"a\" {\n    surprise 1\n}")
+    var v: S4LenientNoKids
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.id == "a"

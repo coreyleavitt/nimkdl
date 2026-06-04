@@ -53,6 +53,16 @@ template kdlDecodeOnly*() {.pragma.}
   ## with `{.kdlEncodeOnly.}` on the same type is contradictory and is a
   ## compile-time error.
 
+template kdlIgnoreUnknown*() {.pragma.}
+  ## Type-level: relax the default strict-unknown behavior on DECODE. Without
+  ## it, an unknown property OR an unknown child node (one matching no
+  ## `{.kdlProp.}` / `{.kdlChild.}` field) is a `peTypeUnknownField` error.
+  ## With it, both are silently skipped: unknown props are consumed and
+  ## ignored, unknown child nodes are `skip()`'d. Use it for forward-compatible
+  ## decoding of documents that may carry fields this type does not model.
+  ## Affects decode only; encode never emits unknown data. The `/-` slashdash
+  ## path is unaffected (it suppresses decoding regardless).
+
 template kdlArg*() {.pragma.}
   ## Field-level: serialize/parse as a positional argument.
 

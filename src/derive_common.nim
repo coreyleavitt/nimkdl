@@ -213,6 +213,19 @@ proc typeConventionOf*(typeSym: NimNode): string =
         return $p[1]
   ""
 
+proc typeHasFlagPragma*(typeSym: NimNode; name: string): bool =
+  ## True iff the type carries a no-argument type-level pragma named `name`
+  ## (e.g. `{.kdlIgnoreUnknown.}`). Type-level pragmas live on the TypeDef's
+  ## name node when it is an `nnkPragmaExpr`; the marker form is a bare ident
+  ## (or a `nnkCall` with no args), matched via `pragmaHead`.
+  let impl = typeSym.getImpl
+  expectKind(impl, nnkTypeDef)
+  let nameNode = impl[0]
+  if nameNode.kind == nnkPragmaExpr:
+    for p in nameNode[1]:
+      if $pragmaHead(p) == name: return true
+  false
+
 proc nodeNameOf*(typeSym: NimNode): string =
   ## Read `kdlNode: "name"` pragma or fall back to the type name run through
   ## acronym-aware word-split → kebab-case (`HTTPServer → http-server`; S2a).
