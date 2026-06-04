@@ -41,7 +41,11 @@ type
 
   KdlDoc* = ref object
     sourcePath*: string
-    sourceText*: string
+    sourceText: string
+      ## Setter-only (review R2): mutate ONLY through `setSource`, which keeps
+      ## `lineMap` in lockstep. The field is NOT `*`-exported — direct
+      ## reassignment would desync the cached `lineMap` (wrong line/col). Read
+      ## via the `sourceText*` accessor below.
     lineMap*: LineMap
       ## Offset→(line,col) map over `sourceText`, built **once** when the doc is
       ## constructed (`setSource`). Node-by-node decode (`decodeNode(doc, node)`,
@@ -69,6 +73,11 @@ func setSource*(doc: KdlDoc, sourceText: string) =
   ## must set the text through here, never by assigning `sourceText` directly.
   doc.sourceText = sourceText
   doc.lineMap = buildLineMap(sourceText)
+
+func sourceText*(doc: KdlDoc): lent string {.inline.} =
+  ## Read accessor for the doc's verbatim source. The backing field is
+  ## setter-only (`setSource`) so the cached `lineMap` cannot desync (review R2).
+  doc.sourceText
 
 # ── argument accessors (doc-free) ────────────────────────────────────────────
 
