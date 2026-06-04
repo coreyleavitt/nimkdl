@@ -5,7 +5,7 @@
 [![Conformance](https://img.shields.io/endpoint?url=https://coreyleavitt.github.io/nkdl/conformance-badge.json)](BENCHMARK.md)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue)](LICENSE)
 
-A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. Three-categories architecture: streaming events (Cat 1), typed-derive `decode[T]` / `encode[T]` (Cat 2), and untyped DOM `parse()` / `emitDoc` (Cat 3) are independent — pay only for what you use.
+A KDL v2 parser for Nim with compile-time-validated typed decode, byte-lossless format preservation, and dual-parser differential testing. Three-categories architecture: streaming events (Cat 1), typed-derive `decode[T]` / `encode[T]` (Cat 2), and untyped DOM `parse()` / `encode()` (Cat 3) are independent — pay only for what you use.
 
 On realistic configs nkdl parses about **1.54× faster than [ckdl](https://github.com/tjol/ckdl)** (a hand-written C parser), **~7× faster than [knus](https://crates.io/crates/knus)**, and **~16× faster than [kdl-rs](https://github.com/kdl-org/kdl-rs)**. On typed encode `encode[seq[Service]]` is **2.34× faster than [facet-kdl](https://crates.io/crates/facet-kdl)**'s `to_string` (56.1K vs 24.0K ops/s). On typed decode knus's serde-derive edges us 1.22× (20.5K vs 16.8K ops/s). Full spec conformance: **338/338** on the kdl-org reference corpus (243/243 should-parse + 95/95 should-reject). ckdl misses 3 should-parse files, kdl-rs misses 1, knus misses 132. On deep + large synthetic stressors ckdl pulls ahead. Per-fixture breakdown, honest regression disclosure vs the pre-rewrite numbers, and methodology in [BENCHMARK.md](BENCHMARK.md).
 
@@ -52,7 +52,7 @@ const builtins = embed[seq[Service]]("services.kdl").get
 | Layer | Surface | Notes |
 |---|---|---|
 | Parse | `parse(src, preserveFormat = false) -> Result[KdlDoc, ParseError]` | KDL v2 text to AST. `preserveFormat` is opt-in for `emPreserve`. |
-| Encode | `encode(doc, mode = emPreserve) -> string` | `emPreserve` is byte-lossless; `emPretty` is canonical indented. (`emCompact`, canonical minimal, is planned — [#26](https://github.com/coreyleavitt/nkdl/issues/26).) |
+| Encode | `encode(doc) -> string` | Canonical by default. `encode(doc, preserve = true)` (or `encode(doc, emPreserve)`) is byte-lossless; `encode(doc, emPretty)` is indented. (`emCompact`, canonical minimal, is planned — [#26](https://github.com/coreyleavitt/nkdl/issues/26).) |
 | Decode | `decode[T](src) -> Result[T, ParseError]` | Typed decode for types in a `kdl:` block. |
 | Embed | `embed[T]("path")` | `staticRead` plus decode at compile time. Bad input fails the build. |
 | Query | `path(items, [pred].chain)` | Compile-time field-checked filter and access. |
@@ -71,10 +71,13 @@ KSL (KDL Schema Language) and KQL (KDL Query Language) are intentionally not imp
 
 ## Pragmas
 
-Type-level: `{.kdlNode: "name".}`.
-Field-level: `{.kdlArg.}`, `{.kdlProp.}`, `{.kdlChild.}`, `{.kdlSkip.}`, `{.kdlRename: "x".}`, `{.kdlReserved.}`.
+Full reference with examples: [docs/derive-reference.md](docs/derive-reference.md).
 
-Native Nim 2.x field defaults (`field: type = expr`) work as fallback values.
+Type-level: `{.kdlNode: "name".}`, `{.kdlRenameAll: kc….}`, `{.kdlIgnoreUnknown.}`, `{.kdlEncodeOnly.}` / `{.kdlDecodeOnly.}`, `{.kdlUntagged.}`.
+
+Field-level: `{.kdlArg.}`, `{.kdlVariadic.}`, `{.kdlProp.}`, `{.kdlChild.}`, `{.kdlScalar.}`, `{.kdlRename: "x".}`, `{.kdlAlias("a", "b").}`, `{.kdlReserved.}`, `{.kdlSkip.}` / `{.kdlSkipEncode.}` / `{.kdlSkipDecode.}`, `{.kdlFlatten.}`.
+
+Native Nim 2.x field defaults (`field: type = expr`) work as fallback values for absent props; inherited fields (`object of Base`) are included; custom scalars use the `kdlEncodeValue` / `kdlDecodeValue` `KdlValue` hook pair.
 
 ## vs the alternatives
 
@@ -86,10 +89,8 @@ Native Nim 2.x field defaults (`field: type = expr`) work as fallback values.
 
 | Constant | Default | Module | Purpose |
 |---|---|---|---|
-| `MaxParserDepth` | 256 | `parser.nim` | Recursion cap on `{ children }` nesting |
-| `InlineCapacity` | 22 | `intern.nim` | SBO inline-string capacity per Entry |
+| `MaxParserDepth` | 256 | `cursor.nim` | Recursion cap on `{ children }` nesting |
 | `InterpRecursionCap` | 1024 | `grammar.nim` | Reference interpreter recursion cap |
-| `KdlReprMaxDepth` | 32 | `ast.nim` | `$KdlDoc` cycle and pathological-depth guard |
 | `MaxRawStringHashes` | 255 | `lexer.nim` | Cap on `#` count in raw-string fence |
 
 ## Development

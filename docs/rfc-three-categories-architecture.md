@@ -1,5 +1,16 @@
 # RFC: Three-Categories Architecture (v1)
 
+> **⚠ Substrate superseded — read this first.** The three-category *layering*
+> (Cat 1 streaming cursor / Cat 2 typed-derive / Cat 3 DOM) is canonical and
+> still describes the architecture. But the **substrate + codegen details in
+> this body are obsolete**: it describes the old interner / `doc.interner` /
+> ref-AST model and the `deriveDecode`/`deriveEncode` codegen names. The DOM
+> was rebuilt around self-contained owned-string nodes (`src/value.nim` +
+> `src/node.nim`, no interner) per **`docs/rfc-core-rebuild.md`**, and the
+> public typed API is `decode[T]` / `encode[T]` (pragma vocabulary in
+> **`docs/derive-reference.md`**). Where this RFC and rfc-core-rebuild
+> disagree on the substrate, rfc-core-rebuild wins.
+
 **Status**: Phases 0-2 landed (cursor + buildDoc + parse swap). Phases 3-6 superseded by a clean-core branch rebuild — see `docs/branch-rebuild-plan.md` for the operational sequencing.
 **Filed**: 2026-05-28. Revised 2026-05-29 with IN/OUT symmetry + branch-rebuild strategy.
 **Supersedes**: nkdl#8 (parametric SeqBuilder), nkdl#10 (pull-based decoder RFC), partially closes nkdl#7 + nkdl#11 by construction.
