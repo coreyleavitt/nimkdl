@@ -1272,3 +1272,124 @@ suite "derive_decode — S7: directional skip (kdlSkipDecode)":
     let r = kdlDecode(s, f.cursor)
     check r.isOk
     check s.hidden == ""
+
+
+suite "derive_decode — S8a: kdlFlatten decode":
+
+  type Meta = object
+    author {.kdlProp.}: string
+    version {.kdlProp.}: int
+
+  type Doc {.kdlNode: "doc".} = object
+    title {.kdlArg.}: string
+    meta {.kdlFlatten.}: Meta
+
+  deriveDecode(Doc)
+
+  test "flattened object props land in the parent namespace":
+    let f = mkCursor("doc \"t\" author=\"me\" version=2")
+    var v: Doc
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.title == "t"
+    check v.meta.author == "me"
+    check v.meta.version == 2
+
+  test "a flattened required prop missing is a missing-required error":
+    let f = mkCursor("doc \"t\" author=\"me\"")  # version absent
+    var v: Doc
+    let r = kdlDecode(v, f.cursor)
+    check r.isErr
+
+  # Arg-index test: two flattened args must occupy contiguous positional
+  # slots AFTER the parent's fixed arg, in declaration order.
+  type Coords = object
+    x {.kdlArg.}: int
+    y {.kdlArg.}: int
+
+  type Placed {.kdlNode: "placed".} = object
+    label {.kdlArg.}: string
+    at {.kdlFlatten.}: Coords
+    tail {.kdlArg.}: int
+
+  deriveDecode(Placed)
+
+  test "two flattened args are contiguous with parent fixed args (index order)":
+    # positional 0 = label, 1 = at.x, 2 = at.y, 3 = tail
+    let f = mkCursor("placed \"p\" 10 20 99")
+    var v: Placed
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.label == "p"
+    check v.at.x == 10
+    check v.at.y == 20
+    check v.tail == 99
+
+  # Nested flatten: Inner flattens Deep; Mid flattens Inner.
+  type Deep = object
+    d {.kdlProp.}: string
+
+  type Inner = object
+    i {.kdlProp.}: int
+    deep {.kdlFlatten.}: Deep
+
+  type Outer {.kdlNode: "outer".} = object
+    name {.kdlArg.}: string
+    inner {.kdlFlatten.}: Inner
+
+  deriveDecode(Outer)
+
+  test "a nested flatten (flatten of a flattening object) decodes":
+    let f = mkCursor("outer \"o\" i=7 d=\"deepval\"")
+    var v: Outer
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.name == "o"
+    check v.inner.i == 7
+    check v.inner.deep.d == "deepval"
+
+suite "derive_decode — S8a: kdlFlatten macro-error guards":
+
+  test "a valid flattened type compiles (sanity)":
+    check compiles((
+      block:
+        type M = object
+          a {.kdlProp.}: string
+        type D {.kdlNode: "d".} = object
+          m {.kdlFlatten.}: M
+        deriveDecode(D)
+    ))
+
+  test "kdlFlatten on a variant-bearing type is rejected":
+    check not compiles((
+      block:
+        type Variant = object
+          case kind {.kdlProp.}: bool
+          of true:
+            t {.kdlProp.}: string
+          of false:
+            f {.kdlProp.}: int
+        type Bad {.kdlNode: "bad".} = object
+          v {.kdlFlatten.}: Variant
+        deriveDecode(Bad)
+    ))
+
+  test "a self-flattening field is rejected":
+    check not compiles((
+      block:
+        type SelfFlat {.kdlNode: "sf".} = object
+          name {.kdlArg.}: string
+          me {.kdlFlatten.}: SelfFlat
+        deriveDecode(SelfFlat)
+    ))
+
+  test "a wire-key collision between parent prop and flattened sub-prop is rejected":
+    check not compiles((
+      block:
+        type Sub = object
+          dup {.kdlProp.}: string
+        type Clash {.kdlNode: "clash".} = object
+          dup {.kdlProp.}: int
+          sub {.kdlFlatten.}: Sub
+        deriveDecode(Clash)
+    ))

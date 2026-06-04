@@ -130,6 +130,29 @@ template kdlScalar*() {.pragma.}
   ## the value's span. Defaults to a property (key = field name); combine with
   ## `{.kdlArg.}` for positional.
 
+template kdlFlatten*() {.pragma.}
+  ## Field-level: SPLICE a nested object field's args/props/children into the
+  ## PARENT node's namespace — no child node is emitted for the flattened
+  ## field. The field's type MUST be an object (or `ref object`); its
+  ## sub-fields are routed as if they were declared directly on the parent.
+  ## A flattened arg sub-field occupies a contiguous positional slot computed
+  ## against the parent's running arg count; a flattened prop/child sub-field
+  ## uses its own wire key/name in the parent namespace. Example:
+  ##   type Meta = object
+  ##     author {.kdlProp.}: string
+  ##     version {.kdlProp.}: int
+  ##   type Doc {.kdlNode: "doc".} = object
+  ##     title {.kdlArg.}: string
+  ##     meta {.kdlFlatten.}: Meta        # author=…, version=… land on `doc`
+  ## decodes `doc "t" author="me" version=2` into `v.title`, `v.meta.author`,
+  ## `v.meta.version`. Flattening nests (a flattened object may itself flatten
+  ## an inner object) up to a depth bound. **Constraints (compile-time
+  ## errors):** the union of all parent + flattened WIRE keys (post-rename)
+  ## must be globally unique; a flattened field whose type IS the parent type
+  ## (self-flatten) is rejected; `{.kdlFlatten.}` on a `case`/variant-bearing
+  ## type is rejected (discriminator ordering is out of scope); nesting deeper
+  ## than 8 levels is rejected.
+
 template kdlRename*(name: string) {.pragma.}
   ## Field-level: KDL name differs from Nim field name.
 

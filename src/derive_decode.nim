@@ -326,7 +326,8 @@ macro deriveDecode*(T: typedesc): untyped =
                 childSink: var seq[ChildField];
                 fieldDefault: NimNode = nil;
                 isBranchField: bool = false;
-                baseExpr: NimNode = nil) =
+                baseExpr: NimNode = nil;
+                flattenDepth: int = 0) =
     # S5: the field's native default (`field = expr`), `nnkEmpty`/nil when
     # none. The macro splices it post-decode for top-level fields absent
     # from the wire.
@@ -352,6 +353,44 @@ macro deriveDecode*(T: typedesc): untyped =
     let pathExpr =
       if baseExpr != nil: newDotExpr(baseExpr, ident(fieldName))
       else: newDotExpr(vSym, ident(fieldName))
+    # S8a: {.kdlFlatten.} splices a nested object field's args/props/children
+    # into the PARENT node's namespace — no child node is emitted. We RECURSE:
+    # for each sub-field of the flattened type `F`, classify with `baseExpr` =
+    # this field's `pathExpr` (so sub-fields get a compound LHS like
+    # `v.meta.author`) and `flattenDepth + 1`, routing each into the SAME
+    # arg/prop/child sinks. Because the recursion APPENDS in declaration order,
+    # flattened arg sub-fields take contiguous `argIdx` slots after the parent's
+    # already-collected args — the index arithmetic falls out for free.
+    if hasPragma(pragmas, "kdlFlatten"):
+      # Guard: depth bound (cheap loop protection beyond self-flatten).
+      if flattenDepth + 1 > 8:
+        error("{.kdlFlatten.} on '" & fieldName & "': nesting too deep " &
+              "(exceeds 8 levels). Flatten chains this deep almost certainly " &
+              "indicate a cyclic type; restructure the data model.")
+      # Guard: the flattened type must be an object (the whole point is to
+      # splice an object's fields). A primitive/seq has nothing to splice.
+      if not isObjectTypeResolved(fieldType):
+        error("{.kdlFlatten.} on '" & fieldName & "': type '" & $fieldType &
+              "' is not an object. kdlFlatten splices a nested object's " &
+              "fields into the parent; use {.kdlArg.}/{.kdlProp.}/{.kdlChild.} " &
+              "for a non-object field.")
+      # Guard: self-flatten — a field whose type IS the parent type would
+      # recurse forever and is meaningless.
+      if fieldType.eqIdent($typeSym) or $fieldType == $typeSym:
+        error("{.kdlFlatten.} on '" & fieldName & "': the field's type '" &
+              $fieldType & "' is the enclosing type itself (self-flatten), " &
+              "which cannot terminate. Flatten a distinct nested object.")
+      let flatRecList = objectRecList(fieldType)
+      # Guard: a variant (RecCase-bearing) flattened type — discriminator
+      # ordering across a spliced namespace is unresolved (rfc §4-S8a).
+      if findRecCase(flatRecList) != nil:
+        error("{.kdlFlatten.} cannot apply to a variant field; '" &
+              $fieldType & "' has a case discriminator.")
+      for (sfName, sfType, sfPragmas, sfDefault) in regularFields(flatRecList):
+        classify(sfName, sfType, sfPragmas, argSink, propSink, childSink,
+                 sfDefault, isBranchField = isBranchField,
+                 baseExpr = pathExpr, flattenDepth = flattenDepth + 1)
+      return
     # The discriminator field is the only one whose assignment must be
     # wrapped in `{.cast(uncheckedAssign).}` (a discriminator write is
     # otherwise illegal outside its case branch).
