@@ -30,7 +30,7 @@
 ## `nim c` rather than production:
 ##
 ## ```nim
-## const builtins = embed[seq[Service]]("services.kdl").get
+## const builtins = embed[seq[Service]]("services.kdl")
 ## ```
 ##
 ## ## Public API map

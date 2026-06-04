@@ -42,7 +42,7 @@ for service in r.get:
 The same file can also be embedded at compile time. A parse error then fails `nim c` instead of production:
 
 ```nim
-const builtins = embed[seq[Service]]("services.kdl").get
+const builtins = embed[seq[Service]]("services.kdl")
 ```
 
 `embed[T]` runs lex + parse + decode inside Nim's VM and emits a `const`. Zero module-init cost; malformed input fails the build.
