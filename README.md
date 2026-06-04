@@ -55,7 +55,7 @@ const builtins = embedFile[seq[Service]]("services.kdl")
 | Encode | `encode(doc) -> string` | Canonical by default. `encode(doc, preserve = true)` (or `encode(doc, emPreserve)`) is byte-lossless; `encode(doc, emPretty)` is indented. (`emCompact`, canonical minimal, is planned — [#26](https://github.com/coreyleavitt/nkdl/issues/26).) |
 | Decode | `decode[T](src) -> Result[T, ParseError]` | Typed decode for types in a `kdl:` block. |
 | Decode (file) | `decodeFile[T](path) -> Result[T, ParseError]` | Reads `path`, decodes it, attributes errors to the real filename. I/O failure → `peIOError`. |
-| Bridge | `decodeNode[T](doc, node)` / `decodeChild[T]` / `coerce[T]` | Decode an individual DOM node, child, or scalar value into `T`. See [the consumer bridge](#typeddom-bridge). |
+| Bridge | `decodeNode[T](doc, node)` / `decodeChild[T]` / `decodeProp[T]` / `decodeArg[T]` / `coerce[T]` | Decode an individual DOM node, child, property value, positional argument, or scalar value into `T`. See [the consumer bridge](#typeddom-bridge). |
 | Embed | `embed[T](src)` / `embedFile[T](path)` | Compile-time decode of KDL **content** (`embed`) or a **file** (`embedFile`, `staticRead` + decode). Bad input fails the build. |
 | Query | `path(items, [pred].chain)` | Compile-time field-checked filter and access. |
 | Reference | `referenceInterpret(src)` | Table-driven independent parser used as differential-test oracle. |

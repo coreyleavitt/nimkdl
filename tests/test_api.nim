@@ -234,6 +234,8 @@ suite "H1 — whole public surface is {.raises:[].} (rfc-consumer-api §4.5/§7)
         discard decodeNode[Service](n)                   # doc-less re-emit overload
         discard reEmitDecodeNode[Service](n)             # explicit re-emit fallback
         discard decodeChild[Service](doc, n, "service")  # child lookup leg
+        discard decodeProp[int](n, "port")               # scalar prop twin
+        discard decodeArg[string](n, 0)                  # scalar arg twin
     # coerce — value → T (scalar leg)
     discard coerce[string](val)
 

@@ -46,6 +46,7 @@
 ## | Cat 2 — multi-error decode | `decodeAll[T](src) -> Parsed[T]` | `api` |
 ## | Cat 2 — typed encode | `encode[T](v) -> string` | `api` |
 ## | Cat 2 — decode a DOM node | `decodeNode[T](doc, node)` / `decodeChild[T]` | `api` |
+## | Cat 2 — decode a scalar prop/arg | `decodeProp[T](node, key)` / `decodeArg[T](node, i)` | `api` |
 ## | Cat 2 — coerce a scalar value | `coerce[T](val: KdlValue) -> Result[T, ParseError]` | `api` |
 ## | Cat 2 — compile-time embed | `embed[T](src)` (content) / `embedFile[T](path)` | `api` |
 ## | Typed query DSL | `path(items, [pred].field.chain)` | `path` |

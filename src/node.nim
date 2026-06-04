@@ -46,7 +46,7 @@ type
       ## `lineMap` in lockstep. The field is NOT `*`-exported — direct
       ## reassignment would desync the cached `lineMap` (wrong line/col). Read
       ## via the `sourceText*` accessor below.
-    lineMap*: LineMap
+    lineMap: LineMap
       ## Offset→(line,col) map over `sourceText`, built **once** when the doc is
       ## constructed (`setSource`). Node-by-node decode (`decodeNode(doc, node)`,
       ## `decodeChild`) enriches errors against this cached map instead of
@@ -54,6 +54,10 @@ type
       ## (review #3). Empty (`lineStarts == @[]`) for hand-built docs that never
       ## ran through `setSource`; the decode path falls back to its no-source
       ## re-emit branch for hand-built nodes anyway, so those never read it.
+      ##
+      ## NOT `*`-exported (review R3): a PURE INTERNAL cache. Direct reassignment
+      ## would desync it from `sourceText` — the same footgun class the `sourceText`
+      ## setter-only fix (8b9fc10) closed. Read via the `lineMap*` accessor below.
     preserveFormat*: bool
     rootNodes*: seq[KdlNode]
 
@@ -78,6 +82,12 @@ func sourceText*(doc: KdlDoc): lent string {.inline.} =
   ## Read accessor for the doc's verbatim source. The backing field is
   ## setter-only (`setSource`) so the cached `lineMap` cannot desync (review R2).
   doc.sourceText
+
+func lineMap*(doc: KdlDoc): lent LineMap {.inline.} =
+  ## Read accessor for the doc's cached offset→(line,col) map. The backing field
+  ## is internal (built only by `setSource`) so it cannot be reassigned out of
+  ## lockstep with `sourceText` (review R3).
+  doc.lineMap
 
 # ── argument accessors (doc-free) ────────────────────────────────────────────
 
