@@ -35,7 +35,7 @@ import ./spans
 
 export spans  # Result, ParseError visible without extra imports
 
-proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect.} =
+proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect, raises: [].} =
   ## Parse `src` and decode into a value of type `T`.
   ##
   ## For object types with `{.kdlNode.}`, expects a single top-level
@@ -61,6 +61,7 @@ proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect.} =
     ok[T, ParseError](v)
 
 proc encode*[T](v: T): Result[string, ParseError] =
+  # TODO(H1): fold under {.raises:[].} once emitter chain is triaged
   ## Encode `v` to KDL wire bytes.
   ##
   ## For object types with `{.kdlNode.}`, emits a single top-level node.
@@ -87,7 +88,7 @@ proc encode*[T](v: T): Result[string, ParseError] =
   ok[string, ParseError](e.finish())
 
 proc decodeAll*[T](src: string):
-    tuple[value: T, errors: seq[ParseError]] {.noSideEffect.} =
+    tuple[value: T, errors: seq[ParseError]] {.noSideEffect, raises: [].} =
   ## Multi-error variant of `decode[T]`. T must be `seq[U]` — single-
   ## node decodeAll would be the same as `decode`. On a decoder error
   ## for one top-level node, the cursor advances past the offending
@@ -122,7 +123,7 @@ proc decodeAll*[T](src: string):
       values.add(elem)
   (values, errors)
 
-proc embed*[T](src: static[string]): T =
+proc embed*[T](src: static[string]): T {.raises: [].} =
   ## Compile-time decode of a static KDL source string into `T`. Thin
   ## delegating wrapper over `decode[T]` — single canonical compile-
   ## time decode path. `const cfg = embed[Service](kdlSrc)` materializes

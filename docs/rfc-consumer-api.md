@@ -210,17 +210,30 @@ func `$`*(err: ParseError): string   ## "config.kdl:14:5: expected int (daemon.s
 - **`Span` stays offset-only** (its 8-byte design is correct); line/col live on the
   *error*, not the span.
 
-### 4.5 `{.raises: [].}` (gap H) — added at D0, enforced throughout
+### 4.5 `{.raises: [].}` (gap H) — decode surface at D0, encode at H1
 
-`{.push raises:[].}` goes into `api.nim` at **slice D0**, before any other work. This
-makes it a compile-time invariant from the start: every proc added in S1–D1 is
-immediately checked; raisers are caught inline rather than in a batch cleanup. The
-earlier "LAST" framing was wrong — `{.raises:[].}` is a correctness property, not
-a finish coat.
+`{.raises:[].}` is a correctness property, not a finish coat, so it is asserted as
+early as it is **provable** — but Nim's `raises` check is **transitive**, so the
+invariant can only be asserted over code whose whole transitive callee set is already
+clean. That splits the public surface:
 
-H1 as a slice is repurposed to the compile-triage of the underlying `lexer`/`emitter`/
-`node_build` modules that feed into the public surface (convert genuine raisers to
-`tkError`/Result; Nim OOM Defects are untracked and fine; budget 30–60 min).
+- **Decode surface — at D0 (`{.raises:[].}` now).** `decode`/`decodeAll`/`decodeFile`/
+  `embed` (and the later `decodeNode`/`decodeChild`/`coerce`) sit on the lexer + cursor
+  + `kdlDecode` path, which is **already `raises:[]`-clean** (verified). These get
+  `{.raises:[].}` from D0 onward so every decode-side slice (S1, B1, C1, N2, N3, V1, …)
+  is compile-checked inline. This is the entire node-decode + error-quality surface the
+  RFC is about — exactly where the invariant earns its keep.
+- **`encode[T]` — at H1.** `encode[T]` → `kdlEncode` (derive-generated, no pragmas) →
+  the emitter `pushArg*` family transitively infers `raises:[Exception]`. It is left
+  **honestly unconstrained** (inferred raises, **no `CatchableError`/`Exception` escape
+  hatch**) until H1 triages the emit chain, then folded under `{.raises:[].}`. (The
+  round-2 "whole-module `{.push raises:[].}` at D0" framing assumed non-transitively;
+  corrected here after D0 surfaced the emitter blocker.)
+
+H1 as a slice does the compile-triage of the underlying `emitter`/`derive_encode`/
+`node_build` modules feeding the encode surface (convert genuine raisers to
+`tkError`/Result; Nim OOM Defects are untracked and fine; budget 30–60 min), then
+brings `encode[T]`/`encode(node)` under `{.raises:[].}`.
 `decodeFile` is the one effectful entry — it catches `IOError` and converts to
 `peIOError` at the boundary, keeping the whole public surface `{.raises:[].}`.
 
@@ -271,7 +284,7 @@ fallback where no source exists.
 
 | Slice | Title | Risk |
 |---|---|---|
-| D0 | Fix stale docs; `{.push raises:[].}` on api.nim (invariant from start) | low |
+| D0 | Fix stale docs; `{.raises:[].}` on the **decode surface** (encode deferred to H1 — transitive emitter raisers) | low |
 | S1 | Add `span: Span` to `KdlNode`; record in `node_build` with annotated-node start-offset | **high** |
 | N1 | `encode(node: KdlNode): string` + `func` the emit chain; `encode[T]`→bare string | low |
 | B1 | Rich `ParseError` (add `line*,col*,sourcePath*`); `initError` unchanged; `enriched` + `rebased` funcs; `$err` | **high** |
@@ -282,7 +295,7 @@ fallback where no source exists.
 | V1 | `coerce[T](KdlValue)` | low |
 | C2 | `decodeFile[T]` | low |
 | D1 | `embedFile[T]` macro; `embed[T]` `{.error.}` on failure | med |
-| H1 | `{.raises:[].}` compile-triage on lexer/emitter/node_build | med |
+| H1 | raises-triage of emitter/derive_encode chain; bring `encode[T]`/`encode(node)` under `{.raises:[].}` | med |
 | Doc | README + derive-reference: bridge API + heterogeneous-dispatch example | low |
 
 Order: **D0** → **S1** → N1 → **B1** → **C1** → **N2** → N2f → N3 → V1 → C2 → D1 → H1 → Doc.
@@ -339,8 +352,13 @@ Order: **D0** → **S1** → N1 → **B1** → **C1** → **N2** → N2f → N3 
    content. New `embedFile[T](path)` macro expands to `embed[T](staticRead(path), path)`.
    Two distinct names; no ambiguity. `embed` failure → `{.error: formatError(...).}`.
 
-5. **`{.raises:[].}` at D0 (resolved, gap H).** `{.push raises:[].}` in `api.nim` from
-   D0 onward. H1 slice handles the underlying module triage.
+5. **`{.raises:[].}` split D0/H1 (resolved at implementation, gap H).** `raises` is
+   transitive in Nim, so the invariant is asserted only where provable: the **decode
+   surface** gets `{.raises:[].}` at D0 (its callee set is already clean); `encode[T]`
+   stays honestly unconstrained (no escape hatch) until **H1** triages the emitter
+   chain and folds it under. The round-2 "whole-module push at D0" was non-transitive
+   wishful thinking — corrected after D0 hit the `encode[T] → kdlEncode → pushArg*`
+   blocker. User-confirmed sequencing.
 
 6. **`peIOError` in `ParseErrorCode` (resolved).** Single `Result[T, ParseError]`
    currency; `err.code == peIOError` distinguishes I/O from parse errors. Appended as
