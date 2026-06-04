@@ -1,7 +1,9 @@
 # RFC: Cat-2 derive-vocabulary completion
 
-**Status:** READY FOR `/tdd` (2026-06-03) — architect rounds 1 + 2 applied; all
-forks resolved (S0.5 `kdlScalar` hook = corrected KdlValue interchange, §8). Seeded
+**Status:** **IMPLEMENTED (2026-06-03)** — all 17 slices (S0a–S10 + S-doc) landed
+on `core-rebuild`, full + gated property suites green. Architect rounds 1 + 2
+applied; all forks resolved (S0.5 `kdlScalar` hook = corrected KdlValue
+interchange, §8). Pragma reference: `docs/derive-reference.md`. Seeded
 from the gap audit after the core-rebuild RFC landed: `docs/rfc-core-rebuild.md`
 §8.3/§8.5/§8.7 specify a derive vocabulary only partially built. The core rebuild +
 §8.7 dispatch hardening are done + green on `core-rebuild`; this RFC finishes the
