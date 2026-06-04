@@ -152,6 +152,21 @@ template kdlFlatten*() {.pragma.}
   ## (self-flatten) is rejected; `{.kdlFlatten.}` on a `case`/variant-bearing
   ## type is rejected (discriminator ordering is out of scope); nesting deeper
   ## than 8 levels is rejected.
+  ##
+  ## **Encode (S8b):** symmetric — the flattened object's sub-fields are emitted
+  ## INLINE on the parent node (no child node), in declaration order, using the
+  ## same compound access (`v.meta.author`). A flattened sub-field's wire key
+  ## uses the FLATTENED type's OWN `{.kdlRenameAll.}` convention (not the
+  ## parent's), so encode and decode agree (§3.5.3). When a parent has both a
+  ## `{.kdlVariadic.}` and a `{.kdlFlatten.}` field, parent + flattened fields
+  ## emit in declaration order first, then the variadic tail is appended last.
+  ##
+  ## **Limitation:** `{.kdlFlatten.}` on an `Option[F]` is rejected at compile
+  ## time (both directions). A spliced sub-field is written through a compound
+  ## path; an `Option` has no in-place accessor, so optional-whole-object flatten
+  ## would need a temp-object reassembly mechanism out of scope here. Use a
+  ## non-Option flattened object, or `{.kdlChild.}: Option[F]` for an optional
+  ## nested NODE.
 
 template kdlRename*(name: string) {.pragma.}
   ## Field-level: KDL name differs from Nim field name.

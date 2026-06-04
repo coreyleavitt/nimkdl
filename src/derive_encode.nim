@@ -85,22 +85,26 @@ proc emitArgPushDirect(pushBody: var NimNode, eSym, valueExpr: NimNode,
             " not yet supported (cycles C2/C8 cover string/int/float/" &
             "bool/enum)")
 
-proc emitArgPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
+proc emitArgPush(pushBody: var NimNode, baseExpr: NimNode, eSym: NimNode,
                  fieldName: string, fieldType: NimNode, annoLit: NimNode,
                  scalar: bool = false) =
   ## Append a `pushArg*` call appropriate to the field's static type.
   ## For Option[T], wrap in `if v.field.isSome:` and push the inner
   ## value; None means the field is absent and emits nothing.
+  ##
+  ## `baseExpr` is the LHS the field hangs off — `v` at the top level, a
+  ## compound `v.flat` when emitting a {.kdlFlatten.} sub-field (S8b). The
+  ## value access is `baseExpr.fieldIdent`.
   let fieldIdent = ident(fieldName)
   if isOptionType(fieldType):
     let inner = innerOfOption(fieldType)
     var inner_body = newStmtList()
-    let getExpr = quote do: get(`vSym`.`fieldIdent`)
+    let getExpr = quote do: get(`baseExpr`.`fieldIdent`)
     emitArgPushDirect(inner_body, eSym, getExpr, inner, annoLit, scalar)
-    let cond = quote do: isSome(`vSym`.`fieldIdent`)
+    let cond = quote do: isSome(`baseExpr`.`fieldIdent`)
     pushBody.add newIfStmt((cond, inner_body))
   else:
-    let fullExpr = quote do: `vSym`.`fieldIdent`
+    let fullExpr = quote do: `baseExpr`.`fieldIdent`
     emitArgPushDirect(pushBody, eSym, fullExpr, fieldType, annoLit, scalar)
 
 proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
@@ -134,24 +138,27 @@ proc emitPropPushDirect(pushBody: var NimNode, eSym, keyLit, valueExpr,
             " not yet supported (cycles C3/C8 cover string/int/float/" &
             "bool/enum)")
 
-proc emitPropPush(pushBody: var NimNode, vSym: NimNode, eSym: NimNode,
+proc emitPropPush(pushBody: var NimNode, baseExpr: NimNode, eSym: NimNode,
                   fieldName: string, wireKey: string,
                   fieldType: NimNode, annoLit: NimNode, scalar: bool = false) =
   ## Append a `pushProp*` call appropriate to the field's static type.
   ## `wireKey` is the bytes used on the wire — `fieldName` by default,
   ## or the kdlRename pragma value when present. Key bytes inline at
   ## macro time. Option[T] wraps in `if isSome:`.
+  ##
+  ## `baseExpr` is the LHS the field hangs off (`v`, or a compound `v.flat`
+  ## for a {.kdlFlatten.} sub-field — S8b). Value access = `baseExpr.fieldIdent`.
   let fieldIdent = ident(fieldName)
   let keyLit = newStrLitNode(wireKey)
   if isOptionType(fieldType):
     let inner = innerOfOption(fieldType)
     var inner_body = newStmtList()
-    let getExpr = quote do: get(`vSym`.`fieldIdent`)
+    let getExpr = quote do: get(`baseExpr`.`fieldIdent`)
     emitPropPushDirect(inner_body, eSym, keyLit, getExpr, inner, annoLit, scalar)
-    let cond = quote do: isSome(`vSym`.`fieldIdent`)
+    let cond = quote do: isSome(`baseExpr`.`fieldIdent`)
     pushBody.add newIfStmt((cond, inner_body))
   else:
-    let fullExpr = quote do: `vSym`.`fieldIdent`
+    let fullExpr = quote do: `baseExpr`.`fieldIdent`
     emitPropPushDirect(pushBody, eSym, keyLit, fullExpr, fieldType, annoLit,
                        scalar)
 
@@ -178,7 +185,11 @@ macro deriveEncode*(T: typedesc): untyped =
   # `{}` appears in the output. Single nested types always count as
   # present.
   type ChildKind = enum ckSingle, ckSeq, ckOption
-  var childFields: seq[tuple[name: string, typ: NimNode, kind: ChildKind]]
+  # `base` is the LHS the child field hangs off — `v` at top level, a compound
+  # `v.flat` when the child is a {.kdlFlatten.} sub-field (S8b). Value access is
+  # `base.<name>`.
+  var childFields: seq[tuple[name: string, typ: NimNode, kind: ChildKind,
+                            base: NimNode]]
   # The single {.kdlVariadic.} field (rfc S1). Required invariant: the fixed
   # {.kdlArg.} fields emit FIRST (in declaration order), then the variadic
   # elements. We enforce the variadic field is declared after every fixed
@@ -187,10 +198,58 @@ macro deriveEncode*(T: typedesc): untyped =
   var hasVariadic = false
   var variadicName: string
   var variadicElemType: NimNode = nil
+  var variadicBase: NimNode = nil
   var sawArgAfterVariadic = false
   var variadicSeen = false
   proc dispatchField(fieldName: string, fieldType: NimNode,
-                     pragmas: seq[NimNode], targetBody: var NimNode) =
+                     pragmas: seq[NimNode], targetBody: var NimNode,
+                     baseExpr: NimNode = vSym,
+                     convention: string = typeConvention,
+                     flattenDepth: int = 0) =
+    # `baseExpr` is the LHS this field hangs off — `v` at top level, a compound
+    # `v.flat` when emitting a {.kdlFlatten.} sub-field (S8b). `convention` is
+    # the naming convention for THIS field's wire key: the enclosing type's
+    # {.kdlRenameAll.} at top level, the FLATTENED type's own convention inside
+    # a flatten recursion (§3.5.3 — must match decode or round-trips break).
+    let pathExpr = newDotExpr(baseExpr, ident(fieldName))
+    # S8b: {.kdlFlatten.} splices a nested object's args/props/children inline
+    # onto the PARENT — no child node. Mirror of decode's S8a recursion: emit
+    # each sub-field with `baseExpr` = this field's compound path and the
+    # flattened type's own convention. The decode-side guards (variant / self /
+    # depth>8 / Option / non-object) fire when both derives are emitted via the
+    # kdl: block; deriveEncode-alone replicates them so a misuse fails the same.
+    if hasPragma(pragmas, "kdlFlatten"):
+      if flattenDepth + 1 > 8:
+        error("{.kdlFlatten.} on '" & fieldName & "': nesting too deep " &
+              "(exceeds 8 levels). Flatten chains this deep almost certainly " &
+              "indicate a cyclic type; restructure the data model.")
+      if isOptionType(fieldType):
+        error("{.kdlFlatten.} on '" & fieldName & "': Option[" &
+              $innerOfOption(fieldType) & "] flatten is not supported. A " &
+              "flattened sub-field cannot be written through an Option (no " &
+              "in-place accessor). Use a non-Option flattened object, or " &
+              "{.kdlChild.}: Option[" & $innerOfOption(fieldType) &
+              "] for an optional nested node.")
+      if not isObjectTypeResolved(fieldType):
+        error("{.kdlFlatten.} on '" & fieldName & "': type '" & $fieldType &
+              "' is not an object. kdlFlatten splices a nested object's " &
+              "fields into the parent; use {.kdlArg.}/{.kdlProp.}/{.kdlChild.} " &
+              "for a non-object field.")
+      if fieldType.eqIdent($typeSym) or $fieldType == $typeSym:
+        error("{.kdlFlatten.} on '" & fieldName & "': the field's type '" &
+              $fieldType & "' is the enclosing type itself (self-flatten), " &
+              "which cannot terminate. Flatten a distinct nested object.")
+      let flatRecList = objectRecList(fieldType)
+      if findRecCase(flatRecList) != nil:
+        error("{.kdlFlatten.} cannot apply to a variant field; '" &
+              $fieldType & "' has a case discriminator.")
+      # §3.5.3: sub-field wire keys use the FLATTENED type's own convention.
+      let flatConvention = typeConventionOf(fieldType)
+      for (sfName, sfType, sfPragmas, _) in regularFields(flatRecList):
+        dispatchField(sfName, sfType, sfPragmas, targetBody,
+                      baseExpr = pathExpr, convention = flatConvention,
+                      flattenDepth = flattenDepth + 1)
+      return
     # Annotation: emit `(tag)` before the value when `{.kdlReserved: ...}`.
     # Tag bytes inlined at macro time — no runtime pragma lookup.
     let annoArg = pragmaArg(pragmas, "kdlReserved")
@@ -199,9 +258,10 @@ macro deriveEncode*(T: typedesc): untyped =
         newStrLitNode(annoArg.strVal)
       else:
         newStrLitNode("")
-    # Wire key (for kdlProp): kdlRename wins, else the type-level
-    # convention is applied to the field name (S2b, §3.5.3).
-    let wireKey = wireKeyOf(fieldName, pragmas, typeConvention)
+    # Wire key (for kdlProp): kdlRename wins, else the in-effect convention is
+    # applied to the field name (S2b/§3.5.3; flatten passes the flattened
+    # type's convention).
+    let wireKey = wireKeyOf(fieldName, pragmas, convention)
     let scalar = hasPragma(pragmas, "kdlScalar")
     let isSeqField =
       fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")
@@ -239,27 +299,30 @@ macro deriveEncode*(T: typedesc): untyped =
       variadicSeen = true
       variadicName = fieldName
       variadicElemType = elemT
+      variadicBase = baseExpr
       return
     if hasPragma(pragmas, "kdlArg") and isSeqField:
       error("{.kdlArg.} on a seq field '" & fieldName &
             "' consumes only one argument. Did you mean {.kdlVariadic.}?")
     if hasPragma(pragmas, "kdlArg"):
       if variadicSeen: sawArgAfterVariadic = true
-      emitArgPush(targetBody, vSym, eSym, fieldName, fieldType, annoLit, scalar)
+      emitArgPush(targetBody, baseExpr, eSym, fieldName, fieldType, annoLit, scalar)
     elif hasPragma(pragmas, "kdlProp") or
          (scalar and not hasPragma(pragmas, "kdlChild")):
       # bare kdlScalar defaults to a prop (key = field name), symmetric
       # with the decode classifier.
-      emitPropPush(targetBody, vSym, eSym, fieldName, wireKey, fieldType,
+      emitPropPush(targetBody, baseExpr, eSym, fieldName, wireKey, fieldType,
                    annoLit, scalar)
     elif hasPragma(pragmas, "kdlChild"):
       if fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq"):
-        childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq))
+        childFields.add((name: fieldName, typ: fieldType[1], kind: ckSeq,
+                         base: baseExpr))
       elif isOptionType(fieldType):
         childFields.add((name: fieldName, typ: innerOfOption(fieldType),
-                         kind: ckOption))
+                         kind: ckOption, base: baseExpr))
       else:
-        childFields.add((name: fieldName, typ: fieldType, kind: ckSingle))
+        childFields.add((name: fieldName, typ: fieldType, kind: ckSingle,
+                         base: baseExpr))
     else:
       # No routing pragma — infer the slot from the field type (rfc §8.2 /
       # S0c), MIRRORING decode's classify exactly. Previously this fell
@@ -268,7 +331,8 @@ macro deriveEncode*(T: typedesc): untyped =
       if isOptionType(ft): ft = innerOfOption(ft)   # Option[X] inherits X's routing
       if ft.kind == nnkBracketExpr and ft[0].eqIdent("seq"):
         if isObjectTypeResolved(ft[1]):
-          childFields.add((name: fieldName, typ: ft[1], kind: ckSeq))
+          childFields.add((name: fieldName, typ: ft[1], kind: ckSeq,
+                           base: baseExpr))
         else:
           error("deriveEncode: cannot infer a KDL slot for seq field '" &
                 fieldName & "' of primitive elements — annotate it with " &
@@ -277,10 +341,10 @@ macro deriveEncode*(T: typedesc): untyped =
         # Option[object] infers to an optional child (absent → nothing);
         # plain object infers to a single child.
         let kind = if isOptionType(fieldType): ckOption else: ckSingle
-        childFields.add((name: fieldName, typ: ft, kind: kind))
+        childFields.add((name: fieldName, typ: ft, kind: kind, base: baseExpr))
       else:
         # primitive / enum (incl. Option[primitive]) → prop; key = field name.
-        emitPropPush(targetBody, vSym, eSym, fieldName, wireKey, fieldType,
+        emitPropPush(targetBody, baseExpr, eSym, fieldName, wireKey, fieldType,
                      annoLit, scalar)
   let topRecList = objectRecList(typeSym)
   # Plain non-variant fields first (in declaration order).
@@ -298,12 +362,13 @@ macro deriveEncode*(T: typedesc): untyped =
   # order); now append each variadic element as a positional push.
   if hasVariadic:
     let varIdent = ident(variadicName)
+    let varBase = variadicBase   # `v`, or a compound base if the variadic is a flatten sub-field
     let elemSym = genSym(nskForVar, "varg")
     var elemPush = newStmtList()
     emitArgPushDirect(elemPush, eSym, elemSym, variadicElemType,
                       newStrLitNode(""))
     body.add quote do:
-      for `elemSym` in `vSym`.`varIdent`:
+      for `elemSym` in `varBase`.`varIdent`:
         `elemPush`
   # Variant discriminator + per-branch dispatch.
   let recCase = findRecCase(topRecList)
@@ -346,39 +411,39 @@ macro deriveEncode*(T: typedesc): untyped =
   if childFields.len > 0:
     # Build the runtime "any present" predicate.
     var anyPresent: NimNode = nil
-    for (childName, _, childKind) in childFields:
-      let childIdent = ident(childName)
+    for (childName, _, childKind, childBase) in childFields:
+      let childAccess = newDotExpr(childBase, ident(childName))
       var term: NimNode
       case childKind
       of ckSingle:
         term = newLit(true)
       of ckSeq:
         term = quote do:
-          `vSym`.`childIdent`.len > 0
+          `childAccess`.len > 0
       of ckOption:
         term = quote do:
-          isSome(`vSym`.`childIdent`)
+          isSome(`childAccess`)
       if anyPresent.isNil: anyPresent = term
       else:                anyPresent = infix(anyPresent, "or", term)
     # Build the children-emit body.
     var childBody = newStmtList()
     childBody.add quote do:
       `eSym`.pushChildrenBegin()
-    for (childName, _, childKind) in childFields:
-      let childIdent = ident(childName)
+    for (childName, _, childKind, childBase) in childFields:
+      let childAccess = newDotExpr(childBase, ident(childName))
       case childKind
       of ckSingle:
         childBody.add quote do:
-          kdlEncode(`vSym`.`childIdent`, `eSym`)
+          kdlEncode(`childAccess`, `eSym`)
       of ckSeq:
         let elemSym = genSym(nskForVar, "child")
         childBody.add quote do:
-          for `elemSym` in `vSym`.`childIdent`:
+          for `elemSym` in `childAccess`:
             kdlEncode(`elemSym`, `eSym`)
       of ckOption:
         childBody.add quote do:
-          if isSome(`vSym`.`childIdent`):
-            kdlEncode(get(`vSym`.`childIdent`), `eSym`)
+          if isSome(`childAccess`):
+            kdlEncode(get(`childAccess`), `eSym`)
     childBody.add quote do:
       `eSym`.pushChildrenEnd()
     body.add newIfStmt((anyPresent, childBody))

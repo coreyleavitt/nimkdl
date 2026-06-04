@@ -1348,6 +1348,30 @@ suite "derive_decode — S8a: kdlFlatten decode":
     check v.inner.i == 7
     check v.inner.deep.d == "deepval"
 
+  # §3.5.3 regression (S8b fix): a flattened sub-field's wire key uses the
+  # FLATTENED type's own {.kdlRenameAll.} convention, NOT the parent's. Before
+  # the S8b fix, classify reused the enclosing type's convention for spliced
+  # sub-fields, so a flattened kebab-cased type's keys were read verbatim and
+  # the decode missed them. Here CMeta is kebab; the parent CDoc is verbatim.
+  type CMeta {.kdlRenameAll: kcKebabCase.} = object
+    authorName {.kdlProp.}: string
+    schemaVersion {.kdlProp.}: int
+
+  type CDoc {.kdlNode: "cdoc".} = object
+    title {.kdlArg.}: string
+    meta {.kdlFlatten.}: CMeta
+
+  deriveDecode(CDoc)
+
+  test "flattened sub-field keys use the flattened type's own convention":
+    let f = mkCursor("cdoc \"t\" author-name=\"me\" schema-version=2")
+    var v: CDoc
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.title == "t"
+    check v.meta.authorName == "me"
+    check v.meta.schemaVersion == 2
+
 suite "derive_decode — S8a: kdlFlatten macro-error guards":
 
   test "a valid flattened type compiles (sanity)":

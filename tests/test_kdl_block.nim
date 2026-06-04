@@ -245,3 +245,212 @@ suite "kdl: block — kdlAlias decode-only alternate keys (S6)":
     # Round-trips through the canonical key.
     let v2 = decodeOne[Themed](bytes)
     check v2.color == "green"
+
+# ===========================================================================
+# S8b — kdlFlatten ENCODE + cross-pragma interaction matrix
+# ===========================================================================
+
+suite "kdl: block — S8b: kdlFlatten encode (core)":
+
+  kdl:
+    type Meta {.kdlNode: "meta".} = object
+      author {.kdlProp.}: string
+      version {.kdlProp.}: int
+
+    type Doc {.kdlNode: "doc".} = object
+      title {.kdlArg.}: string
+      meta {.kdlFlatten.}: Meta
+
+  test "flattened sub-fields encode inline on the parent (no child node)":
+    let v = Doc(title: "t", meta: Meta(author: "me", version: 2))
+    let bytes = encodeOne(v)
+    check bytes == "doc \"t\" author=\"me\" version=2\n"
+
+  test "flatten encode round-trips through decode":
+    let v0 = Doc(title: "t", meta: Meta(author: "me", version: 2))
+    let v1 = decodeOne[Doc](encodeOne(v0))
+    check v1.title == "t"
+    check v1.meta.author == "me"
+    check v1.meta.version == 2
+
+  # Flattened positional args must stay contiguous with the parent's fixed
+  # args, in declaration order, on BOTH sides.
+  kdl:
+    type Coords {.kdlNode: "coords".} = object
+      x {.kdlArg.}: int
+      y {.kdlArg.}: int
+
+    type Placed {.kdlNode: "placed".} = object
+      label {.kdlArg.}: string
+      at {.kdlFlatten.}: Coords
+      tail {.kdlArg.}: int
+
+  test "flattened args encode contiguously and round-trip by index":
+    let v0 = Placed(label: "p", at: Coords(x: 10, y: 20), tail: 99)
+    let bytes = encodeOne(v0)
+    check bytes == "placed \"p\" 10 20 99\n"
+    let v1 = decodeOne[Placed](bytes)
+    check v1.label == "p"
+    check v1.at.x == 10
+    check v1.at.y == 20
+    check v1.tail == 99
+
+  # Nested flatten (flatten of a flattening object) on the encode side.
+  kdl:
+    type Deep {.kdlNode: "deep".} = object
+      d {.kdlProp.}: string
+
+    type Inner {.kdlNode: "inner".} = object
+      i {.kdlProp.}: int
+      deep {.kdlFlatten.}: Deep
+
+    type Outer {.kdlNode: "outer".} = object
+      name {.kdlArg.}: string
+      inner {.kdlFlatten.}: Inner
+
+  test "nested flatten encodes flush onto the root and round-trips":
+    let v0 = Outer(name: "o", inner: Inner(i: 7, deep: Deep(d: "deepval")))
+    let bytes = encodeOne(v0)
+    check bytes == "outer \"o\" i=7 d=\"deepval\"\n"
+    let v1 = decodeOne[Outer](bytes)
+    check v1.name == "o"
+    check v1.inner.i == 7
+    check v1.inner.deep.d == "deepval"
+
+suite "kdl: block — S8b matrix: kdlRenameAll × flatten":
+
+  # The flattened type carries its OWN {.kdlRenameAll.}; its sub-field wire
+  # keys use F's convention (kebab), NOT the parent's (verbatim). Both encode
+  # and decode must agree on F's convention or the round-trip breaks (§3.5.3).
+  kdl:
+    type FMeta {.kdlNode: "fmeta", kdlRenameAll: kcKebabCase.} = object
+      authorName {.kdlProp.}: string
+      schemaVersion {.kdlProp.}: int
+
+    type FDoc {.kdlNode: "fdoc".} = object
+      title {.kdlArg.}: string
+      meta {.kdlFlatten.}: FMeta
+
+  test "flattened sub-fields use the flattened type's own convention":
+    let v0 = FDoc(title: "t", meta: FMeta(authorName: "me", schemaVersion: 2))
+    let bytes = encodeOne(v0)
+    check bytes == "fdoc \"t\" author-name=\"me\" schema-version=2\n"
+    let v1 = decodeOne[FDoc](bytes)
+    check v1.title == "t"
+    check v1.meta.authorName == "me"
+    check v1.meta.schemaVersion == 2
+
+suite "kdl: block — S8b matrix: kdlAlias × kdlRenameAll":
+
+  # On a renameAll type, the canonical key is convention-transformed but the
+  # alias stays the exact literal. Decode accepts both; encode emits canonical.
+  kdl:
+    type Aliased {.kdlNode: "aliased", kdlRenameAll: kcKebabCase.} = object
+      colorValue {.kdlProp, kdlAlias: "colour".}: string
+
+  test "canonical key is kebab-transformed; alias is verbatim":
+    # decode via canonical (kebab) key
+    let a = decodeOne[Aliased]("aliased color-value=\"red\"")
+    check a.colorValue == "red"
+    # decode via the exact-literal alias (NOT convention-transformed)
+    let b = decodeOne[Aliased]("aliased colour=\"red\"")
+    check b.colorValue == "red"
+    # encode emits ONLY the canonical kebab key
+    let v = Aliased(colorValue: "green")
+    check encodeOne(v) == "aliased color-value=\"green\"\n"
+
+suite "kdl: block — S8b matrix: kdlSkipDecode × flatten":
+
+  # A flattened sub-field marked {.kdlSkipDecode.} is omitted from decode and
+  # keeps its default; encode still emits it (skipDecode is decode-only).
+  kdl:
+    type SkMeta {.kdlNode: "skmeta".} = object
+      author {.kdlProp.}: string
+      cached {.kdlProp, kdlSkipDecode.}: int = 7
+
+    type SkDoc {.kdlNode: "skdoc".} = object
+      title {.kdlArg.}: string
+      meta {.kdlFlatten.}: SkMeta
+
+  test "skipDecode flattened sub-field is ignored on decode, keeps default":
+    # wire carries cached=99 but it is consumed-and-ignored; field keeps 7.
+    let v = decodeOne[SkDoc]("skdoc \"t\" author=\"me\" cached=99")
+    check v.title == "t"
+    check v.meta.author == "me"
+    check v.meta.cached == 7
+
+suite "kdl: block — S8b matrix: kdlVariadic + flatten on one parent":
+
+  # A parent with BOTH a kdlVariadic field and a kdlFlatten field. DOCUMENTED
+  # arg ordering: parent + flattened fields emit in DECLARATION order (args and
+  # props inline as they appear), THEN the variadic tail is appended last. Here
+  # the flattened object declares arg `a` then prop `label`, so the wire is
+  # `1 label="x"` followed by the variadic tail `2 3 4`. Positionally this is
+  # arg0 = a, args1..3 = variadic (props occupy no positional slot), so it
+  # round-trips even though the prop sits textually between the args.
+  kdl:
+    type VFlat {.kdlNode: "vflat".} = object
+      a {.kdlArg.}: int
+      label {.kdlProp.}: string
+
+    type VParent {.kdlNode: "vparent".} = object
+      flat {.kdlFlatten.}: VFlat
+      rest {.kdlVariadic.}: seq[int]
+
+  test "variadic + flatten: flattened fields in decl order, variadic tail last":
+    let v0 = VParent(flat: VFlat(a: 1, label: "x"), rest: @[2, 3, 4])
+    let bytes = encodeOne(v0)
+    check bytes == "vparent 1 label=\"x\" 2 3 4\n"
+    let v1 = decodeOne[VParent](bytes)
+    check v1.flat.a == 1
+    check v1.flat.label == "x"
+    check v1.rest == @[2, 3, 4]
+
+suite "kdl: block — S8b matrix: kdlIgnoreUnknown × flatten":
+
+  # Flattened keys live in the parent namespace; with the parent marked
+  # {.kdlIgnoreUnknown.}, an unknown prop in that namespace is ignored even
+  # alongside flattened sub-fields.
+  kdl:
+    type IMeta {.kdlNode: "imeta".} = object
+      author {.kdlProp.}: string
+
+    type IDoc {.kdlNode: "idoc", kdlIgnoreUnknown.} = object
+      title {.kdlArg.}: string
+      meta {.kdlFlatten.}: IMeta
+
+  test "unknown prop in parent namespace is ignored with flatten present":
+    let v = decodeOne[IDoc]("idoc \"t\" author=\"me\" mystery=\"x\"")
+    check v.title == "t"
+    check v.meta.author == "me"
+
+suite "kdl: block — S8b matrix: Option[FlatObj] flatten (documented limitation)":
+
+  # DOCUMENTED LIMITATION (rfc §4-S8a escape): {.kdlFlatten.} on an Option[F]
+  # is rejected at macro time. The splice model writes sub-fields directly
+  # through a compound pathExpr (`v.meta.author`); an Option has no
+  # var-returning accessor, so in-place writes are impossible without a
+  # temp-object reassembly mechanism disproportionate to this slice. Both
+  # derive directions reject it with a clear message.
+
+  type OMeta {.kdlNode: "ometa".} = object
+    author {.kdlProp.}: string
+    version {.kdlProp.}: int
+
+  test "Option[FlatObj] flatten is a compile error (decode)":
+    check not compiles((
+      block:
+        type OptDoc {.kdlNode: "optdoc".} = object
+          title {.kdlArg.}: string
+          meta {.kdlFlatten.}: Option[OMeta]
+        deriveDecode(OptDoc)
+    ))
+
+  test "Option[FlatObj] flatten is a compile error (encode)":
+    check not compiles((
+      block:
+        type OptDoc2 {.kdlNode: "optdoc".} = object
+          title {.kdlArg.}: string
+          meta {.kdlFlatten.}: Option[OMeta]
+        deriveEncode(OptDoc2)
+    ))

@@ -327,7 +327,14 @@ macro deriveDecode*(T: typedesc): untyped =
                 fieldDefault: NimNode = nil;
                 isBranchField: bool = false;
                 baseExpr: NimNode = nil;
-                flattenDepth: int = 0) =
+                flattenDepth: int = 0;
+                convention: string = typeConvention) =
+    # `convention` is the naming convention in effect for THIS field's wire
+    # key. At the top level it is the enclosing type's `{.kdlRenameAll.}`. When
+    # recursing into a {.kdlFlatten.} field of type F, the sub-fields use F's
+    # OWN convention (`typeConventionOf(F)`), NOT the parent's — a flattened
+    # sub-field's wire key is determined by the type it actually lives on
+    # (§3.5.3). Encode does the same, or round-trips break.
     # S5: the field's native default (`field = expr`), `nnkEmpty`/nil when
     # none. The macro splices it post-decode for top-level fields absent
     # from the wire.
@@ -367,6 +374,23 @@ macro deriveDecode*(T: typedesc): untyped =
         error("{.kdlFlatten.} on '" & fieldName & "': nesting too deep " &
               "(exceeds 8 levels). Flatten chains this deep almost certainly " &
               "indicate a cyclic type; restructure the data model.")
+      # Documented limitation (rfc §4-S8a escape): {.kdlFlatten.} on an
+      # Option[F] is rejected. The S8a/S8b decode model writes each spliced
+      # sub-field directly through a compound `pathExpr` (`v.meta.author`) and
+      # tracks presence in the shared slot bitmap. An Option[F] has no
+      # var-returning accessor (`get` yields a copy), so sub-fields cannot be
+      # written in place; correct support needs temp-object storage plus a
+      # presence-grouped reassembly (set Some iff any flattened key appeared,
+      # else None) — a distinct mechanism out of proportion to this slice.
+      # Use a plain (non-Option) flattened object, or a {.kdlChild.}
+      # Option[F] when an optional nested NODE is acceptable.
+      if isOptionType(fieldType):
+        error("{.kdlFlatten.} on '" & fieldName & "': Option[" &
+              $innerOfOption(fieldType) & "] flatten is not supported. A " &
+              "flattened sub-field cannot be written through an Option (no " &
+              "in-place accessor). Use a non-Option flattened object, or " &
+              "{.kdlChild.}: Option[" & $innerOfOption(fieldType) &
+              "] for an optional nested node.")
       # Guard: the flattened type must be an object (the whole point is to
       # splice an object's fields). A primitive/seq has nothing to splice.
       if not isObjectTypeResolved(fieldType):
@@ -386,10 +410,13 @@ macro deriveDecode*(T: typedesc): untyped =
       if findRecCase(flatRecList) != nil:
         error("{.kdlFlatten.} cannot apply to a variant field; '" &
               $fieldType & "' has a case discriminator.")
+      # §3.5.3: sub-field wire keys use the FLATTENED type's own convention.
+      let flatConvention = typeConventionOf(fieldType)
       for (sfName, sfType, sfPragmas, sfDefault) in regularFields(flatRecList):
         classify(sfName, sfType, sfPragmas, argSink, propSink, childSink,
                  sfDefault, isBranchField = isBranchField,
-                 baseExpr = pathExpr, flattenDepth = flattenDepth + 1)
+                 baseExpr = pathExpr, flattenDepth = flattenDepth + 1,
+                 convention = flatConvention)
       return
     # The discriminator field is the only one whose assignment must be
     # wrapped in `{.cast(uncheckedAssign).}` (a discriminator write is
@@ -470,7 +497,7 @@ macro deriveDecode*(T: typedesc): untyped =
     elif hasPragma(pragmas, "kdlProp") or (scalar and
          not hasPragma(pragmas, "kdlChild")):
       # S2b: kdlRename wins; else the type-level convention is applied.
-      let wireKey = wireKeyOf(fieldName, pragmas, typeConvention)
+      let wireKey = wireKeyOf(fieldName, pragmas, convention)
       propSink.add((name: fieldName, typ: fieldType, wireKey: wireKey,
                     reservedTag: reservedTag, scalar: scalar,
                     pathExpr: pathExpr,
@@ -526,7 +553,7 @@ macro deriveDecode*(T: typedesc): untyped =
         # primitive / enum (incl. Option[primitive]) → prop; key via
         # wireKeyOf (S2b: type-level convention, or field name verbatim).
         propSink.add((name: fieldName, typ: fieldType,
-                      wireKey: wireKeyOf(fieldName, pragmas, typeConvention),
+                      wireKey: wireKeyOf(fieldName, pragmas, convention),
                       reservedTag: reservedTag, scalar: false,
                       pathExpr: pathExpr,
                       requiresUncheckedAssign: needsUnchecked,

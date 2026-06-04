@@ -843,3 +843,79 @@ suite "derive_encode — S7: kdlSkipEncode + kdlArg is a compile error":
           weight {.kdlSkip, kdlArg.}: int
         deriveEncode(Ok2)
     ))
+
+suite "derive_encode — S8b: kdlFlatten encode (mirror of S8a decode)":
+
+  # Mirror of the S8a deriveDecode flatten tests, on the encode side: the
+  # flattened object's args/props emit INLINE on the parent (no child node).
+  type Meta = object
+    author {.kdlProp.}: string
+    version {.kdlProp.}: int
+
+  type Doc {.kdlNode: "doc".} = object
+    title {.kdlArg.}: string
+    meta {.kdlFlatten.}: Meta
+
+  deriveEncode(Doc)
+  deriveDecode(Doc)
+
+  test "flattened props emit inline on the parent node":
+    var d = Doc(title: "t", meta: Meta(author: "me", version: 2))
+    var e = newBufferEmitter()
+    kdlEncode(d, e)
+    check e.finish() == "doc \"t\" author=\"me\" version=2\n"
+
+  test "flatten encode round-trips":
+    let d0 = Doc(title: "t", meta: Meta(author: "me", version: 2))
+    var e = newBufferEmitter()
+    kdlEncode(d0, e)
+    let bytes = e.finish()
+    var sref: ref TokenStream
+    new(sref)
+    sref[] = lex(bytes)
+    var c = initStringCursor(addr sref[], bytes)
+    var d1: Doc
+    check kdlDecode(d1, c).isOk
+    check d1.title == "t"
+    check d1.meta.author == "me"
+    check d1.meta.version == 2
+
+  # Flattened positional args stay contiguous with the parent's fixed args.
+  type Coords = object
+    x {.kdlArg.}: int
+    y {.kdlArg.}: int
+
+  type Placed {.kdlNode: "placed".} = object
+    label {.kdlArg.}: string
+    at {.kdlFlatten.}: Coords
+    tail {.kdlArg.}: int
+
+  deriveEncode(Placed)
+
+  test "flattened args emit contiguously between the parent's fixed args":
+    var p = Placed(label: "p", at: Coords(x: 10, y: 20), tail: 99)
+    var e = newBufferEmitter()
+    kdlEncode(p, e)
+    check e.finish() == "placed \"p\" 10 20 99\n"
+
+  # A flattened object that itself contains a {.kdlChild.} sub-field: the
+  # child emits in the parent's children block via the threaded compound base.
+  type Item {.kdlNode: "item".} = object
+    label {.kdlArg.}: string
+
+  type Bundle = object
+    note {.kdlProp.}: string
+    item {.kdlChild.}: Item
+
+  type Crate {.kdlNode: "crate".} = object
+    id {.kdlArg.}: string
+    bundle {.kdlFlatten.}: Bundle
+
+  deriveEncode(Item)   # the flattened child's element type needs its own encoder
+  deriveEncode(Crate)
+
+  test "flattened child sub-field emits through the compound base":
+    var cr = Crate(id: "c1", bundle: Bundle(note: "n", item: Item(label: "x")))
+    var e = newBufferEmitter()
+    kdlEncode(cr, e)
+    check e.finish() == "crate \"c1\" note=\"n\" {\n    item \"x\"\n}\n"
