@@ -345,3 +345,19 @@ suite "decodeNode foreign/stale span — out-of-range slice guard (review #1)":
     let v = decodeOr[Daemon](dB, node, fallback)
     check v.name == "web"                  # re-emit decode, not the fallback
     check v.port == 80
+
+suite "decodeNode negative compile-guards (review #8)":
+  ## These pin the `{.error.}` seq-guard (api.nim ~257): `decodeNode[T]`
+  ## rejects `seq[...]` targets at compile time, directing callers to decode
+  ## the element type instead. `not compiles(...)` asserts the guard rejects.
+
+  test "decodeNode[seq[int]] does NOT compile (seq-guard rejects)":
+    let d = parseDoc("daemon \"web\" port=80\n")
+    let n = d.nodes[0]
+    check(not compiles(decodeNode[seq[int]](d, n)))
+
+  test "decodeNode[Daemon] (a single node) DOES compile (guard is targeted)":
+    # Sanity counterpart: the guard must not over-reject the legitimate case.
+    let d = parseDoc("daemon \"web\" port=80\n")
+    let n = d.nodes[0]
+    check(compiles(decodeNode[Daemon](d, n)))

@@ -169,3 +169,27 @@ suite "coerce — kind mismatch is a clear typed error":
     let r = coerce[bool](newKdlNull())
     check r.isErr
     check r.getErr.code == peTypeMismatch
+
+# A plain aggregate object with NO `kdlDecodeValue` hook in scope — module-level
+# so the pre-defined generic `coerce` sees exactly this (hook-less) environment.
+type Plain = object
+  x: int
+
+suite "coerce negative compile-guards (review #8)":
+  ## Pin the aggregate guard (api.nim ~469): instantiating `coerce[T]` with an
+  ## aggregate `T` that has no `kdlDecodeValue` hook is a hard `{.error.}`.
+  ## `not compiles(...)` asserts the guard rejects.
+
+  test "coerce[Plain] (hook-less object) does NOT compile":
+    check(not compiles(coerce[Plain](newKdlInt(1))))
+
+  test "coerce[seq[int]] does NOT compile (aggregate guard rejects)":
+    check(not compiles(coerce[seq[int]](newKdlInt(1))))
+
+  test "coerce[int] (a scalar) DOES compile (guard is targeted)":
+    # Sanity counterpart: the guard must not over-reject legitimate scalars.
+    check(compiles(coerce[int](newKdlInt(1))))
+
+  test "coerce[Color] (object WITH a kdlDecodeValue hook) DOES compile":
+    # The hook is the scalar contract — object targets that carry it are allowed.
+    check(compiles(coerce[Color](newKdlString("#fff"))))
