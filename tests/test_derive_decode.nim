@@ -1100,3 +1100,107 @@ suite "derive_decode — S5: native field defaults":
           port {.kdlProp.}: int = ffiDefault()
         deriveDecode(BadDef)
     ))
+
+suite "derive_decode — S6: kdlAlias decode-only alternate keys":
+
+  type Paint {.kdlNode: "paint".} = object
+    color {.kdlProp, kdlAlias: "colour".}: string
+
+  deriveDecode(Paint)
+
+  test "canonical key decodes":
+    let f = mkCursor("paint color=\"red\"")
+    var v: Paint
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.color == "red"
+
+  test "alias key decodes into the same field":
+    let f = mkCursor("paint colour=\"red\"")
+    var v: Paint
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.color == "red"
+
+  type Versioned {.kdlNode: "versioned".} = object
+    name {.kdlProp, kdlAlias("title", "label").}: string
+
+  deriveDecode(Versioned)
+
+  test "multiple aliases on one field — each decodes":
+    block:
+      let f = mkCursor("versioned name=\"a\"")
+      var v: Versioned
+      check kdlDecode(v, f.cursor).isOk
+      check v.name == "a"
+    block:
+      let f = mkCursor("versioned title=\"b\"")
+      var v: Versioned
+      check kdlDecode(v, f.cursor).isOk
+      check v.name == "b"
+    block:
+      let f = mkCursor("versioned label=\"c\"")
+      var v: Versioned
+      check kdlDecode(v, f.cursor).isOk
+      check v.name == "c"
+
+  # The AC (rfc §4 S6): a >8-field type carrying an alias forces useHash=false
+  # for the WHOLE type (the FNV hash table is alias-blind). This exercises the
+  # if-elif fallback path, NOT the perfect-hash path. Both the canonical and
+  # alias keys must still decode.
+  type Wide {.kdlNode: "wide".} = object
+    f1 {.kdlProp.}: int
+    f2 {.kdlProp.}: int
+    f3 {.kdlProp.}: int
+    f4 {.kdlProp.}: int
+    f5 {.kdlProp.}: int
+    f6 {.kdlProp.}: int
+    f7 {.kdlProp.}: int
+    f8 {.kdlProp.}: int
+    color {.kdlProp, kdlAlias: "colour".}: string
+
+  deriveDecode(Wide)
+
+  test ">8-field type with an alias — canonical key decodes (if-elif fallback)":
+    let f = mkCursor("wide f1=1 f2=2 f3=3 f4=4 f5=5 f6=6 f7=7 f8=8 color=\"red\"")
+    var v: Wide
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.f1 == 1
+    check v.f8 == 8
+    check v.color == "red"
+
+  test ">8-field type with an alias — alias key decodes (if-elif fallback)":
+    let f = mkCursor("wide f1=1 f2=2 f3=3 f4=4 f5=5 f6=6 f7=7 f8=8 colour=\"blue\"")
+    var v: Wide
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.color == "blue"
+
+suite "derive_decode — S6: kdlAlias macro-error guards":
+
+  test "a valid aliased type compiles (sanity)":
+    check compiles((
+      block:
+        type Ok {.kdlNode: "ok".} = object
+          color {.kdlProp, kdlAlias: "colour".}: string
+        deriveDecode(Ok)
+    ))
+
+  test "an alias colliding with another field's canonical key is rejected":
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          color {.kdlProp, kdlAlias: "shade".}: string
+          shade {.kdlProp.}: string
+        deriveDecode(Bad)
+    ))
+
+  test "an alias colliding with another alias is rejected":
+    check not compiles((
+      block:
+        type Bad {.kdlNode: "bad".} = object
+          a {.kdlProp, kdlAlias: "dup".}: string
+          b {.kdlProp, kdlAlias: "dup".}: string
+        deriveDecode(Bad)
+    ))

@@ -275,10 +275,15 @@ macro deriveDecode*(T: typedesc): untyped =
                         scalar: bool, pathExpr: NimNode,
                         requiresUncheckedAssign: bool,
                         default: NimNode, isBranchField: bool]
+  # `aliases` (rfc S6): extra DECODE-ONLY exact wire-key literals. Each gets an
+  # additional `bytesEqLit` arm routing to this same field's decode body; encode
+  # ignores them entirely (canonical `wireKey` only). Aliases are NEVER run
+  # through `kdlRenameAll` — they are verbatim literals (§3.5.3).
   type PropField = tuple[name: string, typ: NimNode, wireKey: string,
                          reservedTag: string, scalar: bool, pathExpr: NimNode,
                          requiresUncheckedAssign: bool,
-                         default: NimNode, isBranchField: bool]
+                         default: NimNode, isBranchField: bool,
+                         aliases: seq[string]]
   type ChildField = tuple[name: string, elemType: NimNode,
                           kind: ChildKind, wireName: string, pathExpr: NimNode,
                           requiresUncheckedAssign: bool,
@@ -349,6 +354,8 @@ macro deriveDecode*(T: typedesc): untyped =
     # selector — it still lands in an arg or prop. With no explicit kdlArg/
     # kdlProp it defaults to a prop (key = field name).
     let scalar = hasPragma(pragmas, "kdlScalar")
+    # S6: decode-only alias keys (exact literals, never convention-transformed).
+    let aliases = pragmaStrArgs(pragmas, "kdlAlias")
     let isSeqField =
       fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")
     # {.kdlVariadic.}: collects all remaining positional args into seq[T].
@@ -392,7 +399,8 @@ macro deriveDecode*(T: typedesc): untyped =
                     reservedTag: reservedTag, scalar: scalar,
                     pathExpr: pathExpr,
                     requiresUncheckedAssign: needsUnchecked,
-                    default: fDefault, isBranchField: isBranchField))
+                    default: fDefault, isBranchField: isBranchField,
+                    aliases: aliases))
     elif hasPragma(pragmas, "kdlChild"):
       var kind: ChildKind
       var elemType: NimNode
@@ -443,7 +451,8 @@ macro deriveDecode*(T: typedesc): untyped =
                       reservedTag: reservedTag, scalar: false,
                       pathExpr: pathExpr,
                       requiresUncheckedAssign: needsUnchecked,
-                      default: fDefault, isBranchField: isBranchField))
+                      default: fDefault, isBranchField: isBranchField,
+                      aliases: aliases))
 
   let recList = objectRecList(typeSym)
   for (fieldName, fieldType, pragmas, fieldDefault) in regularFields(recList):
@@ -486,6 +495,33 @@ macro deriveDecode*(T: typedesc): untyped =
           error("deriveDecode: multi-value `of A, B:` branches not yet " &
                 "supported")
         branchProps.add((branchVal: branch[0], props: props2))
+
+  # S6: validate the canonical∪alias union is globally unique (§3.5.3 ordering:
+  # canonical keys resolved above, now fold the aliases in and check). A
+  # collision — an alias shadowing another field's canonical key, or two fields
+  # claiming the same alias — would make prop dispatch ambiguous, so reject it
+  # at macro time. The check spans the prop set actually visible during a given
+  # decode: the flat propFields for a non-variant type, and (top-level props ∪
+  # one branch's props) for each variant branch.
+  proc checkKeyUnion(props: seq[PropField]) =
+    var seen = initHashSet[string]()
+    for pf in props:
+      if pf.wireKey in seen:
+        error("{.kdlProp.}/{.kdlAlias.} key collision: '" & pf.wireKey &
+              "' is claimed by more than one field on this type. Wire keys " &
+              "(canonical + aliases) must be globally unique.")
+      seen.incl(pf.wireKey)
+      for a in pf.aliases:
+        if a in seen:
+          error("{.kdlAlias.} '" & a & "' on field '" & pf.name &
+                "' collides with another field's wire key or alias. Alias " &
+                "keys must be globally unique across the type.")
+        seen.incl(a)
+  if hasVariant:
+    for (_, props) in branchProps:
+      checkKeyUnion(propFields & props)
+  else:
+    checkKeyUnion(propFields)
 
   # Required-field bitmap. Each non-Option / non-seq kdlArg / kdlProp /
   # kdlChild gets a slot bit; final mask compare emits
@@ -699,6 +735,19 @@ macro deriveDecode*(T: typedesc): untyped =
     # collisions (we don't iterate seeds; fall back to if-elif on
     # collision).
     var useHash = fields.len > 8
+    # S6 (#41): the FNV perfect-hash table maps ONE key → ONE field and is
+    # alias-blind — it has no slot for a field's extra `kdlAlias` keys. The
+    # conservative fix is to disable the hash path for the WHOLE type as soon as
+    # ANY field carries an alias, falling back to the if-elif chain (which emits
+    # an explicit `bytesEqLit` arm per alias). This degrades prop lookup from
+    # O(1) hashed dispatch to O(n) linear `bytesEqLit` scanning on a wide
+    # aliased type. Acceptable for now; the full fix (folding alias keys into
+    # the hash table as additional key→field entries) is tracked as #41.
+    if useHash:
+      for f in fields:
+        if f.aliases.len > 0:
+          useHash = false
+          break
     var hashes: seq[uint32]
     if useHash:
       var seen = initHashSet[uint32]()
@@ -728,12 +777,18 @@ macro deriveDecode*(T: typedesc): untyped =
         caseStmt.add(newTree(nnkOfBranch, hLit, confirmed))
       caseStmt.add(newTree(nnkElse, unknownProp()))
       return caseStmt
-    # Default: if-elif chain.
+    # Default: if-elif chain. Each field emits its canonical-key arm, then one
+    # extra `bytesEqLit` arm per `kdlAlias` (S6) — all routing to the SAME
+    # field decode body. Aliases are exact literals (never convention-renamed).
     var ifNode = newNimNode(nnkIfStmt)
     for i in 0 ..< fields.len:
       let keyLit = newStrLitNode(fields[i].wireKey)
       let cond = quote do: bytesEqLit(`cSym`, `evSym2`.propKeyTok, `keyLit`)
       ifNode.add(newNimNode(nnkElifBranch).add(cond).add(branchBodyFor(i)))
+      for alias in fields[i].aliases:
+        let aliasLit = newStrLitNode(alias)
+        let aCond = quote do: bytesEqLit(`cSym`, `evSym2`.propKeyTok, `aliasLit`)
+        ifNode.add(newNimNode(nnkElifBranch).add(aCond).add(branchBodyFor(i)))
     ifNode.add(newNimNode(nnkElse).add(unknownProp()))
     ifNode
 

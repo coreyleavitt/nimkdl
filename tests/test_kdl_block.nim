@@ -225,3 +225,23 @@ suite "kdl: block — directional derive pragmas (S3)":
   test "kdlEncodeOnly: no kdlDecode is generated":
     # No deriveDecode emitted → no kdlDecode(Outbound) overload exists.
     check not compiles(decodeOne[Outbound]("outbound \"web\" port=80"))
+
+suite "kdl: block — kdlAlias decode-only alternate keys (S6)":
+
+  kdl:
+    type Themed {.kdlNode: "themed".} = object
+      color {.kdlProp, kdlAlias: "colour".}: string
+
+  test "canonical key decodes; alias key decodes; encode uses canonical":
+    # Both wire keys populate the same field on decode.
+    let a = decodeOne[Themed]("themed color=\"red\"")
+    check a.color == "red"
+    let b = decodeOne[Themed]("themed colour=\"red\"")
+    check b.color == "red"
+    # Encode emits ONLY the canonical key (never the alias).
+    let v = Themed(color: "green")
+    let bytes = encodeOne(v)
+    check bytes == "themed color=\"green\"\n"
+    # Round-trips through the canonical key.
+    let v2 = decodeOne[Themed](bytes)
+    check v2.color == "green"

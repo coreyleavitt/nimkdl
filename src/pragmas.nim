@@ -108,6 +108,20 @@ template kdlScalar*() {.pragma.}
 template kdlRename*(name: string) {.pragma.}
   ## Field-level: KDL name differs from Nim field name.
 
+template kdlAlias*(names: varargs[string]) {.pragma.}
+  ## Field-level: DECODE-ONLY alternate wire keys, accepted IN ADDITION to
+  ## the field's canonical key. A single alias uses the colon form
+  ## (`{.kdlProp, kdlAlias: "colour".}`); multiple aliases use the paren form
+  ## (`{.kdlProp, kdlAlias("colour", "old").}`) — Nim's pragma colon syntax
+  ## takes only one expression. Either makes the decoder populate the field
+  ## from `colour=…` (or `old=…`) as well as the
+  ## canonical key. ENCODE is unaffected — it always emits the canonical key
+  ## (`kdlRename`/`kdlRenameAll`/field name). Aliases are EXACT literals: they
+  ## are NEVER transformed by `{.kdlRenameAll.}` (rfc §3.5.3). The union of all
+  ## fields' canonical keys and all alias keys must be globally unique within
+  ## the type — a collision is a compile-time error. Use it for forward/backward
+  ## compatibility when a wire key is renamed but old documents must still parse.
+
 template kdlReserved*(tag: string) {.pragma.}
   ## Field-level: assert the source KDL value carries this reserved-type
   ## annotation (e.g. `{.kdlReserved: "ipv4".}`). At decode time, a

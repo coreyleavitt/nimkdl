@@ -33,6 +33,30 @@ proc pragmaArg*(pragmas: seq[NimNode], name: string): NimNode =
       return p[1]
   nil
 
+proc pragmaStrArgs*(pragmas: seq[NimNode], name: string): seq[string] =
+  ## Collect ALL string-literal arguments of a `varargs[string]` pragma `name`
+  ## (e.g. `{.kdlAlias: "a".}` single, or `{.kdlAlias("a", "b").}` multi), in
+  ## order. Returns an empty seq when the pragma is absent.
+  ##
+  ## After type resolution (`getImpl`) a `varargs[string]` pragma argument is
+  ## wrapped in `HiddenStdConv(Empty, Bracket[StrLit…])` — Nim has already
+  ## materialized the openArray. We descend through the optional `HiddenStdConv`
+  ## and `Bracket` to reach the string literals, so both the colon form
+  ## (`nnkExprColonExpr`) and the paren form (`nnkCall`) yield the same list.
+  proc collect(n: NimNode; acc: var seq[string]) =
+    case n.kind
+    of nnkStrLit: acc.add(n.strVal)
+    of nnkHiddenStdConv, nnkBracket, nnkArgList:
+      for c in n: collect(c, acc)
+    of nnkEmpty: discard
+    else: discard
+  for p in pragmas:
+    if $pragmaHead(p) != name: continue
+    if p.kind in {nnkCall, nnkExprColonExpr}:
+      for i in 1 ..< p.len:
+        collect(p[i], result)
+  result
+
 proc fieldInfo*(identDefs: NimNode, fieldIdx: int):
     tuple[name: string, pragmas: seq[NimNode]] =
   ## Read (name, pragmas) for the `fieldIdx`-th field of an IdentDefs.
