@@ -272,6 +272,89 @@ proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string):
       "no child named '" & childName & "' in node '" & parent.name & "'"))
   decodeNode[T](doc, kid)
 
+proc coerce*[T](val: KdlValue): Result[T, ParseError] {.noSideEffect, raises: [].} =
+  ## Coerce a single `KdlValue` into a scalar `T` — the **value leg** of the
+  ## typed bridge (rfc-consumer-api §4.6, V1): source→T (`decode`), node→T
+  ## (`decodeNode`), value→T (`coerce`). Named `coerce` (not a third `decode`
+  ## overload) to keep a single dispatch axis per entry concept.
+  ##
+  ## `coerce` is for **scalars only**. It reads the already-parsed typed payload
+  ## off the `KdlValue` (no re-parsing of bytes) and maps it to `T`:
+  ##
+  ## - a **custom scalar** with a `kdlDecodeValue(val, T): Result[T, string]` hook
+  ##   in scope (the `{.kdlScalar.}` interchange contract) routes through that
+  ##   hook — its `string` error is lifted into a `peTypeMismatch` `ParseError`;
+  ## - a **built-in scalar** (`string`/`bool`/`int*`/`uint*`/`float*`/`enum`) maps
+  ##   the matching `KdlValue` variant directly; a wrong value kind (a string
+  ##   where an int is expected, etc.) is a clear `peTypeMismatch` error, and an
+  ##   unknown enum wire form is `peTypeEnumInvalid`.
+  ##
+  ## **Scalar-only compile guard (rfc §4.6 / round-2):** instantiating `coerce`
+  ## with an aggregate `T` (object / tuple / seq / array) that has **no**
+  ## `kdlDecodeValue` hook is a hard `{.error.}` directing the caller to
+  ## `decodeNode`/`decode`. Enums, distinct scalars, and custom `kdlScalar`
+  ## object types (which carry a hook) are allowed.
+  mixin kdlDecodeValue
+  when compiles(kdlDecodeValue(val, T)):
+    # Custom scalar — route through the user hook (object targets are fine here:
+    # the hook IS the scalar contract). The hook owns kind-matching; we lift its
+    # error string into a span-bearing ParseError, mirroring emitTypedDecode.
+    let hookRes = kdlDecodeValue(val, T)
+    if hookRes.isErr:
+      return err[T, ParseError](initError(peTypeMismatch, Span(), hookRes.getErr))
+    return ok[T, ParseError](hookRes.get)
+  else:
+    when T is (object | tuple | seq | array | ref | ptr):
+      {.error: "coerce[T] is for scalars only; '" & $T & "' is an aggregate. " &
+               "Use decodeNode[T](doc, node) for a DOM node, or decode[T](src) " &
+               "for source text. (A custom scalar object needs a kdlDecodeValue " &
+               "hook in scope.)".}
+    elif T is enum:
+      # Enum wire form is a string; match against each variant's `$` (honors
+      # `= "literal"` mappings, exactly like the derive enum path).
+      if val.kind != kvString:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected string value for enum"))
+      for e in low(T) .. high(T):
+        if $e == val.strVal:
+          return ok[T, ParseError](e)
+      return err[T, ParseError](initError(peTypeEnumInvalid, Span(),
+        "value does not match any enum variant"))
+    elif T is string:
+      if val.kind != kvString:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected string value"))
+      return ok[T, ParseError](val.strVal)
+    elif T is bool:
+      if val.kind != kvBool:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected bool value"))
+      return ok[T, ParseError](val.boolVal)
+    elif T is SomeFloat:
+      case val.kind
+      of kvFloat: return ok[T, ParseError](T(val.floatVal))
+      of kvInt:   return ok[T, ParseError](T(val.intVal))  # int→float widening
+      else:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected float value"))
+    elif T is SomeSignedInt:
+      if val.kind != kvInt:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected integer value"))
+      return ok[T, ParseError](T(val.intVal))
+    elif T is SomeUnsignedInt:
+      if val.kind != kvInt:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected unsigned integer value"))
+      if val.intVal < 0:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected unsigned (non-negative) integer"))
+      return ok[T, ParseError](T(val.intVal))
+    else:
+      {.error: "coerce[T]: unsupported scalar type '" & $T & "'. Supported: " &
+               "string/bool/int*/uint*/float*/enum, or a custom type with a " &
+               "kdlDecodeValue hook.".}
+
 proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T =
   # NOTE(H1): inherits the `decodeNode(doc, node)` raises deferral (re-emit
   # fallback when node.span.length == 0). No escape hatch; folded under
