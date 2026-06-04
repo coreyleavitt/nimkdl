@@ -256,7 +256,15 @@ proc decodeNode*[T](doc: KdlDoc, node: KdlNode):
   when T is seq:
     {.error: "decodeNode[T] expects a single node; decode the element type.".}
   let span = node.span
-  if span.length == 0:
+  # `span.offset`/`span.length` are int accessors widened from the span's uint32
+  # fields, so the sum stays within int and cannot overflow. Guard the slice:
+  # a hand-built node (`length == 0`) has no source, and a node whose span
+  # overshoots `doc.sourceText` is FOREIGN/STALE — parsed against a different or
+  # since-shortened source. Either way an unguarded slice is an IndexDefect (a
+  # Defect bypassing {.raises:[].}). Re-emit is the correct fallback: the node
+  # carries its real name/entries/children regardless of a bad span, so it
+  # decodes correctly (rfc §9.3 hazards aside) rather than crashing.
+  if span.length == 0 or span.offset + span.length > doc.sourceText.len:
     return reEmitDecodeNode[T](node)
   let slice = doc.sourceText[span.offset ..< span.offset + span.length]
   let r = decodeInternal[T](slice)
@@ -305,9 +313,13 @@ proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string):
   ## error whose `hint` names the missing child and its parent for context.
   let kid = parent.child(childName)
   if kid.isNil:
-    return err[T, ParseError](initError(
+    # Enrich at this public entry point (rfc §4.4): without it the error renders
+    # :0:0: while the type-mismatch leg (via decodeNode) renders true file
+    # line/col. `doc` is in hand, so attribute against it.
+    let e = initError(
       peTypeMissingRequired, parent.span,
-      "no child named '" & childName & "' in node '" & parent.name & "'"))
+      "no child named '" & childName & "' in node '" & parent.name & "'")
+    return err[T, ParseError](e.enriched(doc.sourceText, doc.sourcePath))
   decodeNode[T](doc, kid)
 
 proc coerce*[T](val: KdlValue): Result[T, ParseError] {.noSideEffect, raises: [].} =

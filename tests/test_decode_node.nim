@@ -245,6 +245,11 @@ suite "decodeChild[T](doc, parent, childName) — first-wins child decode (N3)":
     check e.code == peTypeMissingRequired
     check e.hint.contains("permissions")   # the missing child name
     check e.hint.contains("service")        # the parent name for context
+    # FIX #2 (review): the missing-child error must be enriched against the doc
+    # (rfc §4.4), so it renders true file line/col + sourcePath — not :0:0:.
+    check e.line > 0
+    check e.col > 0
+    check e.sourcePath == d.sourcePath
 
   test "decoded child error rebases to the child's true file line/col":
     let src = "service {\n" &
@@ -281,3 +286,41 @@ suite "decodeOr[T](doc, node, fallback) — value or fallback, never errs (N3)":
     let fallback = Daemon(name: "DEFAULT", port: 7)
     let v = decodeOr[Daemon](d, d.nodes[0], fallback)
     check v == fallback
+
+suite "decodeNode foreign/stale span — out-of-range slice guard (review #1)":
+  # FIX #1 (review): a node's span is recorded against ITS OWN source. Passing it
+  # to decodeNode with a different/shorter doc.sourceText must not run an
+  # unguarded slice (IndexDefect — a Defect that bypasses {.raises:[].} and kills
+  # the process). The guard falls back to re-emit, which yields a CORRECT decode
+  # because the node carries its real name/entries/children regardless of span.
+
+  test "foreign node + shorter docB.sourceText → no crash, decodes via re-emit":
+    let srcA = "daemon \"web\" port=80\n"
+    let dA = parseDoc(srcA)
+    let node = dA.nodes[0]                 # span valid for srcA only
+    # docB has a SHORTER sourceText; node.span overshoots it.
+    let dB = parseDoc("x\n")
+    check node.span.offset + node.span.length > dB.sourceText.len
+    let r = decodeNode[Daemon](dB, node)   # must NOT raise IndexDefect
+    check r.isOk
+    check r.get.name == "web"
+    check r.get.port == 80
+
+  test "newDoc with empty sourceText + parsed node → no crash, correct value":
+    let dA = parseDoc("daemon \"web\" port=80\n")
+    let node = dA.nodes[0]
+    let empty = newDoc()                   # sourceText == ""
+    check empty.sourceText.len == 0
+    let r = decodeNode[Daemon](empty, node)
+    check r.isOk
+    check r.get.name == "web"
+    check r.get.port == 80
+
+  test "decodeOr on a foreign node returns the value (not a crash)":
+    let dA = parseDoc("daemon \"web\" port=80\n")
+    let node = dA.nodes[0]
+    let dB = parseDoc("x\n")
+    let fallback = Daemon(name: "DEFAULT", port: 0)
+    let v = decodeOr[Daemon](dB, node, fallback)
+    check v.name == "web"                  # re-emit decode, not the fallback
+    check v.port == 80
