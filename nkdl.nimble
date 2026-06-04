@@ -53,6 +53,7 @@ task test, "Run unit tests":
   exec cmd & " tests/test_embed.nim"
   exec cmd & " tests/test_kdl_block.nim"
   exec cmd & " tests/test_api.nim"
+  exec cmd & " tests/test_decode_node.nim"
   # Clean-room conformance corpus (GH #27): the model/renderer/covering-array/
   # emitter are pure stdlib (no src/, no proptest), so they run in the default
   # suite. Only the nkdl ADAPTER needs proptest, and it is gated below.
