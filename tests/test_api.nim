@@ -5,10 +5,12 @@
 
 import std/unittest
 import std/strutils
+import std/os
 
 import ../src/api
 import ../src/kdl_block
 import ../src/pragmas
+import ../src/spans
 
 # kdl: at module scope so the emitted kdlDecode is visible to the
 # `decode[Service]` generic instantiation site below.
@@ -148,3 +150,41 @@ suite "C1 — source attribution (sourcePath param)":
     check res.errors.len >= 1
     for e in res.errors:
       check e.sourcePath == "svc.kdl"
+
+suite "C2 — decodeFile[T]":
+
+  test "decodeFile reads + decodes a real file":
+    let path = getTempDir() / "nkdl_c2_ok.kdl"
+    writeFile(path, "service \"web\" port=80")
+    defer: removeFile(path)
+    let r = decodeFile[Service](path)
+    check r.isOk
+    check r.get.name == "web"
+    check r.get.port == 80
+
+  test "parse error renders with the file path as sourcePath":
+    let path = getTempDir() / "nkdl_c2_bad.kdl"
+    writeFile(path, "service \"web\" port=notanint")
+    defer: removeFile(path)
+    let r = decodeFile[Service](path)
+    check r.isErr
+    let e = r.getErr
+    check e.sourcePath == path
+    check ($e).startsWith(path & ":")
+    check e.line > 0
+    check e.col > 0
+
+  test "missing file yields peIOError with the path in the hint":
+    let path = "does/not/exist.kdl"
+    let r = decodeFile[Service](path)
+    check r.isErr
+    let e = r.getErr
+    check e.code == peIOError
+    check path in e.hint
+
+  test "decodeFile is callable in a {.raises:[].} context":
+    # Compile-proof: if decodeFile leaked an exception, this proc would
+    # fail the raises pragma at compile time.
+    proc onlyResults(p: string): bool {.raises: [].} =
+      decodeFile[Service](p).isErr
+    check onlyResults("does/not/exist.kdl")

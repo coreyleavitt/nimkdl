@@ -85,6 +85,33 @@ proc decode*[T](src: string, sourcePath = "<input>"):
   if r.isErr: return err[T, ParseError](r.getErr.enriched(src, sourcePath))
   r
 
+proc decodeFile*[T](path: string):
+    Result[T, ParseError] {.raises: [].} =
+  ## Read the file at `path` and decode its contents into `T`, attributing
+  ## errors to `path` (rfc-consumer-api §4.3, C2).
+  ##
+  ## ## The one effectful entry — I/O boundary conversion (§4.5)
+  ##
+  ## `readFile` can raise `IOError`/`OSError` (missing path, permission
+  ## denied, a read fault mid-stream). `decodeFile` catches these at the
+  ## boundary and converts them into a `peIOError` `ParseError` — a real
+  ## exceptional condition lifted into the library's `Result` currency, NOT
+  ## an escape hatch. This catch-and-convert is exactly what lets the whole
+  ## public decode surface stay `{.raises:[].}`: the one place I/O can fail
+  ## is sealed here, so `IOError` never propagates to callers.
+  ##
+  ## A successful read threads `path` as the `sourcePath`, so any parse/type
+  ## error renders as `path:line:col:` against the real file.
+  let content =
+    try:
+      readFile(path)
+    except IOError, OSError:
+      let e = getCurrentException()
+      return err[T, ParseError](initError(
+        peIOError, Span(),
+        "could not read '" & path & "': " & e.msg))
+  decode[T](content, path)
+
 proc encode*[T](v: T): string =
   # TODO(H1): fold under {.raises:[].} once emitter chain is triaged
   ## Encode `v` to KDL wire bytes.
