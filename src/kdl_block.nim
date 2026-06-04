@@ -6,9 +6,14 @@
 ## (helpers, enums, sub-records) and non-type statements (imports,
 ## constants) pass through unchanged.
 ##
-## Both derives are always emitted. Symmetry is the right default —
+## Both derives are emitted by default. Symmetry is the right default —
 ## emitting only one direction silently when the user expected both
 ## is a footgun. The Nim compiler dead-code-elims any unused proc.
+##
+## A type may opt out of one direction with a type-level pragma:
+## `{.kdlEncodeOnly.}` emits only `deriveEncode(T)` (no `kdlDecode`);
+## `{.kdlDecodeOnly.}` emits only `deriveDecode(T)` (no `kdlEncode`).
+## Carrying both is a compile-time `{.error.}` (contradictory).
 ##
 ## ```nim
 ## kdl:
@@ -54,14 +59,24 @@ proc extractKdlTypeSym(typeDef: NimNode): NimNode {.compileTime.} =
     error("kdl block: cannot extract type ident from " & $nameNode.kind, nameNode)
     newEmptyNode()
 
+proc hasTypePragma(typeDef: NimNode; name: string): bool {.compileTime.} =
+  ## True iff the typedef's name slot carries a bare `{.name.}` type-level
+  ## pragma. Matches both the call-form (`kdlNode: "x"`) and the bare-ident
+  ## form (`kdlDecodeOnly`) the marker pragmas use.
+  if typeDef[0].kind != nnkPragmaExpr: return false
+  for p in typeDef[0][1]:
+    case p.kind
+    of nnkIdent, nnkSym:
+      if $p == name: return true
+    of nnkExprColonExpr, nnkCall:
+      if p.len >= 1 and $p[0] == name: return true
+    else: discard
+  false
+
 proc hasKdlNodePragma(typeDef: NimNode): bool {.compileTime.} =
   ## True iff the typedef's name slot carries a `{.kdlNode: "name".}`
   ## pragma — the marker that identifies a type as KDL-mapped.
-  if typeDef[0].kind != nnkPragmaExpr: return false
-  for p in typeDef[0][1]:
-    if p.kind in {nnkExprColonExpr, nnkCall} and p.len >= 2:
-      if $p[0] == "kdlNode": return true
-  false
+  hasTypePragma(typeDef, "kdlNode")
 
 macro kdl*(body: untyped): untyped =
   ## Scope a region of KDL type definitions. Every
@@ -79,8 +94,17 @@ macro kdl*(body: untyped): untyped =
       for typeDef in stmt:
         if typeDef.kind == nnkTypeDef and hasKdlNodePragma(typeDef):
           let typeSym = extractKdlTypeSym(typeDef)
-          result.add(newCall(bindSym"deriveEncode", typeSym))
-          result.add(newCall(bindSym"deriveDecode", typeSym))
+          let encodeOnly = hasTypePragma(typeDef, "kdlEncodeOnly")
+          let decodeOnly = hasTypePragma(typeDef, "kdlDecodeOnly")
+          if encodeOnly and decodeOnly:
+            error("kdl block: type " & $typeSym &
+              " carries both {.kdlEncodeOnly.} and {.kdlDecodeOnly.} — " &
+              "contradictory; keep at most one (or neither for both directions)",
+              typeDef)
+          if not decodeOnly:
+            result.add(newCall(bindSym"deriveEncode", typeSym))
+          if not encodeOnly:
+            result.add(newCall(bindSym"deriveDecode", typeSym))
     else:
       result.add(stmt)
 

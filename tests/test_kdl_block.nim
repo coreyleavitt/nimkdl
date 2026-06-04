@@ -194,3 +194,34 @@ suite "kdl: block — kdlScalar + kdlArg positional override (#39 item3)":
     check bytes == "dial \"270deg\"\n"
     let v2 = decodeOne[Dial](bytes)
     check v2.angle.deg == 270
+
+suite "kdl: block — directional derive pragmas (S3)":
+
+  kdl:
+    type Inbound {.kdlNode: "inbound", kdlDecodeOnly.} = object
+      name {.kdlArg.}: string
+      port {.kdlProp.}: int
+
+  test "kdlDecodeOnly: decode works":
+    let v = decodeOne[Inbound]("inbound \"web\" port=80")
+    check v.name == "web"
+    check v.port == 80
+
+  test "kdlDecodeOnly: no kdlEncode is generated":
+    # No deriveEncode emitted → no kdlEncode(Inbound) overload exists.
+    let v = Inbound(name: "web", port: 80)
+    check not compiles(encodeOne(v))
+
+  kdl:
+    type Outbound {.kdlNode: "outbound", kdlEncodeOnly.} = object
+      name {.kdlArg.}: string
+      port {.kdlProp.}: int
+
+  test "kdlEncodeOnly: encode works":
+    let v = Outbound(name: "web", port: 80)
+    let bytes = encodeOne(v)
+    check bytes == "outbound \"web\" port=80\n"
+
+  test "kdlEncodeOnly: no kdlDecode is generated":
+    # No deriveDecode emitted → no kdlDecode(Outbound) overload exists.
+    check not compiles(decodeOne[Outbound]("outbound \"web\" port=80"))

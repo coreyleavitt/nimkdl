@@ -30,6 +30,29 @@ template kdlRenameAll*(conv: KdlNamingConvention) {.pragma.}
   ##   type RetryCfg {.kdlNode: "retry", kdlRenameAll: kcKebabCase.} = object
   ##     maxRetries {.kdlProp.}: int      # wire key: max-retries
 
+template kdlEncodeOnly*() {.pragma.}
+  ## Type-level: generate ONLY the encode direction for this `{.kdlNode.}`
+  ## type — the `kdl:` block emits `deriveEncode(T)` and SKIPS
+  ## `deriveDecode(T)`, so no `kdlDecode` overload exists for `T`. Use it to
+  ## declare intent: this type is produced (serialized) but never parsed from
+  ## KDL. Suppresses the *decode* side; the name names the side that stays.
+  ## Combining it with `{.kdlDecodeOnly.}` on the same type is contradictory
+  ## and is a compile-time error.
+
+template kdlDecodeOnly*() {.pragma.}
+  ## Type-level: generate ONLY the decode direction for this `{.kdlNode.}`
+  ## type — the `kdl:` block emits `deriveDecode(T)` and SKIPS
+  ## `deriveEncode(T)`, so no `kdlEncode` overload exists for `T`. Use it to
+  ## declare intent: this type is parsed from KDL but never serialized back.
+  ## Suppresses the *encode* side; the name names the side that stays.
+  ## **Footgun (intentional):** because no `kdlEncode(T)` is generated, using
+  ## a `{.kdlDecodeOnly.}` type as a `{.kdlChild.}` of another derived type
+  ## makes the PARENT's encode fail to compile (missing `kdlEncode` overload
+  ## for the child). This is by design — it surfaces the asymmetry at the use
+  ## site rather than silently emitting a half-working parent. Combining it
+  ## with `{.kdlEncodeOnly.}` on the same type is contradictory and is a
+  ## compile-time error.
+
 template kdlArg*() {.pragma.}
   ## Field-level: serialize/parse as a positional argument.
 
