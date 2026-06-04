@@ -454,3 +454,26 @@ suite "kdl: block — S8b matrix: Option[FlatObj] flatten (documented limitation
           meta {.kdlFlatten.}: Option[OMeta]
         deriveEncode(OptDoc2)
     ))
+
+type InheritBase = object of RootObj
+  id {.kdlProp.}: int
+  tag {.kdlProp.}: string = "default"
+
+suite "kdl: block — inherited fields + inherited defaults (S10)":
+
+  kdl:
+    type InheritDerived {.kdlNode: "derived".} = object of InheritBase
+      name {.kdlArg.}: string
+
+  test "derived decodes inherited fields + inherited S5 default":
+    let v = decodeOne[InheritDerived]("derived \"n\" id=5")
+    check v.name == "n"
+    check v.id == 5
+    check v.tag == "default"   # inherited default applied
+
+  test "round-trips inherited + own fields":
+    let v0 = InheritDerived(name: "n", id: 5, tag: "x")
+    let v1 = decodeOne[InheritDerived](encodeOne(v0))
+    check v1.name == "n"
+    check v1.id == 5
+    check v1.tag == "x"

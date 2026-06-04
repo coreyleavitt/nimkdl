@@ -273,15 +273,63 @@ proc nodeNameOf*(typeSym: NimNode): string =
   # which produced `httpserver`). BREAKING for un-`kdlNode`'d multi-word types.
   result = toKebab(splitWords($typeSym))
 
-proc objectRecList*(typeSym: NimNode): NimNode =
-  ## Return the RecList of `typeSym`'s object (peeling one `ref`).
+proc objectTyOf*(typeSym: NimNode): NimNode =
+  ## Return the `nnkObjectTy` of `typeSym` (peeling one `ref`). Single source
+  ## of truth for both `objectRecList` (recList = `[2]`) and `allFields`
+  ## (inherit clause = `[1]`).
   let impl = typeSym.getImpl
   let objTy =
     if impl[2].kind == nnkObjectTy: impl[2]
     elif impl[2].kind == nnkRefTy and impl[2][0].kind == nnkObjectTy: impl[2][0]
     else: nil
   doAssert objTy != nil, "deriveCodec: expected an object or ref object type"
-  objTy[2]
+  objTy
+
+proc objectRecList*(typeSym: NimNode): NimNode =
+  ## Return the RecList of `typeSym`'s object (peeling one `ref`).
+  objectTyOf(typeSym)[2]
+
+proc inheritedBaseSym*(typeSym: NimNode): NimNode =
+  ## If `typeSym`'s object INHERITS from a *user* object type (`object of Base`),
+  ## return the base type's sym; else nil. The inherit clause is `objTy[1]`: it
+  ## is `nnkOfInherit` carrying the base sym at `[0]` for an inheriting object,
+  ## or `nnkEmpty` for a plain `object` / `object of RootObj`-rooted leaf.
+  ##
+  ## `RootObj` (and the legacy `Obj` root) terminate the chain — they carry no
+  ## user fields, so the walk stops there. The check is `eqIdent`-based so a
+  ## qualified `system.RootObj` still matches.
+  let objTy = objectTyOf(typeSym)
+  let inherit = objTy[1]
+  if inherit.kind != nnkOfInherit: return nil
+  let baseSym = inherit[0]
+  if baseSym.eqIdent("RootObj") or baseSym.eqIdent("Obj"): return nil
+  baseSym
+
+iterator allFields*(typeSym: NimNode):
+    tuple[name: string, typ: NimNode, pragmas: seq[NimNode], default: NimNode] =
+  ## Walk the FULL inheritance chain of `typeSym` BASE-FIRST, yielding the same
+  ## 4-tuple shape as `regularFields` for every plain (non-variant) field —
+  ## base-type fields first (in their declaration order), then this type's own
+  ## (rfc-derive-vocabulary.md S10).
+  ##
+  ## A `Derived = object of Base` only carries its OWN recList in `objTy[2]`;
+  ## the base's fields live in `Base`'s recList, reached via the `nnkOfInherit`
+  ## base sym (`inheritedBaseSym`). We recurse to the base first so a derived
+  ## decoder/encoder enumerates inherited fields (and their S5 defaults) ahead
+  ## of the derived ones. `RootObj`-rooted leaves yield exactly `regularFields`.
+  ##
+  ## NOTE: the bound is structural — Nim forbids inheritance cycles, so the
+  ## chain is finite; no depth guard is needed. Nim also forbids *recursive*
+  ## iterators, so we collect the chain leaf→root iteratively, then yield it
+  ## root→leaf (base-first).
+  var chain: seq[NimNode]
+  var cur = typeSym
+  while cur != nil:
+    chain.add(cur)
+    cur = inheritedBaseSym(cur)
+  for i in countdown(chain.len - 1, 0):
+    for f in regularFields(objectRecList(chain[i])):
+      yield f
 
 proc isEnumType*(t: NimNode): bool =
   ## True iff `t`'s underlying type is an enum. Inputs may arrive as the

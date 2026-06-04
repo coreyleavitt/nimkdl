@@ -347,8 +347,22 @@ macro deriveEncode*(T: typedesc): untyped =
         emitPropPush(targetBody, baseExpr, eSym, fieldName, wireKey, fieldType,
                      annoLit, scalar)
   let topRecList = objectRecList(typeSym)
-  # Plain non-variant fields first (in declaration order).
-  for (fieldName, fieldType, pragmas, _) in regularFields(topRecList):
+  # S10: enumerate the FULL inheritance chain base-first so inherited fields
+  # encode ahead of this type's own (mirrors decode's `allFields` walk; both
+  # must agree on field order or the round-trip breaks). Reduces to
+  # `regularFields(topRecList)` for a non-inheriting type. A variant base is
+  # rejected (the discriminator can't be split across the inheritance boundary).
+  block s10VariantBaseCheck:
+    var b = inheritedBaseSym(typeSym)
+    while b != nil:
+      if findRecCase(objectRecList(b)) != nil:
+        error("deriveEncode: '" & $typeSym & "' inherits from variant (case " &
+              "object) base '" & $b & "'. Inherited variant discriminators are " &
+              "not supported — flatten the base, or move the variant onto the " &
+              "derived type itself.")
+      b = inheritedBaseSym(b)
+  # Plain non-variant fields first (in declaration order, base-first).
+  for (fieldName, fieldType, pragmas, _) in allFields(typeSym):
     dispatchField(fieldName, fieldType, pragmas, body)
   # Required invariant (rfc S1): a {.kdlArg.} declared after the {.kdlVariadic.}
   # would emit between the variadic elements on the wire — corrupting the

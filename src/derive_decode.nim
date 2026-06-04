@@ -591,9 +591,28 @@ macro deriveDecode*(T: typedesc): untyped =
                       aliases: aliases, skipDecode: skipDecode))
 
   let recList = objectRecList(typeSym)
-  for (fieldName, fieldType, pragmas, fieldDefault) in regularFields(recList):
+  # S10: enumerate the FULL inheritance chain base-first (inherited fields +
+  # their S5 defaults compose ahead of this type's own). `allFields` reduces to
+  # `regularFields(recList)` for a non-inheriting type. Variant structure
+  # (RecCase) is still read from THIS type's own recList only — a variant base
+  # whose discriminator is inherited is rejected below (the case machinery can't
+  # be split across the inheritance boundary cleanly).
+  for (fieldName, fieldType, pragmas, fieldDefault) in allFields(typeSym):
     classify(fieldName, fieldType, pragmas, argFields, propFields, childFields,
              fieldDefault, isBranchField = false)
+  # S10 guard: a base type that is itself a case object (variant) cannot be
+  # safely inherited — the discriminator + branch fields live on the base's
+  # recList, but the derived decoder's case dispatch reads only THIS type's
+  # recCase. Rather than silently drop the base's variant, fail loud.
+  block s10VariantBaseCheck:
+    var b = inheritedBaseSym(typeSym)
+    while b != nil:
+      if findRecCase(objectRecList(b)) != nil:
+        error("deriveDecode: '" & $typeSym & "' inherits from variant (case " &
+              "object) base '" & $b & "'. Inherited variant discriminators are " &
+              "not supported — flatten the base, or move the variant onto the " &
+              "derived type itself.")
+      b = inheritedBaseSym(b)
   let recCase = findRecCase(recList)
   if recCase != nil:
     hasVariant = true
