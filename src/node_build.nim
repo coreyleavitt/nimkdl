@@ -20,6 +20,20 @@ import ./reserved
 import ./spans
 export node, value, spans  # spans: Result/ParseError accessors used on parseNodes' result
 
+func nodeStartOffset(c: StringCursor, ev: CursorEvent): int {.inline.} =
+  ## True byte offset of a node's first source character (rfc-consumer-api S1).
+  ##
+  ## `ceNodeBegin.span` is the NAME-token span — correct for a bare/quoted
+  ## node, but for an annotated node `(tag) name ...` the real first byte is
+  ## the `(` paren, which sits one token before the annotation tag. The cursor
+  ## exposes `ev.nodeAnnoTok` (the tag-token index, -1 if absent), so the paren
+  ## is `nodeAnnoTok - 1`. (Verified against cursor.tryConsumeAnno: the tag is
+  ## emitted at `c.tokIdx + 1` with `(` consumed at `c.tokIdx`.)
+  if ev.nodeAnnoTok != -1:
+    c.stream[].tokens[ev.nodeAnnoTok - 1].span.offset   # '(' paren token
+  else:
+    ev.span.offset                                       # name-token offset
+
 proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
     Result[KdlDoc, ParseError] {.noSideEffect.} =
   ## Fold cursor events into a self-contained KdlDoc via an explicit node stack.
@@ -45,7 +59,8 @@ proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
       if ev.nodeAnnoTok != -1:
         typeAnno = some(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
       stack.add(KdlNode(name: name, typeAnnotation: typeAnno,
-                        entries: @[], childNodes: @[]))
+                        entries: @[], childNodes: @[],
+                        span: initSpan(nodeStartOffset(c, ev), 0)))
     of ceArg:
       let tok = c.stream[].tokens[ev.argTok]
       let vRes = tokenToKdlValue(tok, c.stream[], c.source)
@@ -83,6 +98,7 @@ proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
     of ceNodeEnd:
       if stack.len == 0: continue  # stray NodeEnd from cursor recovery
       let n = stack.pop()
+      n.span = initSpan(n.span.offset, ev.span.offset - n.span.offset)
       if stack.len == 0:
         doc.rootNodes.add(n)
       else:
@@ -133,7 +149,8 @@ proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
       if ev.nodeAnnoTok != -1:
         typeAnno = some(tokenAsString(c.stream[].tokens[ev.nodeAnnoTok], c.stream[], c.source))
       stack.add(KdlNode(name: name, typeAnnotation: typeAnno,
-                        entries: @[], childNodes: @[]))
+                        entries: @[], childNodes: @[],
+                        span: initSpan(nodeStartOffset(c, ev), 0)))
     of ceArg:
       let tok = c.stream[].tokens[ev.argTok]
       let vRes = tokenToKdlValue(tok, c.stream[], c.source)
@@ -174,6 +191,7 @@ proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
     of ceNodeEnd:
       if stack.len == 0: continue   # recovery dropped the open frame
       let n = stack.pop()
+      n.span = initSpan(n.span.offset, ev.span.offset - n.span.offset)
       if stack.len == 0:
         result.value.rootNodes.add(n)
       else:

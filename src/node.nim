@@ -17,7 +17,9 @@
 
 import std/options
 import ./value
+import ./spans
 export value
+export spans.Span, spans.offset, spans.length, spans.endOffset, spans.initSpan
 
 type
   KdlNode* = ref object
@@ -26,9 +28,16 @@ type
     entries*: seq[KdlEntry]
     childNodes*: seq[KdlNode]
     dirty*: bool
-      ## Set by every mutator; consulted by the preserving encoder. Parse-only
-      ## metadata (span / parseHash) lives on a lazy per-node sidecar (§5.5),
-      ## wired in a later stage — not on this hot struct.
+      ## Set by every mutator; consulted by the preserving encoder.
+    span*: Span
+      ## `[offset, offset+length)` byte range of this node's source in the
+      ## owning doc's `sourceText` (rfc-consumer-api §4.1, gap S). A plain
+      ## 8-byte VALUE — no doc back-pointer, no ORC cycle; the core-rebuild's
+      ## doc-free `KdlNode` axiom holds. `length == 0` is the unambiguous
+      ## "no source" sentinel (hand-built nodes; zero-initialized). A real
+      ## parsed node always has `length >= 1`. The fuller #31 NodeMeta
+      ## (parseHash / headLen / entry spans) is a separate, orthogonal future
+      ## concern — this field does not anticipate it.
 
   KdlDoc* = ref object
     sourcePath*: string

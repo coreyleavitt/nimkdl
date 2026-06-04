@@ -23,6 +23,7 @@ import ./proptest_helpers  # identifiers strategy
 import ../src/api
 import ../src/node
 import ../src/node_emit   # encode(doc) / encode(doc, preserve) — re-exports emitter
+import ../src/node_build  # parseNodes — the span-recording self-contained builder
 import ../src/kdl_block
 import ../src/parser
 import ../src/pragmas
@@ -253,3 +254,50 @@ suite "P4 — Cat 3 doc structural round-trip (continued)":
     let doc1 = r.get
     let doc2 = docRoundtrip(src)
     ensure docEqual(doc1, doc2)
+
+suite "P-span — per-node source span is exact (rfc-consumer-api S1)":
+  # §8: for any parsed node with span.length > 0, the source slice
+  # sourceText[span.offset ..< span.offset+span.length] re-parses to a
+  # node structurally equal to the original (the span is exact). For
+  # annotated nodes, span.offset points at the '(' paren.
+
+  property "a parsed node's span slice re-parses structurally-equal":
+    with Settings(maxExamples: 200, testId: "pspan-roundtrip")
+    given name in identifiers(1, 12),
+          argc in integers(0, 4),
+          anno in integers(0, 1)
+    var src = ""
+    if anno == 1: src.add("(t)")
+    src.add(name)
+    for i in 0 ..< argc: src.add(" " & $i)
+    src.add("\n")
+    let r = parseNodes(src)
+    ensure r.isOk
+    let d = r.get
+    ensure d.nodes.len == 1
+    let n = d.nodes[0]
+    ensure n.span.length > 0
+    let slice = d.sourceText[n.span.offset ..< n.span.offset + n.span.length]
+    # annotated nodes: offset is the '(' paren, not the tag identifier.
+    if anno == 1:
+      ensure d.sourceText[n.span.offset] == '('
+    let re = parseNodes(slice)
+    ensure re.isOk
+    ensure re.get.nodes.len == 1
+    ensure re.get.nodes[0] == n
+
+  property "every node in a multi-node doc has an exact, re-parsable span":
+    with Settings(maxExamples: 150, testId: "pspan-multinode")
+    given names in lists(identifiers(1, 10), 1, 6)
+    var src = ""
+    for nm in names: src.add(nm & " 1 2\n")
+    let r = parseNodes(src)
+    ensure r.isOk
+    let d = r.get
+    for n in d.nodes:
+      ensure n.span.length > 0
+      let slice = d.sourceText[n.span.offset ..< n.span.offset + n.span.length]
+      let re = parseNodes(slice)
+      ensure re.isOk
+      ensure re.get.nodes.len == 1
+      ensure re.get.nodes[0] == n
