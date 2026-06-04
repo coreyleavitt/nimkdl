@@ -253,3 +253,36 @@ suite "ParseError $ (B1)":
   test "un-enriched error renders source-less :0:0:":
     let e = initError(peOther, pointSpan(initPosition(0)), "boom")
     check $e == ":0:0: boom"
+
+suite "Result accessors (review #4)":
+  test "tryGet returns value on ok":
+    let r = ok[int, ParseError](42)
+    check r.tryGet == 42
+
+  test "tryGet raises KdlError carrying the ParseError on err":
+    var e = initError(peTypeMismatch, pointSpan(initPosition(0)), "expected int")
+    e.line = 14
+    e.col = 5
+    e.sourcePath = "config.kdl"
+    let r = err[int, ParseError](e)
+    var raised = false
+    try:
+      discard r.tryGet
+    except KdlError as ex:
+      raised = true
+      check ex.error.code == peTypeMismatch
+      check ex.error.sourcePath == "config.kdl"
+      # The rendered $ of the carried error is the raised message and
+      # exposes the location.
+      check ex.msg == "config.kdl:14:5: expected int"
+      check $ex.error == "config.kdl:14:5: expected int"
+    check raised
+
+  test "valueOr returns value on ok":
+    let r = ok[int, ParseError](7)
+    check r.valueOr(99) == 7
+
+  test "valueOr returns fallback on err":
+    let e = initError(peOther, pointSpan(initPosition(0)), "boom")
+    let r = err[int, ParseError](e)
+    check r.valueOr(99) == 99

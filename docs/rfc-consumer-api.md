@@ -167,8 +167,8 @@ Usage (amoxtli, typed, with **real** `config.kdl:14:5:` errors):
 let doc = parse(body, "config.kdl").get
 for n in doc.nodes:
   case n.name
-  of "daemon":      cfg.daemon = decodeNode[Daemon](doc, n).get
-  of "permissions": cfg.perms  = decodeNode[Permissions](doc, n).get
+  of "daemon":      cfg.daemon = decodeNode[Daemon](doc, n).tryGet
+  of "permissions": cfg.perms  = decodeNode[Permissions](doc, n).tryGet
   ...
 ```
 

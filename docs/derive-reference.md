@@ -14,7 +14,7 @@ kdl:
     port {.kdlProp.}: int = 8080
     tags {.kdlChild.}: seq[Tag]
 
-let s = decode[Server]("server \"web\" port=443 { tag \"prod\" }").get
+let s = decode[Server]("server \"web\" port=443 { tag \"prod\" }").tryGet
 let kdl = encode(s)
 ```
 

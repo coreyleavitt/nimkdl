@@ -414,8 +414,35 @@ proc err*[T, E](error: sink E): Result[T, E] {.inline.} =
 func isOk*[T, E](r: Result[T, E]): bool {.inline.} = r.kind == rkOk
 func isErr*[T, E](r: Result[T, E]): bool {.inline.} = r.kind == rkErr
 
-func get*[T, E](r: Result[T, E]): T {.inline.} = r.value
+func get*[T, E](r: Result[T, E]): T {.inline.} =
+  ## Unchecked-by-contract fast path: returns the ok value. Calling on an
+  ## `rkErr` Result is a programmer error (reads the inactive branch). The
+  ## `assert` makes that misuse fail loudly in debug builds; it compiles out
+  ## entirely under `-d:release`/`-d:danger`, so there is no release cost.
+  ## Throw-friendly callers should prefer `tryGet`; never-failing callers with
+  ## a default should prefer `valueOr`.
+  assert r.isOk, "Result.get called on an rkErr Result"
+  r.value
 func getErr*[T, E](r: Result[T, E]): E {.inline.} = r.error
+
+type KdlError* = object of CatchableError
+  ## Raised by `tryGet` when unwrapping an error Result. Carries the structured
+  ## `ParseError` so callers can inspect code/location; `msg` is `$err.error`.
+  error*: ParseError
+
+proc tryGet*[T](r: Result[T, ParseError]): T =
+  ## Raising accessor for throw-friendly callers: returns the ok value, or
+  ## raises `KdlError` (with the `ParseError` attached + rendered into `msg`)
+  ## on an error Result. This is the *one* accessor that raises — it is
+  ## deliberately not `{.raises: [].}`; opt into it when you want exceptions.
+  if r.isErr:
+    raise (ref KdlError)(msg: $r.error, error: r.error)
+  r.value
+
+func valueOr*[T](r: Result[T, ParseError], fallback: T): T =
+  ## Option-style accessor: returns the ok value, or `fallback` on error.
+  ## Never raises, never asserts.
+  if r.isOk: r.value else: fallback
 
 # Sink-explicit unwrap — caller asserts last-use of `r` so we move the
 # payload out instead of copying. The discriminant on `case object`

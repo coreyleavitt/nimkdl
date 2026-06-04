@@ -87,8 +87,8 @@ let doc = parse(readFile("config.kdl"), "config.kdl").get
 var cfg: Config
 for n in doc.nodes:
   case n.name
-  of "daemon":      cfg.daemon = decodeNode[Daemon](doc, n).get
-  of "permissions": cfg.perms  = decodeNode[Permissions](doc, n).get
+  of "daemon":      cfg.daemon = decodeNode[Daemon](doc, n).tryGet
+  of "permissions": cfg.perms  = decodeNode[Permissions](doc, n).tryGet
   else: discard
 ```
 
