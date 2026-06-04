@@ -290,6 +290,7 @@ proc decodeNode*[T](doc: KdlDoc, node: KdlNode):
 
 proc decodeNode*[T](node: KdlNode):
     Result[T, ParseError] {.raises: [].} =
+  ## Decode a hand-built (source-less) DOM `node` into `T` via re-emit.
   ##
   ## .. warning:: **Doc-less re-emit fallback — lossier than `decodeNode(doc, node)`.**
   ##   This overload exists for nodes built **programmatically** (no source span:
