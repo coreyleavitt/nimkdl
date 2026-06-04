@@ -519,3 +519,45 @@ proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T {.raises: [].} =
   ## re-emit fallback for hand-built ones), discarding the error on `isErr`.
   let r = decodeNode[T](doc, node)
   if r.isErr: fallback else: r.get
+
+# ── DocView — capture the doc once for node-decode ergonomics (review #9) ──────
+
+type DocView* = object
+  ## A thin, additive caller-side view that captures `doc` once so the
+  ## node-decode entry points (`decodeNode`/`decodeChild`) need not thread it on
+  ## every call (rfc-consumer-api §4.2; review #9). Purely a stack value holding
+  ## the doc ref — it does NOT touch `KdlNode`'s doc-free invariant (a node still
+  ## carries no back-reference). The heterogeneous-dispatch loop reads:
+  ##
+  ## ```nim
+  ## for (name, n) in doc.view.nodes:
+  ##   case name
+  ##   of "daemon": cfg.daemon = doc.view.decode[:Daemon](n).tryGet
+  ##   ...
+  ## ```
+  doc*: KdlDoc
+
+func view*(doc: KdlDoc): DocView {.raises: [].} =
+  ## Wrap `doc` in a `DocView` so the doc is captured once. `doc.view` then
+  ## carries it into `nodes` / `decode` / `child` without re-threading.
+  DocView(doc: doc)
+
+iterator nodes*(v: DocView): tuple[name: string, node: KdlNode] {.raises: [].} =
+  ## The doc's top-level nodes, each paired with its name — ready for a `case`
+  ## on `name` in the heterogeneous-dispatch loop (review #9).
+  for n in v.doc.rootNodes:
+    yield (n.name, n)
+
+proc decode*[T](v: DocView, node: KdlNode):
+    Result[T, ParseError] {.raises: [].} =
+  ## Decode `node` into `T` against the captured doc — a thin wrapper over
+  ## `decodeNode[T](v.doc, node)` (no decode logic of its own). Call as
+  ## `v.decode[:T](node)`.
+  decodeNode[T](v.doc, node)
+
+proc child*[T](v: DocView, parent: KdlNode, childName: string):
+    Result[T, ParseError] {.raises: [].} =
+  ## Decode `parent`'s first child named `childName` into `T` against the
+  ## captured doc — a thin wrapper over `decodeChild[T](v.doc, parent, childName)`.
+  ## Call as `v.child[:T](parent, childName)`.
+  decodeChild[T](v.doc, parent, childName)

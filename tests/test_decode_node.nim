@@ -361,3 +361,54 @@ suite "decodeNode negative compile-guards (review #8)":
     let d = parseDoc("daemon \"web\" port=80\n")
     let n = d.nodes[0]
     check(compiles(decodeNode[Daemon](d, n)))
+
+suite "DocView — capture the doc once (review #9)":
+
+  test "heterogeneous-dispatch loop: iterate view.nodes, decode by name":
+    let src = "daemon \"web\" port=80\n" &
+              "permissions \"rw\"\n"
+    let d = parseDoc(src)
+    var gotDaemon: Daemon
+    var gotPerms: Permissions
+    var sawDaemon = false
+    var sawPerms = false
+    for (name, n) in d.view.nodes:
+      case name
+      of "daemon":
+        let r = d.view.decode[:Daemon](n)
+        check r.isOk
+        gotDaemon = r.get
+        sawDaemon = true
+      of "permissions":
+        let r = d.view.decode[:Permissions](n)
+        check r.isOk
+        gotPerms = r.get
+        sawPerms = true
+      else: discard
+    check sawDaemon and sawPerms
+    check gotDaemon.name == "web"
+    check gotDaemon.port == 80
+    check gotPerms.mode == "rw"
+
+  test "view.decode equals decodeNode(doc, node) — thin wrapper":
+    let d = parseDoc("daemon \"web\" port=80\n")
+    let n = d.nodes[0]
+    let viaView = d.view.decode[:Daemon](n)
+    let viaDoc  = decodeNode[Daemon](d, n)
+    check viaView.isOk and viaDoc.isOk
+    check viaView.get == viaDoc.get
+
+  test "view.child decodes a named child (thin wrapper over decodeChild)":
+    let src = "service {\n" &
+              "  daemon \"web\" port=80\n" &
+              "}\n"
+    let d = parseDoc(src)
+    let parent = d.nodes[0]
+    let r = d.view.child[:Daemon](parent, "daemon")
+    check r.isOk
+    check r.get.name == "web"
+    check r.get.port == 80
+    # Equivalence with the doc-threaded form:
+    let viaDoc = decodeChild[Daemon](d, parent, "daemon")
+    check viaDoc.isOk
+    check r.get == viaDoc.get
