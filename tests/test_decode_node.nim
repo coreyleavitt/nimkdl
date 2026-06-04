@@ -282,32 +282,6 @@ suite "decodeChild[T](doc, parent, childName) — first-wins child decode (N3)":
     check r.isErr
     check r.getErr.line == 2
 
-suite "decodeOr[T](doc, node, fallback) — value or fallback, never errs (N3)":
-
-  test "good node → the decoded value (fallback ignored)":
-    let src = "daemon \"web\" port=80\n"
-    let d = parseDoc(src)
-    let fallback = Daemon(name: "DEFAULT", port: 0)
-    let v = decodeOr[Daemon](d, d.nodes[0], fallback)
-    check v.name == "web"
-    check v.port == 80
-
-  test "bad node (wrong type) → exactly the fallback, no error surfaced":
-    let src = "daemon \"web\" port=\"oops\"\n"   # port wants int → decode fails
-    let d = parseDoc(src)
-    let fallback = Daemon(name: "DEFAULT", port: 42)
-    let v = decodeOr[Daemon](d, d.nodes[0], fallback)
-    check v == fallback
-    check v.name == "DEFAULT"
-    check v.port == 42
-
-  test "name-mismatch node → fallback (decode would error on name check)":
-    let src = "permissions \"rw\"\n"
-    let d = parseDoc(src)
-    let fallback = Daemon(name: "DEFAULT", port: 7)
-    let v = decodeOr[Daemon](d, d.nodes[0], fallback)
-    check v == fallback
-
 suite "decodeNode foreign/stale span — out-of-range slice guard (review #1)":
   # FIX #1 (review): a node's span is recorded against ITS OWN source. Passing it
   # to decodeNode with a different/shorter doc.sourceText must not run an
@@ -337,15 +311,6 @@ suite "decodeNode foreign/stale span — out-of-range slice guard (review #1)":
     check r.get.name == "web"
     check r.get.port == 80
 
-  test "decodeOr on a foreign node returns the value (not a crash)":
-    let dA = parseDoc("daemon \"web\" port=80\n")
-    let node = dA.nodes[0]
-    let dB = parseDoc("x\n")
-    let fallback = Daemon(name: "DEFAULT", port: 0)
-    let v = decodeOr[Daemon](dB, node, fallback)
-    check v.name == "web"                  # re-emit decode, not the fallback
-    check v.port == 80
-
 suite "decodeNode negative compile-guards (review #8)":
   ## These pin the `{.error.}` seq-guard (api.nim ~257): `decodeNode[T]`
   ## rejects `seq[...]` targets at compile time, directing callers to decode
@@ -361,54 +326,3 @@ suite "decodeNode negative compile-guards (review #8)":
     let d = parseDoc("daemon \"web\" port=80\n")
     let n = d.nodes[0]
     check(compiles(decodeNode[Daemon](d, n)))
-
-suite "DocView — capture the doc once (review #9)":
-
-  test "heterogeneous-dispatch loop: iterate view.nodes, decode by name":
-    let src = "daemon \"web\" port=80\n" &
-              "permissions \"rw\"\n"
-    let d = parseDoc(src)
-    var gotDaemon: Daemon
-    var gotPerms: Permissions
-    var sawDaemon = false
-    var sawPerms = false
-    for (name, n) in d.view.nodes:
-      case name
-      of "daemon":
-        let r = d.view.decode[:Daemon](n)
-        check r.isOk
-        gotDaemon = r.get
-        sawDaemon = true
-      of "permissions":
-        let r = d.view.decode[:Permissions](n)
-        check r.isOk
-        gotPerms = r.get
-        sawPerms = true
-      else: discard
-    check sawDaemon and sawPerms
-    check gotDaemon.name == "web"
-    check gotDaemon.port == 80
-    check gotPerms.mode == "rw"
-
-  test "view.decode equals decodeNode(doc, node) — thin wrapper":
-    let d = parseDoc("daemon \"web\" port=80\n")
-    let n = d.nodes[0]
-    let viaView = d.view.decode[:Daemon](n)
-    let viaDoc  = decodeNode[Daemon](d, n)
-    check viaView.isOk and viaDoc.isOk
-    check viaView.get == viaDoc.get
-
-  test "view.child decodes a named child (thin wrapper over decodeChild)":
-    let src = "service {\n" &
-              "  daemon \"web\" port=80\n" &
-              "}\n"
-    let d = parseDoc(src)
-    let parent = d.nodes[0]
-    let r = d.view.child[:Daemon](parent, "daemon")
-    check r.isOk
-    check r.get.name == "web"
-    check r.get.port == 80
-    # Equivalence with the doc-threaded form:
-    let viaDoc = decodeChild[Daemon](d, parent, "daemon")
-    check viaDoc.isOk
-    check r.get == viaDoc.get

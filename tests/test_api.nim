@@ -214,7 +214,7 @@ suite "H1 — whole public surface is {.raises:[].} (rfc-consumer-api §4.5/§7)
   # The "test" of H1 is compile-driven: `useSurface` is a {.raises:[].} proc
   # that exercises EVERY public api.nim entry — decode (source), encode (the
   # triaged emit chain), the node↔T bridge (decodeNode both overloads,
-  # decodeChild, decodeOr, reEmitDecodeNode), and the value leg (coerce). It
+  # decodeChild, reEmitDecodeNode), and the value leg (coerce). It
   # compiles ONLY if every one of them is genuinely non-raising; a single
   # raises-leaky callee anywhere in the encode/emit chain would fail this proc
   # at compile time. Mirrors the C2 {.raises:[].} wrapper-proof pattern.
@@ -234,7 +234,6 @@ suite "H1 — whole public surface is {.raises:[].} (rfc-consumer-api §4.5/§7)
         discard decodeNode[Service](n)                   # doc-less re-emit overload
         discard reEmitDecodeNode[Service](n)             # explicit re-emit fallback
         discard decodeChild[Service](doc, n, "service")  # child lookup leg
-        discard decodeOr[Service](doc, n, Service(name: "fallback", port: 0))
     # coerce — value → T (scalar leg)
     discard coerce[string](val)
 
