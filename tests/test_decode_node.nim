@@ -21,6 +21,18 @@ import ../src/node_build   # newNode / addArg / addProp builders for hand-built 
 import ../src/value
 import ../src/kdl_block
 import ../src/pragmas
+import ../src/spans        # Result / ok / err for the kdlScalar hook
+
+# A custom scalar type for the N2f re-emit round-trip hazard pin. The hook pair
+# must be in scope before the `kdl:` block so the derive macro wires it.
+type Hue = object
+  v: uint8
+
+proc kdlEncodeValue(h: Hue): KdlValue = newKdlInt(int64(h.v))
+proc kdlDecodeValue(val: KdlValue, T: typedesc[Hue]): Result[Hue, string] =
+  case val.kind
+  of kvInt: ok[Hue, string](Hue(v: uint8(val.intVal)))
+  else:     err[Hue, string]("expected integer hue")
 
 kdl:
   type Daemon {.kdlNode: "daemon".} = object
@@ -29,6 +41,15 @@ kdl:
 
   type Permissions {.kdlNode: "permissions".} = object
     mode {.kdlArg.}: string
+
+  # N2f round-trip hazard fixtures (rfc §8 N2f): Option/none + kdlScalar.
+  type Server {.kdlNode: "server".} = object
+    host {.kdlArg.}: string
+    label {.kdlProp.}: Option[string]   # absent → none; present → some
+    port {.kdlProp.}: Option[int]
+
+  type Swatch {.kdlNode: "swatch".} = object
+    shade {.kdlScalar, kdlProp.}: Hue   # custom scalar through the re-emit path
 
 proc parseDoc(src: string): KdlDoc =
   let r = parse(src)
@@ -119,3 +140,69 @@ suite "decodeNode — hand-built node re-emit fallback":
     let r = reEmitDecodeNode[Permissions](n)
     check r.isOk
     check r.get.mode == "ro"
+
+suite "decodeNode[T](node) — bare doc-less overload (N2f)":
+
+  test "bare overload on a hand-built node returns the right value":
+    # No doc, no source span — the overload routes through reEmitDecodeNode.
+    let n = newNode("daemon")
+    check n.span.length == 0
+    n.addArg(newKdlString("web"))
+    n.setProp("port", newKdlInt(80))
+    let r = decodeNode[Daemon](n)   # <-- the N2f overload (no doc arg)
+    check r.isOk
+    check r.get.name == "web"
+    check r.get.port == 80
+
+  test "bare overload agrees with the (doc, node) hand-built fallback":
+    let n = newNode("permissions")
+    n.addArg(newKdlString("rw"))
+    let viaBare = decodeNode[Permissions](n)
+    let viaDoc  = decodeNode[Permissions](newDoc(), n)  # span.length==0 → same path
+    check viaBare.isOk and viaDoc.isOk
+    check viaBare.get == viaDoc.get
+
+suite "decodeNode[T](node) re-emit round-trip hazard pins (§8 N2f)":
+  # These pin the depth-flagged hazards confined to the re-emit path: a value
+  # built programmatically must survive encode(node) → decode[T] unchanged.
+
+  test "annotation hazard: an annotated arg value round-trips through re-emit":
+    # The arg carries a (type) annotation; the canonical emitter must requote it
+    # so the re-decoded value is identical. The derive vocab reads the value
+    # regardless of annotation, so the pin is that re-emit preserves the value.
+    let n = newNode("daemon")
+    var v = newKdlString("web")
+    v.typeAnnotation = some("hostname")   # annotated arg: (hostname)"web"
+    n.addArg(v)
+    n.setProp("port", newKdlInt(80))
+    let r = decodeNode[Daemon](n)
+    check r.isOk
+    check r.get.name == "web"
+    check r.get.port == 80
+
+  test "Option-none hazard: an absent Option prop materializes as none via re-emit":
+    let n = newNode("server")
+    n.addArg(newKdlString("localhost"))
+    # label + port deliberately absent → must re-emit to no prop → decode to none
+    let r = decodeNode[Server](n)
+    check r.isOk
+    check r.get.host == "localhost"
+    check r.get.label == none(string)
+    check r.get.port == none(int)
+
+  test "Option-some hazard: a present Option prop materializes as some via re-emit":
+    let n = newNode("server")
+    n.addArg(newKdlString("localhost"))
+    n.setProp("label", newKdlString("primary"))
+    n.setProp("port", newKdlInt(8080))
+    let r = decodeNode[Server](n)
+    check r.isOk
+    check r.get.label == some("primary")
+    check r.get.port == some(8080)
+
+  test "kdlScalar hazard: a custom-scalar prop round-trips through the hook + re-emit":
+    let n = newNode("swatch")
+    n.setProp("shade", newKdlInt(200))   # hook decodes int → Hue(v: 200)
+    let r = decodeNode[Swatch](n)
+    check r.isOk
+    check r.get.shade == Hue(v: 200)

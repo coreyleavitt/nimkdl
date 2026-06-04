@@ -219,3 +219,32 @@ proc decodeNode*[T](doc: KdlDoc, node: KdlNode):
     let absErr = r.getErr.rebased(span.offset)
     return err[T, ParseError](absErr.enriched(doc.sourceText, doc.sourcePath))
   r
+
+proc decodeNode*[T](node: KdlNode):
+    Result[T, ParseError] =
+  # TODO(H1): same deferral as `reEmitDecodeNode` / `decodeNode(doc, node)`.
+  # This overload is a thin call into `reEmitDecodeNode[T]`, whose `encode(node)`
+  # transitively infers `raises:[Exception]` (the H1 boundary, rfc §4.5). Left
+  # honestly unconstrained — no CatchableError/Exception escape hatch — until H1
+  # folds the emit chain under {.raises:[].}.
+  ##
+  ## .. warning:: **Doc-less re-emit fallback — lossier than `decodeNode(doc, node)`.**
+  ##   This overload exists for nodes built **programmatically** (no source span:
+  ##   `node.span.length == 0`). It re-emits the node to canonical KDL text via
+  ##   `encode(node)` and decodes *that text*, so the result may **differ** from
+  ##   the source-slice `decodeNode(doc, node)` path (rfc-consumer-api §9.3) for:
+  ##
+  ##   - **`kdlScalar` hooks** — the value is re-encoded through `kdlEncodeValue`
+  ##     and re-decoded through `kdlDecodeValue`, a full round-trip rather than a
+  ##     verbatim byte read.
+  ##   - **annotation requoting** — type annotations on values/nodes are
+  ##     re-rendered canonically, not echoed from the original bytes.
+  ##   - **Option / null materialization** — presence/absence is reconstructed
+  ##     from the canonical re-emission, not the original token stream.
+  ##
+  ##   **Use the `(doc, node)` form whenever a parsed doc is in hand** — it reads
+  ##   the node's verbatim original bytes and carries true source line/col on
+  ##   errors. Reserve this bare form for hand-built nodes where no source exists.
+  ##   The §8 N2f round-trip property tests pin these hazards so the path stays
+  ##   honest even though the call site can't see the degradation.
+  reEmitDecodeNode[T](node)
