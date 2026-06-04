@@ -996,3 +996,107 @@ suite "derive_decode — S4 step 2: kdlIgnoreUnknown opt-out":
     let r = kdlDecode(v, f.cursor)
     check r.isOk
     check v.id == "a"
+
+suite "derive_decode — S5: native field defaults":
+
+  type S5Basic {.kdlNode: "c".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int = 8080
+
+  deriveDecode(S5Basic)
+
+  test "absent defaulted prop gets its native default":
+    let f = mkCursor("c \"x\"")
+    var v: S5Basic
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.name == "x"
+    check v.port == 8080
+
+  test "present defaulted prop keeps the wire value (default not applied)":
+    let f = mkCursor("c \"x\" port=9090")
+    var v: S5Basic
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.port == 9090
+
+  type S5Req {.kdlNode: "req".} = object
+    host {.kdlProp.}: string          # required, no default
+    maxRetries {.kdlRename: "max-retries", kdlProp.}: int = 3
+
+  deriveDecode(S5Req)
+
+  test "missing required field still errors AND names it by wire key":
+    let f = mkCursor("req max-retries=5")   # host absent
+    var v: S5Req
+    let r = kdlDecode(v, f.cursor)
+    check r.isErr
+    check r.getErr.code == peTypeMissingRequired
+    check r.getErr.hint.contains("host")
+
+  test "defaulted required-named field absent → default applied, decode ok":
+    let f = mkCursor("req host=\"h\"")      # max-retries absent
+    var v: S5Req
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.host == "h"
+    check v.maxRetries == 3
+
+  # MIXED-ORDER — round-2 slot-vs-declaration misalignment scenario.
+  type S5Mixed {.kdlNode: "mix".} = object
+    a {.kdlProp.}: int                 # required → slot 0
+    b {.kdlProp.}: Option[int]         # optional → slot -1
+    c {.kdlProp.}: int = 7             # defaulted → next real slot
+    d {.kdlProp.}: int                 # required → next real slot
+
+  deriveDecode(S5Mixed)
+
+  test "mixed order: only a + d present → c defaulted, b none, no misassignment":
+    let f = mkCursor("mix a=1 d=4")
+    var v: S5Mixed
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.a == 1
+    check v.b.isNone
+    check v.c == 7
+    check v.d == 4
+
+  test "mixed order: c present on the wire keeps its value":
+    let f = mkCursor("mix a=1 d=4 c=99")
+    var v: S5Mixed
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.c == 99
+
+  test "a const-call / noSideEffect default compiles (positive control)":
+    # A literal default and a {.noSideEffect.}/func-headed call are both
+    # VM-evaluable, so the embed[T] guard must accept them.
+    check compiles((
+      block:
+        func defPort(): int {.noSideEffect.} = 8080
+        type OkDef {.kdlNode: "okdef".} = object
+          name {.kdlArg.}: string
+          port {.kdlProp.}: int = defPort()
+        deriveDecode(OkDef)
+    ))
+
+  test "a VM-incompatible (FFI) default is rejected by Nim's own folding":
+    # §4 S5 specified a Call-head {.noSideEffect.} guard inside deriveDecode.
+    # That guard is unreachable: by the time the typed macro inspects T, Nim
+    # has already const-folded every field-default initializer in the NimVM
+    # (a CT-evaluable side-effecting call folds to its literal result). A
+    # genuinely VM-incompatible default — e.g. one calling an importc proc —
+    # fails at the `type` definition itself, strictly before deriveDecode
+    # runs. So the embed[T]/VM-safety property is structurally enforced one
+    # phase earlier by the language. This pins that the rejection still
+    # happens (just not via our macro). PINNED.
+    check not compiles((
+      block:
+        proc ffiDefault(): int =
+          var f = open("/tmp/nkdl_should_never_open", fmWrite)  # importc at CT
+          result = 1
+        type BadDef {.kdlNode: "baddef".} = object
+          name {.kdlArg.}: string
+          port {.kdlProp.}: int = ffiDefault()
+        deriveDecode(BadDef)
+    ))

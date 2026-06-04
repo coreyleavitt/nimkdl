@@ -265,15 +265,24 @@ macro deriveDecode*(T: typedesc): untyped =
   # S8 flatten passes a compound base). requiresUncheckedAssign = true only
   # for the variant discriminator field; a discriminator write must stay
   # wrapped in `{.cast(uncheckedAssign).}` at every emit site (rfc S0b).
+  # `default` (S5): the field's native default expression (`field = expr`),
+  # or `nnkEmpty` when absent. A defaulted field claims a slot WITHOUT
+  # entering requiredMask, and its default is spliced post-decode iff the
+  # field's slot bit stayed unset (absent from the wire). `isBranchField`
+  # excludes variant-branch fields from the global default post-loop
+  # (assigning an inactive branch's field corrupts the object).
   type ArgField = tuple[name: string, typ: NimNode, reservedTag: string,
                         scalar: bool, pathExpr: NimNode,
-                        requiresUncheckedAssign: bool]
+                        requiresUncheckedAssign: bool,
+                        default: NimNode, isBranchField: bool]
   type PropField = tuple[name: string, typ: NimNode, wireKey: string,
                          reservedTag: string, scalar: bool, pathExpr: NimNode,
-                         requiresUncheckedAssign: bool]
+                         requiresUncheckedAssign: bool,
+                         default: NimNode, isBranchField: bool]
   type ChildField = tuple[name: string, elemType: NimNode,
                           kind: ChildKind, wireName: string, pathExpr: NimNode,
-                          requiresUncheckedAssign: bool]
+                          requiresUncheckedAssign: bool,
+                          default: NimNode, isBranchField: bool]
   var argFields: seq[ArgField]
   var propFields: seq[PropField]              # plain (non-variant) props
   var childFields: seq[ChildField]            # plain children
@@ -298,7 +307,28 @@ macro deriveDecode*(T: typedesc): untyped =
                 argSink: var seq[ArgField];
                 propSink: var seq[PropField];
                 childSink: var seq[ChildField];
+                fieldDefault: NimNode = nil;
+                isBranchField: bool = false;
                 baseExpr: NimNode = nil) =
+    # S5: the field's native default (`field = expr`), `nnkEmpty`/nil when
+    # none. The macro splices it post-decode for top-level fields absent
+    # from the wire.
+    #
+    # embed[T]/VM safety: the RFC (§4 S5) called for a Call/Command-head
+    # {.noSideEffect.} guard here. That guard is unreachable as specced —
+    # by the time deriveDecode runs on a typed `T`, Nim has already
+    # const-folded every object-field default initializer (verified:
+    # `port: int = sideEffecting()` arrives as `nnkIntLit 1`, the VM having
+    # evaluated the call at type-definition time). A default that is *not*
+    # VM-evaluable (e.g. an FFI/importc call) fails at the `type` definition
+    # itself with "cannot 'importc' ... at compile time", strictly before
+    # this macro sees it. So the VM-safety property the guard wanted is
+    # already structurally enforced one phase earlier by Nim's own folding;
+    # emitting a guard that can never fire would be dead code. The defaults
+    # we receive are always VM-evaluable literals, exactly what embed[T]
+    # needs.
+    let fDefault =
+      if fieldDefault == nil: newEmptyNode() else: fieldDefault
     # The field's LHS access expression. With no `baseExpr` (the S0b/default
     # path) this is `v.<field>`, byte-identical to the prior emit-site
     # `quote do: vSym.fIdent`. S8 flatten supplies a compound base prefix.
@@ -352,7 +382,8 @@ macro deriveDecode*(T: typedesc): untyped =
     if hasPragma(pragmas, "kdlArg"):
       argSink.add((name: fieldName, typ: fieldType, reservedTag: reservedTag,
                    scalar: scalar, pathExpr: pathExpr,
-                   requiresUncheckedAssign: needsUnchecked))
+                   requiresUncheckedAssign: needsUnchecked,
+                   default: fDefault, isBranchField: isBranchField))
     elif hasPragma(pragmas, "kdlProp") or (scalar and
          not hasPragma(pragmas, "kdlChild")):
       # S2b: kdlRename wins; else the type-level convention is applied.
@@ -360,7 +391,8 @@ macro deriveDecode*(T: typedesc): untyped =
       propSink.add((name: fieldName, typ: fieldType, wireKey: wireKey,
                     reservedTag: reservedTag, scalar: scalar,
                     pathExpr: pathExpr,
-                    requiresUncheckedAssign: needsUnchecked))
+                    requiresUncheckedAssign: needsUnchecked,
+                    default: fDefault, isBranchField: isBranchField))
     elif hasPragma(pragmas, "kdlChild"):
       var kind: ChildKind
       var elemType: NimNode
@@ -377,7 +409,8 @@ macro deriveDecode*(T: typedesc): untyped =
         elemType = fieldType
       childSink.add((name: fieldName, elemType: elemType, kind: kind,
                      wireName: nodeNameOf(elemType), pathExpr: pathExpr,
-                     requiresUncheckedAssign: needsUnchecked))
+                     requiresUncheckedAssign: needsUnchecked,
+                     default: fDefault, isBranchField: isBranchField))
     else:
       # No routing pragma — infer the slot from the field type (rfc §8.2,
       # name-preserving). Previously this fell through silently, dropping the
@@ -388,7 +421,8 @@ macro deriveDecode*(T: typedesc): untyped =
         if isObjectTypeResolved(ft[1]):
           childSink.add((name: fieldName, elemType: ft[1], kind: ckSeq,
                          wireName: nodeNameOf(ft[1]), pathExpr: pathExpr,
-                         requiresUncheckedAssign: needsUnchecked))
+                         requiresUncheckedAssign: needsUnchecked,
+                         default: fDefault, isBranchField: isBranchField))
         else:
           error("deriveDecode: cannot infer a KDL slot for seq field '" &
                 fieldName & "' of primitive elements — annotate it with " &
@@ -399,7 +433,8 @@ macro deriveDecode*(T: typedesc): untyped =
         let kind = if isOptionType(fieldType): ckOption else: ckSingle
         childSink.add((name: fieldName, elemType: ft, kind: kind,
                        wireName: nodeNameOf(ft), pathExpr: pathExpr,
-                       requiresUncheckedAssign: needsUnchecked))
+                       requiresUncheckedAssign: needsUnchecked,
+                       default: fDefault, isBranchField: isBranchField))
       else:
         # primitive / enum (incl. Option[primitive]) → prop; key via
         # wireKeyOf (S2b: type-level convention, or field name verbatim).
@@ -407,11 +442,13 @@ macro deriveDecode*(T: typedesc): untyped =
                       wireKey: wireKeyOf(fieldName, pragmas, typeConvention),
                       reservedTag: reservedTag, scalar: false,
                       pathExpr: pathExpr,
-                      requiresUncheckedAssign: needsUnchecked))
+                      requiresUncheckedAssign: needsUnchecked,
+                      default: fDefault, isBranchField: isBranchField))
 
   let recList = objectRecList(typeSym)
-  for (fieldName, fieldType, pragmas, _) in regularFields(recList):
-    classify(fieldName, fieldType, pragmas, argFields, propFields, childFields)
+  for (fieldName, fieldType, pragmas, fieldDefault) in regularFields(recList):
+    classify(fieldName, fieldType, pragmas, argFields, propFields, childFields,
+             fieldDefault, isBranchField = false)
   let recCase = findRecCase(recList)
   if recCase != nil:
     hasVariant = true
@@ -434,8 +471,9 @@ macro deriveDecode*(T: typedesc): untyped =
         elif branch.kind == nnkElse:   branch[0]
         else: newEmptyNode()
       if branchRecList.kind == nnkRecList:
-        for (bf, bt, bp, _) in regularFields(branchRecList):
-          classify(bf, bt, bp, args2, props2, children2)
+        for (bf, bt, bp, bd) in regularFields(branchRecList):
+          classify(bf, bt, bp, args2, props2, children2, bd,
+                   isBranchField = true)
       if args2.len > 0 or children2.len > 0:
         error("deriveDecode: branch fields other than kdlProp not yet " &
               "supported (D8 cycle covers kdlProp per-branch)")
@@ -458,14 +496,26 @@ macro deriveDecode*(T: typedesc): untyped =
   let seenSym = ident("__slotsSeen")
   var requiredMask: uint64 = 0
   var nextSlot = 0
-  proc claimSlot(): int =
+  # S5: slot→wireKey for REQUIRED slots only — drives the named missing-required
+  # error (scan for the first unset required slot, report its wire key).
+  var requiredSlotKeys: seq[tuple[slot: int, wireKey: string]]
+  # S5: defaulted top-level fields, indexed by SLOT (not declaration order —
+  # optional fields get slot -1 and would misalign a declaration-indexed array).
+  # Post-decode: for each, if its slot bit stayed unset, splice the default.
+  var defaultedFields: seq[tuple[slot: int, pathExpr: NimNode, defaultExpr: NimNode]]
+  proc claimSlot(required: bool): int =
     if nextSlot >= 64:
-      # The required-field bitmap is a uint64; slots past 63 would silently lose
-      # their required bit (missing-required would never fire). Fail loud (§8.7).
-      error("deriveDecode: type has more than 64 required fields — make some " &
-            "Option[T] / {.kdlSkip.}, or split the type")
+      # The bitmap is a uint64; slots past 63 would silently lose their bit
+      # (missing-required would never fire / a default would never apply).
+      # Fail loud (§8.7).
+      error("deriveDecode: type has more than 64 required/defaulted fields — " &
+            "make some Option[T] / {.kdlSkip.}, or split the type")
     result = nextSlot
-    requiredMask = requiredMask or (1'u64 shl result)
+    # A defaulted field (required = false) still claims a slot so seenSym
+    # tracks whether it appeared — but its bit stays OUT of requiredMask, so
+    # its absence is not a missing-required error (it gets the default instead).
+    if required:
+      requiredMask = requiredMask or (1'u64 shl result)
     inc nextSlot
 
   proc isOptionalKdlArgOrProp(typ: NimNode): bool =
@@ -474,25 +524,52 @@ macro deriveDecode*(T: typedesc): untyped =
   # Pre-allocate slots in declaration order. Discriminator field doesn't
   # need a required-slot — the case-object machinery itself ensures the
   # discriminator is set; the cursor either provided it or the decode
-  # already errored at the type level.
+  # already errored at the type level. A field carrying a native default
+  # (S5) claims a non-required slot and registers in `defaultedFields`
+  # (top-level only — branch defaults apply inside the per-branch path).
+  proc hasDefault(d: NimNode): bool = d != nil and d.kind != nnkEmpty
   var argSlots: seq[int]
-  for (fName, fType, _, _, _, _) in argFields:
-    if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
+  for af in argFields:
+    if isOptionalKdlArgOrProp(af.typ) or (hasVariant and af.name == discName):
       argSlots.add(-1)
+    elif hasDefault(af.default):
+      let s = claimSlot(required = false)
+      argSlots.add(s)
+      if not af.isBranchField:
+        defaultedFields.add((slot: s, pathExpr: af.pathExpr,
+                             defaultExpr: af.default))
     else:
-      argSlots.add(claimSlot())
+      let s = claimSlot(required = true)
+      argSlots.add(s)
+      requiredSlotKeys.add((slot: s, wireKey: af.name))  # positional → field name
   var propSlots: seq[int]
-  for (fName, fType, _, _, _, _, _) in propFields:
-    if isOptionalKdlArgOrProp(fType) or (hasVariant and fName == discName):
+  for pf in propFields:
+    if isOptionalKdlArgOrProp(pf.typ) or (hasVariant and pf.name == discName):
       propSlots.add(-1)
+    elif hasDefault(pf.default):
+      let s = claimSlot(required = false)
+      propSlots.add(s)
+      if not pf.isBranchField:
+        defaultedFields.add((slot: s, pathExpr: pf.pathExpr,
+                             defaultExpr: pf.default))
     else:
-      propSlots.add(claimSlot())
+      let s = claimSlot(required = true)
+      propSlots.add(s)
+      requiredSlotKeys.add((slot: s, wireKey: pf.wireKey))
   var childSlots: seq[int]
-  for (_, _, kind, _, _, _) in childFields:
-    if kind in {ckSeq, ckOption}:
+  for cf in childFields:
+    if cf.kind in {ckSeq, ckOption}:
       childSlots.add(-1)  # empty seq / absent Option is fine
+    elif hasDefault(cf.default):
+      let s = claimSlot(required = false)
+      childSlots.add(s)
+      if not cf.isBranchField:
+        defaultedFields.add((slot: s, pathExpr: cf.pathExpr,
+                             defaultExpr: cf.default))
     else:
-      childSlots.add(claimSlot())
+      let s = claimSlot(required = true)
+      childSlots.add(s)
+      requiredSlotKeys.add((slot: s, wireKey: cf.wireName))
 
   proc markSlot(slot: int): NimNode =
     if slot < 0:
@@ -744,6 +821,41 @@ macro deriveDecode*(T: typedesc): untyped =
 
   let requiredMaskLit = newLit(requiredMask)
   let wireNameLit = newStrLitNode(wireName)
+
+  # S5: name the first unset required field by its WIRE key (post-rename).
+  # `__missing` is computed by an if-elif scan over required slots in slot
+  # order; the macro folds the per-slot bit test. Falls back to "" only if
+  # the scan finds none (unreachable when the mask compare already failed).
+  let missingSym = ident("__missing")
+  var missingScan = newStmtList()
+  block:
+    var ifNode = newNimNode(nnkIfStmt)
+    for rk in requiredSlotKeys:
+      let bit = newLit(1'u64 shl rk.slot)
+      let nameLit = newStrLitNode(rk.wireKey)
+      let cond = quote do: (`seenSym` and `bit`) == 0'u64
+      ifNode.add(newNimNode(nnkElifBranch).add(cond).add(
+        newAssignment(missingSym, nameLit)))
+    if ifNode.len > 0:
+      ifNode.add(newNimNode(nnkElse).add(
+        newAssignment(missingSym, newStrLitNode(""))))
+      missingScan.add(ifNode)
+    else:
+      missingScan.add(newAssignment(missingSym, newStrLitNode("")))
+
+  # S5: apply native defaults to top-level fields absent from the wire. By
+  # SLOT (each field's own bit), AFTER the required-validation returns (so a
+  # genuinely-missing required field still errors first). Branch fields are
+  # excluded (assigning an inactive branch's field corrupts the object).
+  var defaultApply = newStmtList()
+  for f in defaultedFields:
+    let bit = newLit(1'u64 shl f.slot)
+    let pathExpr = f.pathExpr
+    let defExpr = f.defaultExpr
+    defaultApply.add(quote do:
+      if (`seenSym` and `bit`) == 0'u64:
+        `pathExpr` = `defExpr`)
+
   let body = quote do:
     block:
       var `seenSym`: uint64 = 0
@@ -836,13 +948,20 @@ macro deriveDecode*(T: typedesc): untyped =
                       "unexpected EOF inside node"))
         else:
           discard
-      # Required-field validation. Each non-Option / non-seq field set
-      # its bit during decode; if the bitmap doesn't cover the mask,
-      # report the first missing field.
+      # Required-field validation. Each non-Option / non-seq / non-defaulted
+      # field set its bit during decode; if the bitmap doesn't cover the
+      # required mask, name the first missing field by its wire key (S5).
       if (`seenSym` and `requiredMaskLit`) != `requiredMaskLit`:
+        var `missingSym`: string
+        `missingScan`
         return err[void, ParseError](
           initError(peTypeMissingRequired, `evSym`.span,
-                    "missing required field"))
+                    "missing required field '" & `missingSym` & "'"))
+      # S5: apply native defaults for any defaulted field absent from the
+      # wire (its slot bit stayed unset). Runs only after required-validation
+      # passes, so ordering matches the spec (defaults never mask a missing
+      # required field).
+      `defaultApply`
       return ok(void, ParseError)
 
   result = newProc(

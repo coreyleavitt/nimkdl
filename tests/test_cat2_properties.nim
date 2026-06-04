@@ -37,6 +37,13 @@ kdl:
     name {.kdlArg.}: string
     items {.kdlChild.}: seq[Item]
 
+  # S5: a type with a native field default. `port` is required-shaped (plain
+  # int) but carries a default, so its absence on the wire yields 8080 rather
+  # than a missing-required error.
+  type Defaulted {.kdlNode: "dfl".} = object
+    name {.kdlArg.}: string
+    port {.kdlProp.}: int = 8080
+
 suite "P7 — typed-T encode-decode identity (forAll)":
 
   property "Service round-trips for any (name, port)":
@@ -152,3 +159,20 @@ suite "P9b — slashdash injection invariance (typed decode)":
     ensure r.get.items.len == nReal
     for i in 0 ..< nReal:
       ensure r.get.items[i].label == "r" & $i
+
+suite "S5 — native field defaults (forAll)":
+
+  property "an absent defaulted prop yields its default; present keeps wire value":
+    # Restrict the name to a quote/backslash-free ASCII range so the
+    # hand-built wire string needs no KDL escaping — the property under test
+    # is default-application, not string escaping (covered by P7).
+    with Settings(maxExamples: 300, testId: "s5-defaulted")
+    given nm in strings(intervals([(0x61'i32, 0x7a'i32)]), 1, 24),
+          present in booleans(), port in integers(0, 65535)
+    var src = "dfl \"" & nm & "\""
+    if present: src.add " port=" & $port
+    let r = decode[Defaulted](src)
+    ensure r.isOk
+    ensure r.get.name == nm
+    if present: ensure r.get.port == port
+    else:       ensure r.get.port == 8080
