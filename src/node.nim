@@ -42,6 +42,14 @@ type
   KdlDoc* = ref object
     sourcePath*: string
     sourceText*: string
+    lineMap*: LineMap
+      ## Offset→(line,col) map over `sourceText`, built **once** when the doc is
+      ## constructed (`setSource`). Node-by-node decode (`decodeNode(doc, node)`,
+      ## `decodeChild`) enriches errors against this cached map instead of
+      ## rebuilding it per erroring node — turning O(N·n) into O(n + N·log n)
+      ## (review #3). Empty (`lineStarts == @[]`) for hand-built docs that never
+      ## ran through `setSource`; the decode path falls back to its no-source
+      ## re-emit branch for hand-built nodes anyway, so those never read it.
     preserveFormat*: bool
     rootNodes*: seq[KdlNode]
 
@@ -53,6 +61,14 @@ func newNode*(name: string): KdlNode =
 
 func newDoc*(sourcePath = "<input>"): KdlDoc =
   KdlDoc(sourcePath: sourcePath, rootNodes: @[])
+
+func setSource*(doc: KdlDoc, sourceText: string) =
+  ## Attach the doc's verbatim source and build its `LineMap` **once**, at
+  ## construction (node_build). The single source of truth for `doc.sourceText`
+  ## + `doc.lineMap` staying in lockstep: any code that wants the cached map
+  ## must set the text through here, never by assigning `sourceText` directly.
+  doc.sourceText = sourceText
+  doc.lineMap = buildLineMap(sourceText)
 
 # ── argument accessors (doc-free) ────────────────────────────────────────────
 

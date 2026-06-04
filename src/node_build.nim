@@ -38,7 +38,7 @@ proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
     Result[KdlDoc, ParseError] {.noSideEffect.} =
   ## Fold cursor events into a self-contained KdlDoc via an explicit node stack.
   var doc = newDoc(sourcePath)
-  doc.sourceText = c.source
+  doc.setSource(c.source)
   var stack: seq[KdlNode] = @[]
   var slashdashDepth = 0
   while true:
@@ -132,7 +132,7 @@ proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
   ## collected and the cursor recovers; the returned doc is partial — it holds
   ## whatever the recovered parses produced. Mirrors `doc_build.buildDocAll`.
   var doc = newDoc(sourcePath)
-  doc.sourceText = c.source
+  doc.setSource(c.source)
   result.value = doc
   var stack: seq[KdlNode] = @[]
   var slashdashDepth = 0

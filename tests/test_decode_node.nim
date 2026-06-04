@@ -102,6 +102,27 @@ suite "decodeNode error rebasing — absolute file position":
     check r.isErr
     check r.getErr.line == 3
 
+  test "two errors from the SAME doc each report their own line (cached LineMap, review #3)":
+    # Regression for the per-doc LineMap cache (review #3): decodeNode/decodeChild
+    # now enrich against `doc.lineMap` (built once) instead of rescanning
+    # `doc.sourceText` per erroring node. A stale or wrongly-shared map would make
+    # both nodes report the same (or a fixed) line. Node 1 errors on line 1, node 2
+    # on line 2 — independently — so the cached map must serve both correctly.
+    let src = "permissions 123\n" &           # mode wants string, gets int → line 1
+              "daemon \"b\" port=\"oops\"\n"   # port wants int, gets string → line 2
+    let d = parseDoc(src)
+    let r1 = decodeNode[Permissions](d, d.nodes[0])
+    let r2 = decodeNode[Daemon](d, d.nodes[1])
+    check r1.isErr
+    check r2.isErr
+    check r1.getErr.line == 1
+    check r2.getErr.line == 2
+    check r1.getErr.sourcePath == d.sourcePath
+    check r2.getErr.sourcePath == d.sourcePath
+    # And the cached map yields the SAME coordinates the per-source scan would:
+    # the absolute span offset of node 2's error sits inside line 2.
+    check r2.getErr.span.offset >= len("permissions 123\n")
+
 suite "decodeNode cross-check (§8 N2)":
 
   test "decodeNode equals decode of the node's source slice":

@@ -273,7 +273,11 @@ proc decodeNode*[T](doc: KdlDoc, node: KdlNode):
     # THEN enrich (compute line/col from the absolute offset). This order is
     # mandatory (§4.4): enriching before rebasing yields slice-local line/col.
     let absErr = r.getErr.rebased(span.offset)
-    return err[T, ParseError](absErr.enriched(doc.sourceText, doc.sourcePath))
+    # Enrich against the doc's once-built LineMap (review #3): node-by-node
+    # decode reuses `doc.lineMap` instead of rescanning `doc.sourceText` per
+    # erroring node — O(n + N·log n), not O(N·n). Coordinates are identical to
+    # the source-text overload (both `lineColOf` the same absolute offset).
+    return err[T, ParseError](absErr.enriched(doc.lineMap, doc.sourcePath))
   r
 
 proc decodeNode*[T](node: KdlNode):
@@ -319,7 +323,7 @@ proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string):
     let e = initError(
       peTypeMissingRequired, parent.span,
       "no child named '" & childName & "' in node '" & parent.name & "'")
-    return err[T, ParseError](e.enriched(doc.sourceText, doc.sourcePath))
+    return err[T, ParseError](e.enriched(doc.lineMap, doc.sourcePath))
   decodeNode[T](doc, kid)
 
 proc coerce*[T](val: KdlValue): Result[T, ParseError] {.noSideEffect, raises: [].} =

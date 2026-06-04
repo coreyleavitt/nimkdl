@@ -275,6 +275,20 @@ func enriched*(err: ParseError, sourceText: string, sourcePath: string):
   result.col = col
   result.sourcePath = sourcePath
 
+func enriched*(err: ParseError, lineMap: LineMap, sourcePath: string):
+    ParseError {.raises: [].} =
+  ## Same as `enriched(err, sourceText, sourcePath)` but reuses a **prebuilt**
+  ## `LineMap` instead of scanning the source again. The node-by-node decode
+  ## surface (`decodeNode(doc, node)`, `decodeChild`) calls this against the
+  ## doc's once-built `doc.lineMap`, so decoding N nodes of an n-byte doc costs
+  ## O(n + N·log n), not O(N·n) (review #3). Coordinates are identical to the
+  ## source-text overload by construction — both compute `lineColOf(offset)`.
+  result = err
+  let (line, col) = lineMap.lineColOf(err.span.offset)
+  result.line = line
+  result.col = col
+  result.sourcePath = sourcePath
+
 func rebased*(err: ParseError, delta: int): ParseError {.raises: [].} =
   ## Return a copy whose span offset is shifted by `delta`. Used by N2 to turn
   ## a slice-local error offset into an absolute offset in the owning doc's
