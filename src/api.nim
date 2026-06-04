@@ -21,6 +21,8 @@
 ## `kdlDecode` is itself pure. NimVM interprets the entire chain, so
 ## `embed[T]` is a one-line wrapper.
 
+import std/macros  # `error` — compile-time {.error.} emission for embed/embedFile (D1)
+
 import ./cursor
 import ./derive_decode  # for kdlDecode mixin resolution + Result/ParseError
 import ./emitter
@@ -174,20 +176,54 @@ proc decodeAll*[T](src: string, sourcePath = "<input>"):
       values.add(elem)
   Parsed[T](value: values, errors: errors)
 
-proc embed*[T](src: static[string]): T {.raises: [].} =
+proc embed*[T](src: static[string], sourcePath: static[string] = "<embed>"): T {.raises: [].} =
   ## Compile-time decode of a static KDL source string into `T`. Thin
   ## delegating wrapper over `decode[T]` — single canonical compile-
   ## time decode path. `const cfg = embed[Service](kdlSrc)` materializes
   ## a constant value baked into the binary with zero runtime parse
   ## cost.
   ##
-  ## On parse error the wrapped Result's `.get` raises (defect at run
-  ## time; `ValueError` propagates as a CT error in VM context). The
-  ## ParseError's diagnostic is preserved via `decode[T]` for surface
-  ## tools that want the structured value.
-  let r = decode[T](src)
-  doAssert r.isOk, "embed[T]: " & (if r.isErr: r.getErr.hint else: "")
+  ## `src` is **KDL source content** (not a path). For the path form use
+  ## `embedFile[T](path)`, which staticReads the file and threads the real
+  ## filename as `sourcePath` for attribution.
+  ##
+  ## On a parse/type error the build FAILS at compile time with a caret
+  ## diagnostic (`formatError`) pointing at the offending span — a bad
+  ## embedded literal is a build error, never a runtime defect.
+  let r = decode[T](src, sourcePath)
+  if r.isErr:
+    error("embed[" & $T & "] failed to decode static KDL:\n" &
+          formatError(r.getErr, src, sourcePath))
   r.get
+
+macro embedFileImpl(T: typedesc, path: static[string]): untyped =
+  ## Implementation core of `embedFile` (see the `template` below). Built
+  ## as a macro so the generated `staticRead(path)` node inherits the
+  ## **call site's** line info: `staticRead` resolves its path relative to
+  ## the file where the call node lexically lives, and a hand-built node
+  ## carries the expansion (call) site, not `api.nim`. A `quote do` here
+  ## would re-stamp nodes with `api.nim`'s line info and resolve the path
+  ## relative to `src/` (wrong). Emits `embed[T](staticRead(path), path)`.
+  let read = newCall(ident"staticRead", newLit(path))
+  result = newTree(nnkCall,
+    newTree(nnkBracketExpr, ident"embed", T),
+    read,
+    newLit(path))
+
+template embedFile*[T](path: static[string]): T =
+  ## Compile-time read + decode of the KDL file at `path` into `T`.
+  ## `const cfg = embedFile[Config]("config.kdl")` bakes the parsed value
+  ## into the binary with zero runtime cost. Expands (via `embedFileImpl`)
+  ## to `embed[T](staticRead(path), path)`.
+  ##
+  ## `path` resolves **relative to the file invoking `embedFile`** (Nim's
+  ## `staticRead` semantics, preserved through the macro's call-site line
+  ## info — verified D1). The real filename is threaded as `sourcePath`,
+  ## so a decode failure's caret diagnostic names the source file.
+  ##
+  ## Distinct from `embed[T]` by NAME: `embed` = content, `embedFile` =
+  ## path. No "is this string a path?" heuristic.
+  embedFileImpl(T, path)
 
 proc reEmitDecodeNode*[T](node: KdlNode):
     Result[T, ParseError] =

@@ -79,6 +79,11 @@ const jobOk = embed[Job]("job \"compaction\" state=\"ok\"")
 const msgText = embed[Msg]("msg body=\"hi\"")
 const msgNum = embed[Msg]("msg value=5")
 
+# --- D1: embedFile[T] — compile-time staticRead + decode ---
+# Path is relative to THIS file (staticRead/gorge semantics), so the
+# fixture under tests/fixtures resolves as "fixtures/embed_service.kdl".
+const svcFromFile = embedFile[Service]("fixtures/embed_service.kdl")
+
 suite "embed[T] — compile-time decode":
 
   test "simplest single-field type":
@@ -110,3 +115,8 @@ suite "embed[T] — compile-time decode":
     check msgText.body == "hi"
     check msgNum.kind == plNum
     check msgNum.value == 5
+
+  test "embedFile[T] staticReads + decodes a fixture at compile time (D1)":
+    check svcFromFile.name == "web"
+    check svcFromFile.port == 80
+    check svcFromFile.enabled == true
