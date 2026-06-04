@@ -60,6 +60,7 @@ benchmarks/typed_roundtrip
 tests/*probe*
 tests/test_*[^.nim]
 benchmarks/spike_bytesEq
+nimcache_test/
 
 # Rust cross-impl adapter build artifacts
 conformance/adapters/kdl-rs/target/
