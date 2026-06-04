@@ -132,6 +132,24 @@ suite "decodeAll[seq[T]] — multi-error":
     check res.isComplete
     check res.value.len == 2
 
+  test "two erroring nodes both report correct absolute line/col (review #3-residual)":
+    # Errors on line 2 and line 4. The LineMap is built once before the loop,
+    # not per error; coordinates must still be exact for BOTH.
+    let src = "service \"web\" port=80\n" &      # line 1 — ok
+              "service \"api\" port=notanint\n" & # line 2 — bad value
+              "service \"db\" port=5432\n" &      # line 3 — ok
+              "service \"cache\" port=alsobad\n"  # line 4 — bad value
+    let res = decodeAll[seq[Service]](src, "svc.kdl")
+    check res.errors.len == 2
+    check res.errors[0].line == 2
+    check res.errors[0].col > 0
+    check res.errors[0].sourcePath == "svc.kdl"
+    check res.errors[1].line == 4
+    check res.errors[1].col > 0
+    check res.errors[1].sourcePath == "svc.kdl"
+    # The two good nodes still land in the partial value.
+    check res.value.len == 2
+
 suite "C1 — source attribution (sourcePath param)":
 
   test "decode threads sourcePath into the error":

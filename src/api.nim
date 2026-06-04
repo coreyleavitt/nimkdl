@@ -155,13 +155,20 @@ proc decodeAll*[T](src: string, sourcePath = "<input>"):
   var c = initStringCursor(addr stream, src, cmAccumulating)
   var values: T = @[]
   var errors: seq[ParseError] = @[]
+  # Build the LineMap ONCE over `src`, not per erroring node (review #3-residual):
+  # the per-error `enriched(src, ...)` overload rescans the whole source on each
+  # call, so an error-dense source paid O(N·n). Enrich each error through the
+  # prebuilt-map overload instead — O(n + N·log n). Coordinates are identical
+  # (both compute `lineColOf` over the same absolute offset). This mirrors the
+  # per-doc cached LineMap the node-by-node path already uses (review #3).
+  let lm = buildLineMap(src)
   while c.peek.kind != ceEof:
     let ck = c.pos
     var elem: Elem
     let r = kdlDecode(elem, c)
     if r.isErr:
       # Public boundary: enrich with line/col + sourcePath (rfc §4.4).
-      errors.add(r.getErr.enriched(src, sourcePath))
+      errors.add(r.getErr.enriched(lm, sourcePath))
       # kdlDecode may have left the cursor mid-node. Replay from the
       # checkpoint and skip the offending node so we land at the next
       # top-level boundary.
