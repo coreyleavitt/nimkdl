@@ -19,9 +19,10 @@ let kdl = encode(s)
 ```
 
 The `kdl:` block emits `kdlEncode`/`kdlDecode` for each `{.kdlNode.}` type. The
-public entry points are `decode[T](src): Result[T, ParseError]`,
-`encode[T](v): string`, `decodeAll[T](src)` (for `seq[U]`), and `embed[T](staticSrc)`
-(compile-time decode → a baked-in `const`).
+top-level entry points are `decode[T](src): Result[T, ParseError]`,
+`encode[T](v): string`, `decodeAll[T](src)` (for `seq[U]`), and `embed[T](src)`
+(compile-time decode → a baked-in `const`). To decode an **individual DOM node**
+(the heterogeneous-config case) use the typed↔DOM bridge below.
 
 ## Type-level pragmas
 
@@ -104,11 +105,94 @@ token and lifts the error string into a span-accurate `ParseError`.
 `kdlEncodeValue` returns a `KdlValue`; the macro frames it. The hook never touches
 the cursor or the emitter directly.
 
+## Consumer API / typed↔DOM bridge
+
+The whole-source entry points (`decode`/`decodeAll`/`encode`) cover the common
+case. These additional entry points decode an **individual node, child, or
+scalar value** — the heterogeneous-top-level-config case — and attribute errors
+to real source positions. All are `{.raises: [].}`.
+
+### Source attribution
+
+```nim
+proc decode*[T](src: string, sourcePath = "<input>"): Result[T, ParseError]
+proc decodeAll*[T](src: string, sourcePath = "<input>"): Parsed[T]   ## T must be seq[U]
+proc decodeFile*[T](path: string): Result[T, ParseError]
+```
+
+`sourcePath` is the attribution that renders in `$err` (e.g. `"config.kdl"`);
+it does not read a file. `decodeFile[T]` does — it reads `path`, threads the
+filename as `sourcePath`, and converts any I/O failure (missing/unreadable
+path) into a `peIOError` `ParseError` rather than raising. `decodeAll` returns a
+`Parsed[T]` (a partial `value` plus every `error` collected while recovering;
+`isComplete` iff no errors).
+
+### Node / child / value decode
+
+```nim
+proc decodeNode*[T](doc: KdlDoc, node: KdlNode): Result[T, ParseError]
+proc decodeNode*[T](node: KdlNode): Result[T, ParseError]
+proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string): Result[T, ParseError]
+proc decodeOr*[T](doc: KdlDoc, node: KdlNode, fallback: T): T
+proc coerce*[T](val: KdlValue): Result[T, ParseError]
+```
+
+- `decodeNode[T](doc, node)` — decode a single parsed node into `T`. It slices
+  the node's **verbatim original bytes** out of `doc.sourceText` and feeds them
+  to the one decoder, so every pragma above works unchanged and a type error
+  carries the **true file line/col** (not a slice-local offset). The node's name
+  is checked against `{.kdlNode.}`, so `decodeNode[Daemon](doc, n)` errors if
+  `n.name != "daemon"`. Instantiating with a `seq[T]` is a compile error (decode
+  the element type).
+- `decodeNode[T](node)` — doc-less **overload** for nodes built programmatically
+  (no source span). It re-emits the node to canonical KDL via `encode(node)` and
+  decodes *that*, so `kdlScalar` hooks, annotation requoting, and Option/null
+  materialization may differ from the source-slice path. **Use the `(doc, node)`
+  form whenever a parsed doc is in hand**; reserve the bare form for hand-built
+  nodes where no source exists.
+- `decodeChild[T](doc, parent, childName)` — decode `parent`'s **first** child
+  named `childName` (first-wins on duplicates) via `decodeNode`. A missing child
+  is a `peTypeMissingRequired` error naming the child and parent.
+- `decodeOr[T](doc, node, fallback)` — decode `node`, returning `fallback` on
+  **any** error. Never surfaces a `ParseError`.
+- `coerce[T](val)` — coerce a single **scalar** `KdlValue` into `T`: the value
+  leg of the bridge (`string`/`bool`/`int*`/`uint*`/`float*`/`enum`, or a custom
+  type with a `kdlDecodeValue` hook in scope). Instantiating it with an aggregate
+  `T` is a compile error directing you to `decodeNode`/`decode`.
+
+### Self-sufficient errors
+
+`ParseError` carries eager `line`/`col`/`sourcePath` filled at the decode
+boundary, so it is a value that outlives the source string. `$err` renders a
+full one-line location with **no source argument**:
+
+```nim
+echo $err     # config.kdl:14:5: value type mismatch (listen)
+```
+
+The format is `sourcePath:line:col: message (dotted.field.path)`. `formatError(err,
+src, filename)` still renders the multi-line caret diagnostic when you have the
+source in hand. `peIOError` distinguishes an I/O failure from a lex/parse/type
+error.
+
+### `embed` vs `embedFile`
+
+```nim
+proc embed*[T](src: static[string], sourcePath: static[string] = "<embed>"): T
+template embedFile*[T](path: static[string]): T
+```
+
+`embed[T]` takes KDL **source content**; `embedFile[T]` takes a **path**,
+`staticRead`s it (relative to the invoking file), and threads the real filename
+as `sourcePath`. Two distinct names, no "is this a path?" heuristic. Both run the
+full decode in the NimVM and bake a `const`; a parse/type error fails the build
+at compile time with a caret diagnostic (`{.error.}`), never a runtime defect.
+
 ## Notes
 
 - **Duplicate keys** decode last-wins (matching the Cat-3 DOM).
-- **Compile-time decode:** `embed[T](staticSrc)` runs the decoder in the NimVM —
-  including `kdlUntagged` (branch rewind is VM-safe).
+- **Compile-time decode:** `embed[T](src)` / `embedFile[T](path)` run the decoder
+  in the NimVM — including `kdlUntagged` (branch rewind is VM-safe).
 - **Not supported** (compile error directing you to `kdlScalar`): `seq[seq[T]]`,
   `Table[K,V]`, `tuple` fields, `range`/`Natural`/`Positive` bounds, `char`.
 - **`kdlAlias` on a wide (>8-field) type** forces linear prop dispatch instead of

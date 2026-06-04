@@ -42,10 +42,10 @@ for service in r.get:
 The same file can also be embedded at compile time. A parse error then fails `nim c` instead of production:
 
 ```nim
-const builtins = embed[seq[Service]]("services.kdl")
+const builtins = embedFile[seq[Service]]("services.kdl")
 ```
 
-`embed[T]` runs lex + parse + decode inside Nim's VM and emits a `const`. Zero module-init cost; malformed input fails the build.
+`embedFile[T]` `staticRead`s the file and runs lex + parse + decode inside Nim's VM, emitting a `const`. Zero module-init cost; malformed input fails the build. (`embed[T](src)` is the same thing for an in-line KDL **string** rather than a path.)
 
 ## What's in the box
 
@@ -54,12 +54,65 @@ const builtins = embed[seq[Service]]("services.kdl")
 | Parse | `parse(src, preserveFormat = false) -> Result[KdlDoc, ParseError]` | KDL v2 text to AST. `preserveFormat` is opt-in for `emPreserve`. |
 | Encode | `encode(doc) -> string` | Canonical by default. `encode(doc, preserve = true)` (or `encode(doc, emPreserve)`) is byte-lossless; `encode(doc, emPretty)` is indented. (`emCompact`, canonical minimal, is planned — [#26](https://github.com/coreyleavitt/nkdl/issues/26).) |
 | Decode | `decode[T](src) -> Result[T, ParseError]` | Typed decode for types in a `kdl:` block. |
-| Embed | `embed[T]("path")` | `staticRead` plus decode at compile time. Bad input fails the build. |
+| Decode (file) | `decodeFile[T](path) -> Result[T, ParseError]` | Reads `path`, decodes it, attributes errors to the real filename. I/O failure → `peIOError`. |
+| Bridge | `decodeNode[T](doc, node)` / `decodeChild[T]` / `coerce[T]` | Decode an individual DOM node, child, or scalar value into `T`. See [the consumer bridge](#typeddom-bridge). |
+| Embed | `embed[T](src)` / `embedFile[T](path)` | Compile-time decode of KDL **content** (`embed`) or a **file** (`embedFile`, `staticRead` + decode). Bad input fails the build. |
 | Query | `path(items, [pred].chain)` | Compile-time field-checked filter and access. |
 | Reference | `referenceInterpret(src)` | Table-driven independent parser used as differential-test oracle. |
 | Multi-error | `parseAll(src) -> (doc, errors)` | Collects every error and returns a partial doc. |
 
 All visible via `import nkdl`.
+
+## Typed↔DOM bridge
+
+`decode[T]` decodes a whole source into one type. Real configs are
+**heterogeneous**: differently-typed top-level nodes dispatched by name. The
+bridge lets you walk the DOM and decode each node into its own type, while
+keeping **true source line/col** on every error.
+
+```nim
+import nkdl
+
+kdl:
+  type Daemon {.kdlNode: "daemon".} = object
+    listen {.kdlProp.}: int
+  type Permissions {.kdlNode: "permissions".} = object
+    user {.kdlArg.}: string
+
+type Config = object
+  daemon: Daemon
+  perms: Permissions
+
+let doc = parse(readFile("config.kdl"), "config.kdl").get
+var cfg: Config
+for n in doc.nodes:
+  case n.name
+  of "daemon":      cfg.daemon = decodeNode[Daemon](doc, n).get
+  of "permissions": cfg.perms  = decodeNode[Permissions](doc, n).get
+  else: discard
+```
+
+`decodeNode[T](doc, n)` slices the node's **original bytes** out of the doc and
+feeds them to the one decoder — so all the Cat-2 pragmas work unchanged, and a
+type error reports the real file position, not a synthetic offset:
+
+```nim
+let r = decodeNode[Daemon](doc, n)
+if r.isErr:
+  echo r.getErr        # config.kdl:14:5: value type mismatch (listen)
+```
+
+`ParseError` is self-sufficient: `$err` renders `path:line:col: message
+(field.path)` with **no source argument** — the location is filled eagerly at
+the decode boundary, so the error outlives the source string.
+
+| Entry point | Purpose |
+|---|---|
+| `decodeNode[T](doc, node) -> Result[T, ParseError]` | Decode a parsed node from its verbatim source bytes (true line/col on errors). |
+| `decodeNode[T](node) -> Result[T, ParseError]` | Doc-less overload for **hand-built** nodes (re-emits then decodes; lossier — see `derive-reference.md`). |
+| `decodeChild[T](doc, parent, childName) -> Result[T, ParseError]` | Decode `parent`'s first child named `childName`. |
+| `decodeOr[T](doc, node, fallback) -> T` | Decode, or return `fallback` on any error — never raises. |
+| `coerce[T](val: KdlValue) -> Result[T, ParseError]` | Coerce a single scalar `KdlValue` into `T` (the value leg of the bridge). |
 
 ## Spec coverage
 

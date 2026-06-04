@@ -30,7 +30,7 @@
 ## `nim c` rather than production:
 ##
 ## ```nim
-## const builtins = embed[seq[Service]]("services.kdl")
+## const builtins = embedFile[seq[Service]]("services.kdl")
 ## ```
 ##
 ## ## Public API map
@@ -42,9 +42,12 @@
 ## | Cat 3 — multi-error parse | `parseAll(src) -> (doc, errors)` | `parser` |
 ## | Cat 3 — encode DOM → text | `encode(doc) -> string` *(canonical; `encode(doc, preserve = true)` is byte-lossless)* | `node_emit` |
 ## | Cat 2 — typed decode | `decode[T](src) -> Result[T, ParseError]` | `api` |
+## | Cat 2 — decode a file | `decodeFile[T](path) -> Result[T, ParseError]` | `api` |
 ## | Cat 2 — multi-error decode | `decodeAll[T](src) -> Parsed[T]` | `api` |
 ## | Cat 2 — typed encode | `encode[T](v) -> string` | `api` |
-## | Cat 2 — compile-time embed | `embed[T]("path")` | `api` |
+## | Cat 2 — decode a DOM node | `decodeNode[T](doc, node)` / `decodeChild[T]` / `decodeOr[T]` | `api` |
+## | Cat 2 — coerce a scalar value | `coerce[T](val: KdlValue) -> Result[T, ParseError]` | `api` |
+## | Cat 2 — compile-time embed | `embed[T](src)` (content) / `embedFile[T](path)` | `api` |
 ## | Typed query DSL | `path(items, [pred].field.chain)` | `path` |
 ## | Differential oracle | `referenceInterpret(src)` | `grammar` |
 ##
