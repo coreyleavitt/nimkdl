@@ -92,6 +92,12 @@ type
                            ## and exhausted them. Distinct from
                            ## peTypeDiscriminatorBad (a TAGGED variant whose
                            ## explicit discriminator value names no branch).
+    peIOError              = 19  ## the source could not be read from its backing
+                           ## store (e.g. `decodeFile` on a missing/unreadable
+                           ## path). Distinct from every lex/parse/type code:
+                           ## the failure is at the I/O boundary, before any
+                           ## bytes reached the lexer. Consumed by `decodeFile`
+                           ## (rfc-consumer-api C2).
 
   ParseError* = object
     ## Structured error.
@@ -298,6 +304,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peEncodeUnsupported:    "typed encoder does not support this Nim shape"
   of peOther:                "parse error"
   of peTypeNoVariantMatch:   "no untagged-variant branch matched the input"
+  of peIOError:              "could not read source"
 
 func lineSlice(source: string, line: int): string =
   if line < 1: return ""

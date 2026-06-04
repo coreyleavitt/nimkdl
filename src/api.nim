@@ -35,32 +35,35 @@ import ./spans
 
 export spans  # Result, ParseError visible without extra imports
 
-proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect, raises: [].} =
+proc decode*[T](src: string, sourcePath = "<input>"):
+    Result[T, ParseError] {.noSideEffect, raises: [].} =
   ## Parse `src` and decode into a value of type `T`.
   ##
   ## For object types with `{.kdlNode.}`, expects a single top-level
   ## node and returns the decoded value.
   ##
-  ## Returns the first error encountered (single-shot).
+  ## Returns the first error encountered (single-shot). `sourcePath` is the
+  ## attribution that renders in `$err` (e.g. `"config.kdl"`); defaults to
+  ## `"<input>"` for in-memory sources.
   mixin kdlDecode
   var stream = lex(src)
   var c = initStringCursor(addr stream, src)
   # Public boundary: enrich errors with line/col + sourcePath once, here, where
   # `src` is in hand (rfc-consumer-api §4.4). `kdlDecode` produces source-less
-  # errors. `sourcePath` param lands in C1; default `"<input>"` until then.
+  # errors.
   when T is seq:
     type Elem = typeof(default(T)[0])
     var values: T = @[]
     while c.peek.kind != ceEof:
       var elem: Elem
       let r = kdlDecode(elem, c)
-      if r.isErr: return err[T, ParseError](r.getErr.enriched(src, "<input>"))
+      if r.isErr: return err[T, ParseError](r.getErr.enriched(src, sourcePath))
       values.add(elem)
     ok[T, ParseError](values)
   else:
     var v: T
     let r = kdlDecode(v, c)
-    if r.isErr: return err[T, ParseError](r.getErr.enriched(src, "<input>"))
+    if r.isErr: return err[T, ParseError](r.getErr.enriched(src, sourcePath))
     ok[T, ParseError](v)
 
 proc encode*[T](v: T): string =
@@ -87,13 +90,14 @@ proc encode*[T](v: T): string =
     kdlEncode(v, e)
   e.finish()
 
-proc decodeAll*[T](src: string):
-    tuple[value: T, errors: seq[ParseError]] {.noSideEffect, raises: [].} =
+proc decodeAll*[T](src: string, sourcePath = "<input>"):
+    Parsed[T] {.noSideEffect, raises: [].} =
   ## Multi-error variant of `decode[T]`. T must be `seq[U]` — single-
   ## node decodeAll would be the same as `decode`. On a decoder error
   ## for one top-level node, the cursor advances past the offending
-  ## node and decoding continues. Returns the populated partial value
-  ## alongside every error encountered.
+  ## node and decoding continues. Returns a `Parsed[T]` carrying the
+  ## populated partial value alongside every error encountered.
+  ## `sourcePath` attributes each collected error (default `"<input>"`).
   static:
     when not (T is seq):
       {.error: "decodeAll[T] requires T to be a seq[U]. For single-node "
@@ -110,7 +114,7 @@ proc decodeAll*[T](src: string):
     let r = kdlDecode(elem, c)
     if r.isErr:
       # Public boundary: enrich with line/col + sourcePath (rfc §4.4).
-      errors.add(r.getErr.enriched(src, "<input>"))
+      errors.add(r.getErr.enriched(src, sourcePath))
       # kdlDecode may have left the cursor mid-node. Replay from the
       # checkpoint and skip the offending node so we land at the next
       # top-level boundary.
@@ -122,7 +126,7 @@ proc decodeAll*[T](src: string):
       else: discard
     else:
       values.add(elem)
-  (values, errors)
+  Parsed[T](value: values, errors: errors)
 
 proc embed*[T](src: static[string]): T {.raises: [].} =
   ## Compile-time decode of a static KDL source string into `T`. Thin

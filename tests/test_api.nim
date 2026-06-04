@@ -4,6 +4,7 @@
 ## suite per cycle.
 
 import std/unittest
+import std/strutils
 
 import ../src/api
 import ../src/kdl_block
@@ -119,3 +120,31 @@ suite "decodeAll[seq[T]] — multi-error":
     check res.value.len == 2
     check res.value[0].name == "web"
     check res.value[1].name == "api"
+
+  test "decodeAll returns a Parsed[T] (isComplete usable)":
+    let src = "service \"web\" port=80\nservice \"api\" port=443"
+    let res: Parsed[seq[Service]] = decodeAll[seq[Service]](src)
+    check res.isComplete
+    check res.value.len == 2
+
+suite "C1 — source attribution (sourcePath param)":
+
+  test "decode threads sourcePath into the error":
+    let r = decode[seq[Service]](
+      "service \"web\" port=notanint", "config.kdl")
+    check r.isErr
+    let e = r.getErr
+    check e.sourcePath == "config.kdl"
+    check ($e).startsWith("config.kdl:")
+
+  test "decode default sourcePath stays <input>":
+    let r = decode[seq[Service]]("service \"web\" port=notanint")
+    check r.isErr
+    check r.getErr.sourcePath == "<input>"
+
+  test "decodeAll threads sourcePath into every error":
+    let src = "service port=999\n"   # missing required name
+    let res = decodeAll[seq[Service]](src, "svc.kdl")
+    check res.errors.len >= 1
+    for e in res.errors:
+      check e.sourcePath == "svc.kdl"

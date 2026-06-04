@@ -29,10 +29,11 @@ suite "ParseErrorCode — stable integer contract (rfc §10)":
     check ord(peEncodeUnsupported)     == 16
     check ord(peOther)                 == 17
     check ord(peTypeNoVariantMatch)    == 18
+    check ord(peIOError)               == 19
 
-  test "contract bounds (append-only: new codes start at 19)":
+  test "contract bounds (append-only: new codes start at 20)":
     check ParseErrorCode.low.ord == 0
-    check ParseErrorCode.high.ord == 18
+    check ParseErrorCode.high.ord == 19
 
   test "every code renders a non-empty message":
     for c in ParseErrorCode:
