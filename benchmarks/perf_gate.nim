@@ -17,9 +17,13 @@
 ##   valgrind --tool=callgrind --callgrind-out-file=/tmp/cg.out /tmp/perf_gate 800
 ##   callgrind_annotate /tmp/cg.out | head   # total "I refs"
 ##
-## Reference baseline (N=800, post perf-pass, commit 9d6b4ba):
-##   1,054,947,168 I refs  (down −27.9% from the clean Phase-3 baseline of
-##   1,462,759,900). A regression shows up as a rise in this number.
+## Reference baseline (N=800):
+##   961,428,231 I refs @ commit d644785 (self-contained-node core +
+##   derive-vocabulary RFC). The derive-vocabulary RFC added 0 I refs vs the
+##   pre-RFC commit 54676c8 — identical count, since a type using no new
+##   pragmas compiles to identical code. Historical: 1,054,947,168 @ 9d6b4ba
+##   (pre self-contained-node rebuild); 1,462,759,900 clean Phase-3. A
+##   regression shows up as a rise in this number.
 ##
 ## With no arg the binary instead runs a wall-clock loop (120k iters) — only
 ## a rough sanity check, NOT the gate. See [[nkdl_perf_profile]].

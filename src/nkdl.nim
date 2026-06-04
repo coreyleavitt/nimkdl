@@ -37,25 +37,34 @@
 ##
 ## | Operation | Entry point | Module |
 ## |-----------|-------------|--------|
-## | Parse text → AST | `parse(src) -> Result[KdlDoc, ParseError]` | `parser` |
-## | Multi-error parse | `parseAll(src) -> (doc, errors)` | `parser` |
-## | Typed decode | `decode[T](src) -> Result[T, ParseError]` | `codegen` |
-## | Multi-error typed decode | `decodeAll[T](src) -> (value, errors)` | `codegen` |
-## | Compile-time embed | `embed[T]("path")` | `codegen` |
-## | Encode AST → text | `encode(doc, mode = emPreserve) -> string` | `encode` |
-## | Typed-direct encode | `encode[T](v) -> Result[string, ParseError]` | `codegen` |
+## | Cat 1 — streaming events | `initStringCursor` + `advance` | `cursor` *(`import nkdl/cursor`)* |
+## | Cat 3 — parse text → DOM | `parse(src) -> Result[KdlDoc, ParseError]` | `parser` |
+## | Cat 3 — multi-error parse | `parseAll(src) -> (doc, errors)` | `parser` |
+## | Cat 3 — encode DOM → text | `encode(doc) -> string` *(canonical; `encode(doc, preserve = true)` is byte-lossless)* | `node_emit` |
+## | Cat 2 — typed decode | `decode[T](src) -> Result[T, ParseError]` | `api` |
+## | Cat 2 — multi-error decode | `decodeAll[T](src) -> (value, errors)` | `api` |
+## | Cat 2 — typed encode | `encode[T](v) -> Result[string, ParseError]` | `api` |
+## | Cat 2 — compile-time embed | `embed[T]("path")` | `api` |
 ## | Typed query DSL | `path(items, [pred].field.chain)` | `path` |
 ## | Differential oracle | `referenceInterpret(src)` | `grammar` |
 ##
 ## ## Pragmas
 ##
-## Type-level: ``{.kdlNode: "name".}``.
+## Complete reference: [docs/derive-reference.md](docs/derive-reference.md).
 ##
-## Field-level: ``{.kdlArg.}``, ``{.kdlProp.}``, ``{.kdlChild.}``,
-## ``{.kdlSkip.}``, ``{.kdlRename: "x".}``, ``{.kdlReserved: "ipv4".}``.
+## Type-level: ``{.kdlNode: "name".}``, ``{.kdlRenameAll: kc….}``,
+## ``{.kdlIgnoreUnknown.}``, ``{.kdlEncodeOnly.}`` / ``{.kdlDecodeOnly.}``,
+## ``{.kdlUntagged.}``.
+##
+## Field-level: ``{.kdlArg.}``, ``{.kdlVariadic.}``, ``{.kdlProp.}``,
+## ``{.kdlChild.}``, ``{.kdlScalar.}``, ``{.kdlRename: "x".}``,
+## ``{.kdlAlias("a", "b").}``, ``{.kdlReserved: "ipv4".}``, ``{.kdlSkip.}`` /
+## ``{.kdlSkipEncode.}`` / ``{.kdlSkipDecode.}``, ``{.kdlFlatten.}``.
 ##
 ## Native Nim 2.x field defaults (``field: type = expr``) double as
-## fallback values for absent KDL props.
+## fallback values for absent KDL props. Inherited fields (``object of Base``)
+## are included. Custom scalars use the ``kdlEncodeValue`` / ``kdlDecodeValue``
+## ``KdlValue`` hook pair (see the reference).
 ##
 ## ## See also
 ##
