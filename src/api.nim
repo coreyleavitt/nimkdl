@@ -326,6 +326,106 @@ proc decodeChild*[T](doc: KdlDoc, parent: KdlNode, childName: string):
     return err[T, ParseError](e.enriched(doc.lineMap, doc.sourcePath))
   decodeNode[T](doc, kid)
 
+func bigIntToFloat(v: KdlValue): float {.inline.} =
+  ## Widen a `kvBigInt` magnitude to `float`. Mirrors the derive/reserved legs
+  ## that treat any KDL integer as float-compatible (`validateF64` accepts
+  ## kvBigInt): KDL is a textual format and a 128-bit integer is a legitimate
+  ## (if lossy) float source. Magnitude is `(bigHi shl 64) or bigLo`; we build
+  ## it as `bigHi * 2^64 + bigLo` in float space (exact for the high/low split,
+  ## then rounded to nearest double as any int→float widening is).
+  const twoPow64 = 18446744073709551616.0  # 2^64
+  let mag = float(v.bigHi) * twoPow64 + float(v.bigLo)
+  if v.bigNegative: -mag else: mag
+
+func builtinScalarFromValue*[T](v: KdlValue): Result[T, ParseError]
+    {.noSideEffect, raises: [].} =
+  ## Single source of truth for the **value → built-in scalar** mapping
+  ## (rfc-consumer-api §4.6; review #7). Maps an already-materialized `KdlValue`
+  ## onto a built-in scalar `T` (`string`/`bool`/`int*`/`uint*`/`float*`/`enum`),
+  ## producing the canonical kind-match errors. `coerce`'s built-in branch routes
+  ## through here, so the kind-match predicate + message catalog have ONE home
+  ## and cannot drift from the value leg.
+  ##
+  ## This is the **value-level** twin of `derive_decode`'s token-level dispatch.
+  ## The two legs operate at different layers (tokens vs a materialized value) so
+  ## they legitimately stay separate dispatchers; this helper is the value leg's
+  ## sole authority and carries `kvBigInt` handling (review #5) so every
+  ## value-consumer agrees.
+  ##
+  ## Custom `{.kdlScalar.}` types (those with a `kdlDecodeValue` hook) are NOT
+  ## handled here — `coerce` routes those through the hook before reaching this
+  ## helper. This is built-ins only.
+  when T is enum:
+    if v.kind != kvString:
+      return err[T, ParseError](initError(peTypeMismatch, Span(),
+        "expected string value for enum"))
+    for e in low(T) .. high(T):
+      if $e == v.strVal:
+        return ok[T, ParseError](e)
+    return err[T, ParseError](initError(peTypeEnumInvalid, Span(),
+      "value does not match any enum variant"))
+  elif T is string:
+    if v.kind != kvString:
+      return err[T, ParseError](initError(peTypeMismatch, Span(),
+        "expected string value"))
+    return ok[T, ParseError](v.strVal)
+  elif T is bool:
+    if v.kind != kvBool:
+      return err[T, ParseError](initError(peTypeMismatch, Span(),
+        "expected bool value"))
+    return ok[T, ParseError](v.boolVal)
+  elif T is SomeFloat:
+    case v.kind
+    of kvFloat:  return ok[T, ParseError](T(v.floatVal))
+    of kvInt:    return ok[T, ParseError](T(v.intVal))      # int→float widening
+    of kvBigInt: return ok[T, ParseError](T(bigIntToFloat(v)))  # bigint→float (review #5)
+    else:
+      return err[T, ParseError](initError(peTypeMismatch, Span(),
+        "expected float value"))
+  elif T is SomeSignedInt:
+    case v.kind
+    of kvInt:
+      if v.intVal < low(T).int64 or v.intVal > high(T).int64:
+        return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
+          "integer value out of range for target type"))
+      return ok[T, ParseError](T(v.intVal))
+    of kvBigInt:
+      # A kvBigInt is produced only when a literal overflows int64; its
+      # magnitude is therefore outside the range of EVERY int64-bounded signed
+      # target (int8..int64). Honest overflow, NOT a kind mismatch (review #5).
+      return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
+        "integer value out of range for target type"))
+    else:
+      return err[T, ParseError](initError(peTypeMismatch, Span(),
+        "expected integer value"))
+  elif T is SomeUnsignedInt:
+    case v.kind
+    of kvInt:
+      if v.intVal < 0:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected unsigned (non-negative) integer"))
+      if uint64(v.intVal) > high(T).uint64:
+        return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
+          "integer value out of range for target type"))
+      return ok[T, ParseError](T(v.intVal))
+    of kvBigInt:
+      if v.bigNegative:
+        return err[T, ParseError](initError(peTypeMismatch, Span(),
+          "expected unsigned (non-negative) integer"))
+      # Non-negative bigint: fits target iff magnitude <= high(T). bigHi != 0
+      # means >= 2^64 > any uint64-bounded target; bigHi == 0 means magnitude
+      # is bigLo, fits iff bigLo <= high(T).
+      if v.bigHi == 0 and v.bigLo <= high(T).uint64:
+        return ok[T, ParseError](T(v.bigLo))
+      return err[T, ParseError](initError(peTypeIntegerOverflow, Span(),
+        "integer value out of range for target type"))
+    else:
+      return err[T, ParseError](initError(peTypeMismatch, Span(),
+        "expected unsigned integer value"))
+  else:
+    {.error: "builtinScalarFromValue[T]: unsupported scalar type '" & $T & "'. " &
+             "Supported: string/bool/int*/uint*/float*/enum.".}
+
 proc coerce*[T](val: KdlValue): Result[T, ParseError] {.noSideEffect, raises: [].} =
   ## Coerce a single `KdlValue` into a scalar `T` — the **value leg** of the
   ## typed bridge (rfc-consumer-api §4.6, V1): source→T (`decode`), node→T
@@ -363,47 +463,11 @@ proc coerce*[T](val: KdlValue): Result[T, ParseError] {.noSideEffect, raises: []
                "Use decodeNode[T](doc, node) for a DOM node, or decode[T](src) " &
                "for source text. (A custom scalar object needs a kdlDecodeValue " &
                "hook in scope.)".}
-    elif T is enum:
-      # Enum wire form is a string; match against each variant's `$` (honors
-      # `= "literal"` mappings, exactly like the derive enum path).
-      if val.kind != kvString:
-        return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected string value for enum"))
-      for e in low(T) .. high(T):
-        if $e == val.strVal:
-          return ok[T, ParseError](e)
-      return err[T, ParseError](initError(peTypeEnumInvalid, Span(),
-        "value does not match any enum variant"))
-    elif T is string:
-      if val.kind != kvString:
-        return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected string value"))
-      return ok[T, ParseError](val.strVal)
-    elif T is bool:
-      if val.kind != kvBool:
-        return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected bool value"))
-      return ok[T, ParseError](val.boolVal)
-    elif T is SomeFloat:
-      case val.kind
-      of kvFloat: return ok[T, ParseError](T(val.floatVal))
-      of kvInt:   return ok[T, ParseError](T(val.intVal))  # int→float widening
-      else:
-        return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected float value"))
-    elif T is SomeSignedInt:
-      if val.kind != kvInt:
-        return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected integer value"))
-      return ok[T, ParseError](T(val.intVal))
-    elif T is SomeUnsignedInt:
-      if val.kind != kvInt:
-        return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected unsigned integer value"))
-      if val.intVal < 0:
-        return err[T, ParseError](initError(peTypeMismatch, Span(),
-          "expected unsigned (non-negative) integer"))
-      return ok[T, ParseError](T(val.intVal))
+    elif T is (enum | string | bool | SomeFloat | SomeSignedInt | SomeUnsignedInt):
+      # Built-in scalar — single source of truth in `builtinScalarFromValue`
+      # (review #7): the kind-match predicate + message catalog + kvBigInt
+      # handling (review #5) live there, shared with any future value-consumer.
+      return builtinScalarFromValue[T](val)
     else:
       {.error: "coerce[T]: unsupported scalar type '" & $T & "'. Supported: " &
                "string/bool/int*/uint*/float*/enum, or a custom type with a " &

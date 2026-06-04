@@ -98,6 +98,16 @@ type
                            ## the failure is at the I/O boundary, before any
                            ## bytes reached the lexer. Consumed by `decodeFile`
                            ## (rfc-consumer-api C2).
+    peTypeIntegerOverflow  = 20  ## a numerically-valid integer value does not
+                           ## fit the target Nim integer type — e.g. a
+                           ## `kvBigInt` (magnitude > int64) coerced into an
+                           ## `int64`/`int8`, or any in-range value that
+                           ## overshoots the target width. Distinct from
+                           ## peTypeMismatch (a WRONG KIND — a string where an
+                           ## int was wanted): here the kind is right and the
+                           ## value is a real integer, it simply exceeds the
+                           ## destination's range. An honest out-of-range
+                           ## signal, not a kind error (review #5).
 
   ParseError* = object
     ## Structured error.
@@ -319,6 +329,7 @@ func codeMessage*(code: ParseErrorCode): string =
   of peOther:                "parse error"
   of peTypeNoVariantMatch:   "no untagged-variant branch matched the input"
   of peIOError:              "could not read source"
+  of peTypeIntegerOverflow:  "integer value out of range for target type"
 
 func lineSlice(source: string, line: int): string =
   if line < 1: return ""

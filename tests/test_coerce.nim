@@ -48,6 +48,61 @@ suite "coerce — built-in scalars":
     check r.isOk
     check r.get == 200'u8
 
+suite "coerce — kvBigInt (review #5)":
+
+  # A magnitude exceeding int64 — built via the real `newKdlBigInt` constructor
+  # (the same shape the parser emits when a literal overflows int64). Value here
+  # is 2^64 + 5 = 18446744073709551621 (bigHi=1, bigLo=5, positive).
+  let hugePos = newKdlBigInt(bigHi = 1'u64, bigLo = 5'u64, bigNegative = false)
+  # 2^64 (bigHi=1, bigLo=0) — fits in u128 reasoning but not any int64 target.
+  let twoPow64 = newKdlBigInt(bigHi = 1'u64, bigLo = 0'u64, bigNegative = false)
+
+  test "coerce[float] of a bigint widens (lossy but numeric)":
+    let r = coerce[float](twoPow64)
+    check r.isOk
+    check r.get == 18446744073709551616.0  # 2^64
+
+  test "coerce[float] of a negative bigint widens with sign":
+    let r = coerce[float](newKdlBigInt(1'u64, 0'u64, true))
+    check r.isOk
+    check r.get == -18446744073709551616.0
+
+  test "coerce[int64] of an out-of-int64 bigint → overflow (not kind mismatch)":
+    let r = coerce[int64](hugePos)
+    check r.isErr
+    check r.getErr.code == peTypeIntegerOverflow
+
+  test "coerce[int8] of a huge bigint → overflow (not kind mismatch)":
+    let r = coerce[int8](hugePos)
+    check r.isErr
+    check r.getErr.code == peTypeIntegerOverflow
+
+  test "coerce[uint64] of a bigint > uint64.max → overflow":
+    # bigHi != 0 ⇒ magnitude >= 2^64 > uint64.high
+    let r = coerce[uint64](hugePos)
+    check r.isErr
+    check r.getErr.code == peTypeIntegerOverflow
+
+  test "coerce[uint64] of a negative bigint → kind/sign mismatch (not overflow)":
+    let r = coerce[uint64](newKdlBigInt(0'u64, 1'u64, true))
+    check r.isErr
+    check r.getErr.code == peTypeMismatch
+
+  test "coerce[int8] of an in-range int → succeeds":
+    let r = coerce[int8](newKdlInt(100))
+    check r.isOk
+    check r.get == 100'i8
+
+  test "coerce[int8] of an out-of-range int → overflow (no RangeDefect)":
+    let r = coerce[int8](newKdlInt(200))
+    check r.isErr
+    check r.getErr.code == peTypeIntegerOverflow
+
+  test "coerce[uint8] of an out-of-range int → overflow":
+    let r = coerce[uint8](newKdlInt(300))
+    check r.isErr
+    check r.getErr.code == peTypeIntegerOverflow
+
 suite "coerce — enum scalar (allowed, not blocked by the guard)":
 
   type Mode = enum
