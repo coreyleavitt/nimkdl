@@ -8,6 +8,7 @@ import std/[options, unittest]
 
 import ../src/derive_encode
 import ../src/derive_decode  # S1 round-trip: encode → decode (re-exports cursor/lexer/spans)
+import ../src/derive_common  # S2a: splitWords / toKebab oracle
 import ../src/emitter
 import ../src/pragmas
 
@@ -629,3 +630,36 @@ suite "derive_encode — S1: kdlVariadic macro-error guards":
           tags {.kdlArg.}: seq[string]
         deriveEncode(Bad)
     ))
+
+suite "derive_encode — S2a: acronym-aware default node name (BREAKING)":
+
+  # End-to-end: a type with NO {.kdlNode.} falls back to acronym-aware
+  # kebab. Pre-S2a this emitted `httpserver`; now `http-server`.
+  type HTTPServer = object
+    name {.kdlArg.}: string
+
+  deriveEncode(HTTPServer)
+
+  test "HTTPServer (no kdlNode) emits node name http-server, not httpserver":
+    var v = HTTPServer(name: "web")
+    var e = newBufferEmitter()
+    kdlEncode(v, e)
+    check e.finish() == "http-server \"web\"\n"
+
+  test "splitWords / toKebab oracle table (S2a)":
+    static:
+      doAssert toKebab(splitWords("HTTPServer")) == "http-server"
+      doAssert toKebab(splitWords("MyService"))  == "my-service"
+      doAssert toKebab(splitWords("Service"))    == "service"
+      doAssert toKebab(splitWords("IOError"))    == "io-error"
+      doAssert toKebab(splitWords("A"))          == "a"
+      doAssert toKebab(splitWords("Service2"))   == "service2"
+
+  test "splitWords boundary cases (S2a engine)":
+    static:
+      doAssert splitWords("HTTPServer") == @["HTTP", "Server"]
+      doAssert splitWords("myService")  == @["my", "Service"]
+      doAssert splitWords("IOError")    == @["IO", "Error"]
+      doAssert splitWords("Service2")   == @["Service2"]
+      doAssert splitWords("A")          == @["A"]
+      doAssert splitWords("")           == newSeq[string]()

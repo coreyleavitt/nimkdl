@@ -80,8 +80,56 @@ proc isOptionType*(t: NimNode): bool {.inline.} =
   ## single source of truth for both derive directions.
   t.kind == nnkBracketExpr and t[0].eqIdent("Option")
 
+proc splitWords*(name: string): seq[string] =
+  ## Macro-time camelCase/PascalCase/acronym word splitter — the shared
+  ## engine behind the default-node-name fallback (S2a) and the
+  ## `kdlRenameAll` convention join (S2b). Pure; no allocation beyond the
+  ## result seq.
+  ##
+  ## Boundary rules (standard acronym-aware split):
+  ##  - before an uppercase that follows a lowercase or digit
+  ##    (`myService` → my|Service, `parseURL2x`… digit handled below);
+  ##  - before an uppercase that is followed by a lowercase when the
+  ##    preceding char is also uppercase — i.e. the last letter of an
+  ##    acronym run that actually begins the next word
+  ##    (`HTTPServer` → HTTP|Server, `IOError` → IO|Error);
+  ##  - digit runs stay glued to the preceding word
+  ##    (`Service2` → ["Service2"], not ["Service", "2"]).
+  ##
+  ## Non-letter/non-digit chars (e.g. `_`) act as hard separators and are
+  ## dropped; empty words are never emitted.
+  if name.len == 0: return
+  var cur = ""
+  template flush() =
+    if cur.len > 0:
+      result.add(cur)
+      cur = ""
+  for i in 0 ..< name.len:
+    let c = name[i]
+    if c notin {'A'..'Z', 'a'..'z', '0'..'9'}:
+      flush()
+      continue
+    if c in {'A'..'Z'} and cur.len > 0:
+      let prev = name[i-1]
+      let prevLower = prev in {'a'..'z', '0'..'9'}
+      let nextLower = i + 1 < name.len and name[i+1] in {'a'..'z'}
+      if prevLower or (prev in {'A'..'Z'} and nextLower):
+        # boundary: start a new word at this uppercase
+        flush()
+    cur.add(c)
+  flush()
+
+proc toKebab*(words: seq[string]): string =
+  ## Lowercase each word and join with '-'. Companion to `splitWords`.
+  for wi, w in words:
+    if wi > 0: result.add('-')
+    for c in w:
+      if c in {'A'..'Z'}: result.add(char(uint8(c) + 32))
+      else: result.add(c)
+
 proc nodeNameOf*(typeSym: NimNode): string =
-  ## Read `kdlNode: "name"` pragma or fall back to lowercased type name.
+  ## Read `kdlNode: "name"` pragma or fall back to the type name run through
+  ## acronym-aware word-split → kebab-case (`HTTPServer → http-server`; S2a).
   ## Type-level pragmas live on the TypeDef's pragma node (impl[0] if
   ## attached). `{.kdlNode: "name".}` parses as an ExprColonExpr inside the
   ## pragma list (the colon form is idiomatic); `{.kdlNode("name").}` would
@@ -97,10 +145,10 @@ proc nodeNameOf*(typeSym: NimNode): string =
          p.kind in {nnkCall, nnkExprColonExpr} and p.len >= 2 and
          p[1].kind == nnkStrLit:
         return p[1].strVal
-  result = $typeSym
-  for i in 0 ..< result.len:
-    if result[i] in {'A'..'Z'}:
-      result[i] = char(uint8(result[i]) + 32)
+  # S2a: acronym-aware word split → kebab. `HTTPServer → http-server`,
+  # `MyService → my-service`, `IOError → io-error` (was: lowercase every char,
+  # which produced `httpserver`). BREAKING for un-`kdlNode`'d multi-word types.
+  result = toKebab(splitWords($typeSym))
 
 proc objectRecList*(typeSym: NimNode): NimNode =
   ## Return the RecList of `typeSym`'s object (peeling one `ref`).
