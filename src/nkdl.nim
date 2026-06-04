@@ -43,7 +43,7 @@
 ## | Cat 3 — encode DOM → text | `encode(doc) -> string` *(canonical; `encode(doc, preserve = true)` is byte-lossless)* | `node_emit` |
 ## | Cat 2 — typed decode | `decode[T](src) -> Result[T, ParseError]` | `api` |
 ## | Cat 2 — multi-error decode | `decodeAll[T](src) -> (value, errors)` | `api` |
-## | Cat 2 — typed encode | `encode[T](v) -> Result[string, ParseError]` | `api` |
+## | Cat 2 — typed encode | `encode[T](v) -> string` | `api` |
 ## | Cat 2 — compile-time embed | `embed[T]("path")` | `api` |
 ## | Typed query DSL | `path(items, [pred].field.chain)` | `path` |
 ## | Differential oracle | `referenceInterpret(src)` | `grammar` |

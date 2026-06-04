@@ -60,7 +60,7 @@ proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect, raises: [].}
     if r.isErr: return err[T, ParseError](r.getErr)
     ok[T, ParseError](v)
 
-proc encode*[T](v: T): Result[string, ParseError] =
+proc encode*[T](v: T): string =
   # TODO(H1): fold under {.raises:[].} once emitter chain is triaged
   ## Encode `v` to KDL wire bytes.
   ##
@@ -68,24 +68,21 @@ proc encode*[T](v: T): Result[string, ParseError] =
   ## For `seq[U]` where U is `{.kdlNode.}`-tagged, emits one node per
   ## element.
   ##
-  ## ## Why Result-shaped
+  ## ## Why a bare string
   ##
-  ## Symmetric with `decode[T]`. Today the substrate's emitter trusts
-  ## the caller — `pushArgInt` / `pushArgString` / ... just append
-  ## bytes, no validation. So this proc currently always returns
-  ## `Ok(bytes)`. The structural commitment to a fallible-encode
-  ## signature is in place so that future validation cycles
-  ## (e.g. kdlReserved bounds: `(u8)-1` is semantically invalid)
-  ## can populate errors without a breaking API change. Picking
-  ## this over a bare `string` return resolved an open question in
-  ## docs/branch-rebuild-plan.md.
+  ## Encode is structurally total — the emitter just appends bytes from an
+  ## in-memory typed value, so no error can occur. The earlier
+  ## `Result[string, ParseError]` (kept "for symmetry with decode" / future
+  ## validation) was unjustified: it forced every call site through `.get`
+  ## for an error that cannot happen. Aligns with `encode(node)` /
+  ## `encode(doc)`, which are also bare strings.
   mixin kdlEncode
   var e = newBufferEmitter()
   when T is seq:
     for elem in v: kdlEncode(elem, e)
   else:
     kdlEncode(v, e)
-  ok[string, ParseError](e.finish())
+  e.finish()
 
 proc decodeAll*[T](src: string):
     tuple[value: T, errors: seq[ParseError]] {.noSideEffect, raises: [].} =

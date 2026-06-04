@@ -17,7 +17,7 @@ import ./value
 import ./emitter
 export emitter   # BufferEmitter, newBufferEmitter, finish
 
-proc emitNode(n: KdlNode, e: var BufferEmitter) =
+func emitNode(n: KdlNode, e: var BufferEmitter) =
   e.pushNodeBeginV(n.name, n.typeAnnotation)
   for entry in n.entries:
     case entry.kind
@@ -30,16 +30,25 @@ proc emitNode(n: KdlNode, e: var BufferEmitter) =
     e.pushChildrenEnd()
   e.pushNodeEnd()
 
-proc emitDoc*(doc: KdlDoc, e: var BufferEmitter) =
+func emitDoc*(doc: KdlDoc, e: var BufferEmitter) =
   ## Walk top-level nodes in source order, canonical mode.
   for n in doc.rootNodes:
     emitNode(n, e)
 
-proc encode*(doc: KdlDoc): string =
+func encode*(doc: KdlDoc): string =
   ## Canonical-encode a self-contained doc to KDL text. Total — emission is
   ## infallible given an in-memory tree.
   var e = newBufferEmitter()
   emitDoc(doc, e)
+  e.finish()
+
+func encode*(node: KdlNode): string =
+  ## Canonical-encode a single self-contained node to KDL text. Total and
+  ## VM-usable (the whole emit chain is `func`/`{.noSideEffect.}`), so it
+  ## works in `const`/`static:` context — the re-emit fallback path relies
+  ## on this. Emits the node, its entries, and its full child block.
+  var e = newBufferEmitter()
+  emitNode(node, e)
   e.finish()
 
 func nodeClean(n: KdlNode): bool =

@@ -61,7 +61,7 @@ suite "P4 — Cat 3 doc structural round-trip":
     with Settings(maxExamples: 200, testId: "p4-service")
     given name in strings(1, 32), port in integers(0, 65535)
     let v = Service(name: name, port: port)
-    let src = encode(v).get
+    let src = encode(v)
     let r = parse(src)
     ensure r.isOk
     let doc1 = r.get
@@ -83,7 +83,7 @@ suite "P5 — preserve byte-exact":
     # exactly 'whatever you parsed, you get back.'
     with Settings(maxExamples: 200, testId: "p5-service")
     given name in strings(1, 32), port in integers(0, 65535)
-    let src = encode(Service(name: name, port: port)).get
+    let src = encode(Service(name: name, port: port))
     let r = parse(src, preserveFormat = true)
     ensure r.isOk
     ensure encode(r.get, preserve = true) == src
@@ -248,7 +248,7 @@ suite "P4 — Cat 3 doc structural round-trip (continued)":
     var items: seq[Item] = @[]
     for ln in itemNames: items.add(Item(label: ln))
     let v = Catalog(name: catName, items: items)
-    let src = encode(v).get
+    let src = encode(v)
     let r = parse(src)
     ensure r.isOk
     let doc1 = r.get
