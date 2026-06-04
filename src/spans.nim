@@ -95,8 +95,19 @@ type
 
   ParseError* = object
     ## Structured error.
+    ##
+    ## Self-sufficient (rfc-consumer-api §4.4, gap B): `line`/`col`/`sourcePath`
+    ## are filled **eagerly** at the outermost public entry point (via
+    ## `enriched`) so the error is a value that outlives the source string —
+    ## `$err` renders a full `path:line:col` location with no source re-pass.
+    ## `Span` stays offset-only by design; (line, col) live on the *error*.
     code*: ParseErrorCode
     span*: Span
+    line*, col*: int
+      ## 1-based source coordinates. `0` until `enriched` fills them (the
+      ## source-less state produced by `initError` at the ~168 call sites).
+    sourcePath*: string
+      ## Source attribution (e.g. `"config.kdl"`). Empty until `enriched`.
     hint*: string
     fieldPath*: seq[string]
       ## Typed-decode field path, outermost-first (e.g. `@["server", "listen"]`
@@ -244,6 +255,28 @@ func withField*(e: ParseError, name: string): ParseError =
   result = e
   result.fieldPath.insert(name, 0)
 
+func enriched*(err: ParseError, sourceText: string, sourcePath: string):
+    ParseError {.raises: [].} =
+  ## Fill `line`/`col`/`sourcePath` once, at the outermost public entry point
+  ## (rfc-consumer-api §4.4 two-tier construction). `initError` keeps making a
+  ## source-less error; `enriched` computes coordinates from the error's span
+  ## offset against a freshly-built `LineMap` over `sourceText`. Error-path-only
+  ## cost. Must stay `{.raises:[].}` — it is reachable from the decode surface.
+  result = err
+  let lm = buildLineMap(sourceText)
+  let (line, col) = lm.lineColOf(err.span.offset)
+  result.line = line
+  result.col = col
+  result.sourcePath = sourcePath
+
+func rebased*(err: ParseError, delta: int): ParseError {.raises: [].} =
+  ## Return a copy whose span offset is shifted by `delta`. Used by N2 to turn
+  ## a slice-local error offset into an absolute offset in the owning doc's
+  ## source *before* `enriched` computes (line, col) — so coordinates reflect
+  ## the original file position, not the slice. Length is preserved.
+  result = err
+  result.span = initSpan(err.span.offset + delta, err.span.length)
+
 func codeMessage*(code: ParseErrorCode): string =
   case code
   of peLexUnexpectedChar:    "unexpected character"
@@ -313,6 +346,20 @@ func formatError*(err: ParseError, source: string, filename = ""): string =
     buf.add(" " & err.hint)
   buf.add("\n")
   buf
+
+func `$`*(err: ParseError): string {.raises: [].} =
+  ## Self-sufficient one-line rendering — no source argument needed
+  ## (rfc-consumer-api §4.4). Renders `path:line:col: <message> (<dotted
+  ## .fieldPath>)`, e.g. `config.kdl:14:5: expected int (daemon.server.listen)`.
+  ## The message text is the error's `hint` when present, else the code's
+  ## canonical message (matching `formatError`'s text without the caret block).
+  ## `line`/`col`/`sourcePath` come from a prior `enriched` call; an
+  ## un-enriched error renders `:0:0:` (the honest source-less state).
+  let location = err.sourcePath & ":" & $err.line & ":" & $err.col
+  let message = if err.hint.len > 0: err.hint else: codeMessage(err.code)
+  result = location & ": " & message
+  if err.fieldPath.len > 0:
+    result.add(" (" & err.fieldPath.join(".") & ")")
 
 
 # ---------------------------------------------------------------------------

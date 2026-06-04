@@ -180,3 +180,76 @@ suite "formatError diagnostic":
     let lines = rendered.splitLines()
     let caretLine = lines[^2]
     check caretLine.strip(chars = {' '}).endsWith("^")
+
+suite "ParseError enrichment (B1)":
+  test "initError leaves line/col/sourcePath at source-less defaults":
+    let e = initError(peParseExpected, pointSpan(initPosition(14)))
+    check e.line == 0
+    check e.col == 0
+    check e.sourcePath == ""
+
+  test "enriched fills line/col from span offset against source":
+    # offset 17 sits on line 3 of "abc\ndef\nghij..." (line starts: 0,4,8)
+    let src = "abc\ndef\nghijklmno\npqr"
+    let e = initError(peLexUnexpectedChar, pointSpan(initPosition(17)))
+    let en = e.enriched(src, "config.kdl")
+    check en.line == 3
+    check en.col == 10           # 17 - 8 + 1
+    check en.sourcePath == "config.kdl"
+
+  test "enriched preserves code, span, hint, fieldPath":
+    var e = initError(peTypeMismatch, initSpan(initPosition(2), initPosition(5)),
+                      "expected int")
+    e.fieldPath = @["server", "listen"]
+    let en = e.enriched("hello world", "x.kdl")
+    check en.code == peTypeMismatch
+    check en.span == initSpan(initPosition(2), initPosition(5))
+    check en.hint == "expected int"
+    check en.fieldPath == @["server", "listen"]
+
+suite "ParseError rebased (B1)":
+  test "rebased shifts span offset by delta, preserves length":
+    let e = initError(peParseUnexpected, initSpan(initPosition(3), initPosition(7)))
+    let rb = e.rebased(10)
+    check rb.span.offset == 13   # 3 + 10
+    check rb.span.length == 4    # preserved (7 - 3)
+    check rb.code == peParseUnexpected
+
+  test "rebased then enriched yields absolute file line/col":
+    # A slice-local error at offset 1; the slice starts at absolute offset 8
+    # in the full source. After rebasing by 8, enriched against the full
+    # source must report the position of byte 9 (line 3, col 2).
+    let fullSrc = "abc\ndef\nghijkl"   # line starts: 0, 4, 8
+    let sliceLocal = initError(peLexInvalidNumber, pointSpan(initPosition(1)))
+    let absolute = sliceLocal.rebased(8).enriched(fullSrc, "f.kdl")
+    check absolute.span.offset == 9
+    check absolute.line == 3
+    check absolute.col == 2       # 9 - 8 + 1
+    check absolute.sourcePath == "f.kdl"
+
+suite "ParseError $ (B1)":
+  test "renders path:line:col: hint (fieldpath) with no source arg":
+    var e = initError(peTypeMismatch, pointSpan(initPosition(0)), "expected int")
+    e.line = 14
+    e.col = 5
+    e.sourcePath = "config.kdl"
+    e.fieldPath = @["daemon", "server", "listen"]
+    check $e == "config.kdl:14:5: expected int (daemon.server.listen)"
+
+  test "omits parenthesized field path when empty":
+    var e = initError(peLexUnexpectedChar, pointSpan(initPosition(0)), "bad char")
+    e.line = 1
+    e.col = 12
+    e.sourcePath = "rules.kdl"
+    check $e == "rules.kdl:1:12: bad char"
+
+  test "falls back to code message when hint empty":
+    var e = initError(peParseExpected, pointSpan(initPosition(0)))
+    e.line = 2
+    e.col = 3
+    e.sourcePath = "a.kdl"
+    check $e == "a.kdl:2:3: " & codeMessage(peParseExpected)
+
+  test "un-enriched error renders source-less :0:0:":
+    let e = initError(peOther, pointSpan(initPosition(0)), "boom")
+    check $e == ":0:0: boom"

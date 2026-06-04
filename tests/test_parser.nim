@@ -367,6 +367,25 @@ suite "parser: error reporting":
       src.add("}\n")
     parseErrCheck(src, peParseDepthExceeded)
 
+suite "parser: error enrichment (B1)":
+  test "parse error carries line/col + sourcePath at the public boundary":
+    # Unterminated string on line 2, starting at col 1.
+    let src = "good 1\n\"unterminated"
+    let res = parse(src, "config.kdl")
+    check res.isErr
+    let e = res.getErr
+    check e.line == 2
+    check e.col == 1
+    check e.sourcePath == "config.kdl"
+    # $err is self-sufficient — no source re-pass needed.
+    check ($e).startsWith("config.kdl:2:1:")
+
+  test "default sourcePath flows through when omitted":
+    let res = parse("\"unterminated")
+    check res.isErr
+    check res.getErr.sourcePath == "<input>"
+    check res.getErr.line == 1
+
 suite "parser: number literal edges (C1, C2)":
   test "int64.high decodes":
     parseOk("v 9223372036854775807"):

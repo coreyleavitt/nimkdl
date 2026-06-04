@@ -90,6 +90,15 @@ suite "decode[T] — error propagation":
     let r = decode[Service]("service port=80")
     check r.isErr
 
+  test "decode error is enriched with line/col at the boundary (B1)":
+    # Bad value on line 2 → enriched error must carry real coordinates.
+    let r = decode[seq[Service]]("service \"web\" port=80\nservice \"api\" port=notanint")
+    check r.isErr
+    let e = r.getErr
+    check e.line == 2          # error is on the second line
+    check e.sourcePath == "<input>"
+    check e.col > 0
+
 suite "decodeAll[seq[T]] — multi-error":
 
   test "all-good input matches decode[seq[T]]":

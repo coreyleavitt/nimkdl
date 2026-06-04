@@ -45,19 +45,22 @@ proc decode*[T](src: string): Result[T, ParseError] {.noSideEffect, raises: [].}
   mixin kdlDecode
   var stream = lex(src)
   var c = initStringCursor(addr stream, src)
+  # Public boundary: enrich errors with line/col + sourcePath once, here, where
+  # `src` is in hand (rfc-consumer-api §4.4). `kdlDecode` produces source-less
+  # errors. `sourcePath` param lands in C1; default `"<input>"` until then.
   when T is seq:
     type Elem = typeof(default(T)[0])
     var values: T = @[]
     while c.peek.kind != ceEof:
       var elem: Elem
       let r = kdlDecode(elem, c)
-      if r.isErr: return err[T, ParseError](r.getErr)
+      if r.isErr: return err[T, ParseError](r.getErr.enriched(src, "<input>"))
       values.add(elem)
     ok[T, ParseError](values)
   else:
     var v: T
     let r = kdlDecode(v, c)
-    if r.isErr: return err[T, ParseError](r.getErr)
+    if r.isErr: return err[T, ParseError](r.getErr.enriched(src, "<input>"))
     ok[T, ParseError](v)
 
 proc encode*[T](v: T): string =
@@ -106,7 +109,8 @@ proc decodeAll*[T](src: string):
     var elem: Elem
     let r = kdlDecode(elem, c)
     if r.isErr:
-      errors.add(r.getErr)
+      # Public boundary: enrich with line/col + sourcePath (rfc §4.4).
+      errors.add(r.getErr.enriched(src, "<input>"))
       # kdlDecode may have left the cursor mid-node. Replay from the
       # checkpoint and skip the offending node so we land at the next
       # top-level boundary.

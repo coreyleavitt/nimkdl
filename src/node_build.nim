@@ -118,7 +118,13 @@ proc parseNodes*(source: string, sourcePath = "<input>"):
   ## `parser.parse()`.
   var stream = lex(source)
   var c = initStringCursor(addr stream, source)
-  buildNodeDoc(c, sourcePath)
+  # Public boundary: enrich the error with line/col + sourcePath once, here,
+  # where `source` is in hand (rfc-consumer-api §4.4). `buildNodeDoc` itself
+  # produces source-less errors (it only sees the cursor).
+  let r = buildNodeDoc(c, sourcePath)
+  if r.isErr:
+    return err[KdlDoc, ParseError](r.getErr.enriched(source, sourcePath))
+  r
 
 proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
     Parsed[KdlDoc] {.noSideEffect.} =
@@ -211,4 +217,8 @@ proc parseNodesAll*(source: string, sourcePath = "<input>"):
   ## `parser.parseAll()`.
   var stream = lex(source)
   var c = initStringCursor(addr stream, source, mode = cmAccumulating)
-  buildNodeDocAll(c, sourcePath)
+  # Public boundary: enrich every collected error with line/col + sourcePath
+  # once, here, where `source` is in hand (rfc-consumer-api §4.4).
+  result = buildNodeDocAll(c, sourcePath)
+  for i in 0 ..< result.errors.len:
+    result.errors[i] = result.errors[i].enriched(source, sourcePath)
