@@ -3,6 +3,7 @@
 // proptest is a dev/test dep pulled in via a local-path provenance
 // during the pre-publish development loop.
 name "nkdl"
+src_dir "src"
 
 deps {
     proptest local="../nimlibs/proptest"
