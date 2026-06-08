@@ -27,7 +27,7 @@ jobs:
       contents: read    # checkout
       packages: write   # push OCI artifact to GHCR
     with:
-      name: nimkdl
+      name: nkdl
       version: ${{ inputs.version || github.ref_name }}
       # Canary suffix triggers dry-run; real tags publish for real.
       dry-run: ${{ contains(inputs.version || github.ref_name, '-canary') }}
