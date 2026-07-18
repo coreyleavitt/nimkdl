@@ -34,6 +34,7 @@ task test, "Run unit tests":
   exec cmd & " tests/test_node_build_all.nim"
   exec cmd & " tests/test_node_emit.nim"
   exec cmd & " tests/test_node_preserve.nim"
+  exec cmd & " tests/test_node_edit.nim"
   exec cmd & " tests/test_node_span.nim"
   exec cmd & " tests/test_lexer.nim"
   exec cmd & " tests/test_presize.nim"

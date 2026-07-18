@@ -85,6 +85,7 @@ import ./pragmas
 import ./path
 import ./api
 import ./node_emit
+import ./node_edit
 import ./kdl_block
 # Note: ./lexer and ./typed_parser are NOT imported here on purpose.
 # Lexer keeps Token / TokenKind / Lexer / lex out of the `import nkdl`
@@ -118,6 +119,11 @@ export api
 # Cat 3 OUT — DOM → text. `encode(doc)` is canonical; `encode(doc, preserve)`
 # and `encode(doc, mode)` (EmitMode) are the byte-lossless-capable forms.
 export node_emit
+
+# Targeted single-node property preserve-splice — `setNodePropPreserving`, the
+# bounded single-node subset of the general #31 preserve engine. Byte-lossless
+# edit of one property on one named top-level node (config-toggle use case).
+export node_edit
 
 # kdl: block macro orchestrator — wraps a region of type
 # definitions and emits deriveEncode + deriveDecode for each
