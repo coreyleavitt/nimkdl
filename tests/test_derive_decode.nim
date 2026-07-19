@@ -1509,3 +1509,24 @@ suite "derive_decode — S9: untagged variants ({.kdlUntagged.})":
             b10 {.kdlProp.}: int
         deriveDecode(Big)
     ))
+
+suite "derive_decode — exported (*) fields (regression: fieldInfo strips export postfix)":
+  ## An exported field carries its name under an nnkPostfix (`foo*`); fieldInfo
+  ## used to render `$node` as "foo*" and emit `undeclared field: 'foo*'` in the
+  ## generated decoder. Every real-world config type exports its fields, yet no
+  ## prior decode test did — this pins the fix (derive_common.bareFieldName).
+  type SvExported {.kdlNode: "sv".} = object
+    host* {.kdlProp.}: string
+    port* {.kdlProp.}: int
+    enabled* {.kdlProp.}: bool
+
+  deriveDecode(SvExported)
+
+  test "exported props decode":
+    let f = mkCursor("sv host=\"a.b\" port=443 enabled=#true")
+    var s: SvExported
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.host == "a.b"
+    check s.port == 443
+    check s.enabled == true

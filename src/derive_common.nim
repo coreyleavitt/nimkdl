@@ -57,16 +57,25 @@ proc pragmaStrArgs*(pragmas: seq[NimNode], name: string): seq[string] =
         collect(p[i], result)
   result
 
+proc bareFieldName(n: NimNode): string =
+  ## Field identifier as a plain string, stripping the `*` export marker.
+  ## An exported field (`foo* {.p.}` or bare `foo*`) puts the name under an
+  ## `nnkPostfix(!*, foo)`; `$` on that node yields `"foo*"` (asterisk
+  ## included), which then gets re-identified as `foo*` and fails codegen
+  ## with `undeclared field: 'foo*'`. Take the inner ident for postfix nodes.
+  if n.kind == nnkPostfix: $n[1]
+  else: $n
+
 proc fieldInfo*(identDefs: NimNode, fieldIdx: int):
     tuple[name: string, pragmas: seq[NimNode]] =
   ## Read (name, pragmas) for the `fieldIdx`-th field of an IdentDefs.
   let fieldNameNode = identDefs[fieldIdx]
   if fieldNameNode.kind == nnkPragmaExpr:
-    result.name = $fieldNameNode[0]
+    result.name = bareFieldName(fieldNameNode[0])
     for p in fieldNameNode[1]:
       result.pragmas.add(p)
   else:
-    result.name = $fieldNameNode
+    result.name = bareFieldName(fieldNameNode)
 
 iterator regularFields*(recList: NimNode):
     tuple[name: string, typ: NimNode, pragmas: seq[NimNode], default: NimNode] =
