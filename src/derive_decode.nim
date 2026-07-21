@@ -93,6 +93,26 @@ proc enrichLeafErrors(n: NimNode, fnLit: NimNode) =
   for i in 0 ..< n.len:
     enrichLeafErrors(n[i], fnLit)
 
+proc normalizeEmptySeqDefaults(n: NimNode): NimNode =
+  ## Rewrite every empty array literal (`[]`, an `nnkBracket` with no children)
+  ## in `n` to `@[]`. Returns a fresh, transformed copy.
+  ##
+  ## Why: an S5 field default like `child {.kdlChild.}: T = T()` reaches this
+  ## macro as the TYPED node `getImpl` stored for it — Nim expands `T()` into an
+  ## explicit `ObjConstr` whose seq subfields are seeded with a bare `[]`
+  ## (`array[0..-1, empty]`). Splicing that node back into an assignment
+  ## (`v.child = T(items: [], ...)`) fails: `[]` does not coerce to `seq[string]`
+  ## in object-constructor field position (unlike a plain `var x: seq = []`).
+  ## `@[]` is the polymorphic empty seq and coerces to any seq element type, so
+  ## substituting it makes the re-spliced default type-check. (A genuinely-empty
+  ## fixed-size `array[0, X]` default is degenerate and effectively never used;
+  ## `@[]` is the correct normalization for the seq case this actually hits.)
+  if n.kind == nnkBracket and n.len == 0:
+    return newTree(nnkPrefix, ident("@"), newTree(nnkBracket))
+  result = copyNimNode(n)
+  for child in n:
+    result.add(normalizeEmptySeqDefaults(child))
+
 proc rewriteReturnsToBreak(n: NimNode, label: NimNode, resSym: NimNode): NimNode =
   ## S9: transform an attempt body that uses `return <Result-expr>` into one that
   ## assigns the result to `resSym` and `break <label>`s out of the attempt block,
@@ -470,8 +490,8 @@ macro deriveDecode*(T: typedesc): untyped =
     # arg slot is preserved (counter advances) via the `skipDecode` placeholder
     # below; a prop/child field with a routing pragma STAYS in its sink so its
     # wire key is still recognized-and-ignored under strict mode. A fully-skipped
-    # field with NO routing pragma and an un-inferable type (seq of primitives)
-    # is dropped at the inference leg below rather than erroring — see there.
+    # field with NO routing pragma is dropped outright by the guard just after
+    # `skipEncode` (it has no wire identity to recognize) — see there.
     let skipDecode = hasPragma(pragmas, "kdlSkipDecode") or
                      hasPragma(pragmas, "kdlSkip")
     # Whether encode also drops the field (so the wire never carries it). For a
@@ -481,6 +501,25 @@ macro deriveDecode*(T: typedesc): untyped =
     # (the wire has no such positional, so reserving a slot would eat a real arg).
     let skipEncode = hasPragma(pragmas, "kdlSkipEncode") or
                      hasPragma(pragmas, "kdlSkip")
+    # A field skipped in BOTH directions ({.kdlSkip.}) AND carrying no explicit
+    # routing pragma is entirely outside the KDL data model — never emitted,
+    # never read, and (having no wire key/name of its own) unrecognizable. Drop
+    # it from classification here rather than routing it through the type-
+    # inference leg below, which would otherwise either error ("cannot infer a
+    # KDL slot" for a seq[primitive]) or emit a needless child decode that
+    # references the field's type (breaking on a hand-populated object field
+    # like `toolSurface {.kdlSkip.}: ToolSurfaceCfg`). Common idiom: a seq or
+    # object hand-populated post-decode from child nodes derive can't route
+    # natively, with {.kdlIgnoreUnknown.} on the type to tolerate the wire
+    # child. This mirrors the encode side (which returns before its inference
+    # leg for skip fields). A full-skip field that DOES carry a routing pragma
+    # (kdlArg/kdlProp/kdlChild) is NOT dropped here — it keeps its existing
+    # recognized-and-ignored behavior under strict mode (kdlArg via its own
+    # drop below; kdlProp/kdlChild stay in their sink with skipDecode = true).
+    if skipDecode and skipEncode and
+       not (hasPragma(pragmas, "kdlArg") or hasPragma(pragmas, "kdlProp") or
+            hasPragma(pragmas, "kdlChild")):
+      return
     let isSeqField =
       fieldType.kind == nnkBracketExpr and fieldType[0].eqIdent("seq")
     # {.kdlVariadic.}: collects all remaining positional args into seq[T].
@@ -568,18 +607,6 @@ macro deriveDecode*(T: typedesc): untyped =
                          requiresUncheckedAssign: needsUnchecked,
                          default: fDefault, isBranchField: isBranchField,
                          skipDecode: skipDecode))
-        elif skipDecode and skipEncode:
-          # A fully-skipped ({.kdlSkip.}) seq[primitive] field is outside the
-          # KDL data model in both directions, so it needs no routable slot —
-          # drop it silently rather than demanding a routing pragma whose
-          # generated body would be a no-op. Common idiom: the seq is
-          # hand-populated post-decode from a child node's positional args
-          # (which derive can't route natively), so the type carries
-          # {.kdlIgnoreUnknown.} to tolerate that wire child. Encode already
-          # returns before this leg for skip fields; this restores the
-          # decode-side symmetry. (A skipDecode-ONLY or routed skip field is
-          # unaffected — this leg is only reached with no routing pragma.)
-          discard
         else:
           error("deriveDecode: cannot infer a KDL slot for seq field '" &
                 fieldName & "' of primitive elements — annotate it with " &
@@ -1176,7 +1203,7 @@ macro deriveDecode*(T: typedesc): untyped =
    for f in defaultedFields:
      let bit = newLit(1'u64 shl f.slot)
      let pathExpr = f.pathExpr
-     let defExpr = f.defaultExpr
+     let defExpr = normalizeEmptySeqDefaults(f.defaultExpr)
      defaultApply.add(quote do:
        if (`seenSym` and `bit`) == 0'u64:
          `pathExpr` = `defExpr`)

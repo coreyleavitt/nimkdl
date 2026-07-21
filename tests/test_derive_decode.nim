@@ -1101,6 +1101,32 @@ suite "derive_decode — S5: native field defaults":
         deriveDecode(BadDef)
     ))
 
+  # Regression: a {.kdlChild.}: T = T() default where T contains a seq field.
+  # Nim's typed AST for the `T()` default expands to an ObjConstr seeding the seq
+  # subfield with a bare `[]` (`array[0..-1, empty]`); splicing that back as
+  # `v.child = T(items: [], ...)` failed to type-check ([] doesn't coerce to
+  # seq[T] in objconstr field position). normalizeEmptySeqDefaults rewrites the
+  # empty [] to @[]. Every config type that nests an optional child block with a
+  # seq-bearing type hits this.
+  type SeqInner {.kdlNode: "inner".} = object
+    items {.kdlVariadic.}: seq[string]
+    prune {.kdlProp.}: bool = false
+  type SeqOuter {.kdlNode: "outer".} = object
+    inner {.kdlChild.}: SeqInner = SeqInner()   # absent ⇒ default applied
+    tag {.kdlProp.}: string = ""
+
+  deriveDecode(SeqInner)
+  deriveDecode(SeqOuter)
+
+  test "absent kdlChild with a T() default whose T has a seq field decodes":
+    let f = mkCursor("outer tag=\"t\"")   # inner absent ⇒ SeqInner() default
+    var v: SeqOuter
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.tag == "t"
+    check v.inner.items.len == 0
+    check v.inner.prune == false
+
 suite "derive_decode — S6: kdlAlias decode-only alternate keys":
 
   type Paint {.kdlNode: "paint".} = object
