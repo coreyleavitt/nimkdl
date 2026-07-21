@@ -268,10 +268,18 @@ proc emitTypedDecode(targetIdent: NimNode, tokIndexExpr: NimNode,
           " not yet supported (D1-D3 cover string/int/float/bool)")
     return newEmptyNode()
 
-macro deriveDecode*(T: typedesc): untyped =
+macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
   ## Emit `proc kdlDecode(v: var T; c: var StringCursor): Result[void, ParseError]`
   ## specialized to T's field shape. Pulls cursor events, dispatches
   ## each to the right field, returns success or the first error.
+  ##
+  ## `exported = true` marks the generated `kdlDecode` with `*`. Pass it when T
+  ## is a `{.kdlChild.}` (directly or transitively) of a type derived in ANOTHER
+  ## module: that parent's generated decoder emits a `kdlDecode(childType)` call
+  ## which only resolves if the child's `kdlDecode` crosses the module boundary.
+  ## Must be a TOP-LEVEL call — `*` is illegal on a symbol declared inside a
+  ## proc/suite/block scope (the default `false` keeps such nested derives, e.g.
+  ## in test files, legal).
   let typeSym = T.getTypeInst[1]
   let wireName = nodeNameOf(typeSym)
   # S2b: type-level {.kdlRenameAll: kcX.} convention string (e.g.
@@ -1367,8 +1375,15 @@ macro deriveDecode*(T: typedesc): untyped =
                          useTagged = hasVariant, theBranchProps = branchProps,
                          discPrologue = newStmtList())
 
+  # Exported (`*`) only when the caller opts in (see the macro doc): a
+  # {.kdlChild.} whose type is derived in a DIFFERENT module needs its kdlDecode
+  # visible across the boundary, but `*` is illegal on a block-scoped derive, so
+  # this stays opt-in and defaults to a module-private proc.
+  let procName =
+    if exported: nnkPostfix.newTree(ident("*"), ident("kdlDecode"))
+    else: newIdentNode("kdlDecode")
   result = newProc(
-    name = newIdentNode("kdlDecode"),
+    name = procName,
     params = @[
       newIdentDefs(ident("__unused_result"), newEmptyNode(),
                    newEmptyNode())  # placeholder; replaced below

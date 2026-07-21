@@ -12,6 +12,7 @@ import ../src/cursor
 import ../src/lexer
 import ../src/pragmas
 import ../src/spans
+import fixtures/xmod_child_decode   # XmodChild, derived with exported = true
 
 type CursorFixture = ref object
   stream*: ref TokenStream
@@ -1591,3 +1592,26 @@ suite "derive_decode — exported (*) fields (regression: fieldInfo strips expor
     check s.host == "a.b"
     check s.port == 443
     check s.enabled == true
+
+suite "derive_decode — cross-module export (regression: kdlChild of an imported type)":
+  ## A {.kdlChild.} whose type is defined and derived in ANOTHER module emits a
+  ## `kdlDecode(childType)` call inside the parent's generated decoder. That call
+  ## only resolves if the child's kdlDecode is exported across the module
+  ## boundary. `XmodChild` (tests/fixtures/xmod_child_decode.nim) is derived with
+  ## `exported = true`; before that option existed, the generated proc was always
+  ## module-private and any multi-module schema failed with "no candidate for
+  ## kdlDecode(v.child, c)". Parent is derived here inside the suite (block scope,
+  ## non-exported) — it is not composed cross-module, so it needs no export.
+  type XmodParent {.kdlNode: "parent".} = object
+    child {.kdlChild.}: XmodChild = XmodChild()
+    name {.kdlProp.}: string = ""
+
+  deriveDecode(XmodParent)
+
+  test "a parent composing an imported, exported-derived child decodes":
+    let f = mkCursor("parent name=\"p\" { child flag=#true }")
+    var v: XmodParent
+    let r = kdlDecode(v, f.cursor)
+    check r.isOk
+    check v.name == "p"
+    check v.child.flag == true

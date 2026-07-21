@@ -162,7 +162,7 @@ proc emitPropPush(pushBody: var NimNode, baseExpr: NimNode, eSym: NimNode,
     emitPropPushDirect(pushBody, eSym, keyLit, fullExpr, fieldType, annoLit,
                        scalar)
 
-macro deriveEncode*(T: typedesc): untyped =
+macro deriveEncode*(T: typedesc, exported: static bool = false): untyped =
   ## Emit `proc kdlEncode*(v: T; e: var BufferEmitter)` specialized to
   ## T's field shape. Each kdlArg field generates a direct typed push;
   ## kdlProp / kdlChild / annotation / variant handling lands in
@@ -470,12 +470,15 @@ macro deriveEncode*(T: typedesc): untyped =
     body.add newIfStmt((anyPresent, childBody))
   body.add quote do:
     `eSym`.pushNodeEnd()
-  # Emitted unexported because deriveEncode may be invoked inside a
-  # suite / block scope (e.g. test files) where `*` is illegal. Users
-  # wanting cross-module export wrap their type + deriveEncode call in
-  # their own module and re-export `kdlEncode` from there.
+  # Emitted unexported by default because deriveEncode may be invoked inside a
+  # suite / block scope (e.g. test files) where `*` is illegal. Pass
+  # `exported = true` on a TOP-LEVEL call when T is a cross-module {.kdlChild.}
+  # whose kdlEncode the parent's generated encoder must see.
+  let procName =
+    if exported: nnkPostfix.newTree(ident("*"), ident("kdlEncode"))
+    else: newIdentNode("kdlEncode")
   result = newProc(
-    name = newIdentNode("kdlEncode"),
+    name = procName,
     params = @[newEmptyNode(),
                newIdentDefs(vSym, typeSym),
                newIdentDefs(eSym, nnkVarTy.newTree(ident("BufferEmitter")))],
