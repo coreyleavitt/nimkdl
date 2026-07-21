@@ -1273,6 +1273,41 @@ suite "derive_decode — S7: directional skip (kdlSkipDecode)":
     check r.isOk
     check s.hidden == ""
 
+  # Regression: a bare {.kdlSkip.} on a seq[primitive] field must NOT require a
+  # companion routing pragma. A field skipped in both directions is outside the
+  # KDL data model, so its Nim type is irrelevant — classify used to fall
+  # through to the type-inference leg and error with "cannot infer a KDL slot
+  # for seq field ... of primitive elements", forcing a fake {.kdlProp.} whose
+  # generated body is a no-op. The seq-from-a-child's-args idiom (the field is
+  # hand-populated post-decode) is common in real config types; every prior S7
+  # test paired {.kdlSkip.} with an explicit routing pragma, hiding this.
+  type SkipSeqStr {.kdlNode: "ss", kdlIgnoreUnknown.} = object
+    name {.kdlProp.}: string
+    tags {.kdlSkip.}: seq[string]
+
+  deriveDecode(SkipSeqStr)
+
+  test "bare kdlSkip on seq[string] compiles and keeps the field at default":
+    let f = mkCursor("ss name=\"x\" { tags \"a\" \"b\" }")
+    var s: SkipSeqStr
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.name == "x"
+    check s.tags.len == 0          # never decoded; hand-populated by the caller
+
+  type SkipSeqTup {.kdlNode: "st", kdlIgnoreUnknown.} = object
+    name {.kdlProp.}: string
+    env {.kdlSkip.}: seq[(string, string)]
+
+  deriveDecode(SkipSeqTup)
+
+  test "bare kdlSkip on seq[(string,string)] compiles and keeps the field empty":
+    let f = mkCursor("st name=\"x\" { env key=\"v\" }")
+    var s: SkipSeqTup
+    let r = kdlDecode(s, f.cursor)
+    check r.isOk
+    check s.env.len == 0
+
 
 suite "derive_decode — S8a: kdlFlatten decode":
 

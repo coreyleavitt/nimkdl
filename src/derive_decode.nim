@@ -468,8 +468,10 @@ macro deriveDecode*(T: typedesc): untyped =
     # the field from the decode sinks — it is never read, keeps its Nim default
     # / native S5 default, and claims no required slot. For a kdlArg field the
     # arg slot is preserved (counter advances) via the `skipDecode` placeholder
-    # below; for prop/child/inferred fields we return early (keyed, so position
-    # is irrelevant).
+    # below; a prop/child field with a routing pragma STAYS in its sink so its
+    # wire key is still recognized-and-ignored under strict mode. A fully-skipped
+    # field with NO routing pragma and an un-inferable type (seq of primitives)
+    # is dropped at the inference leg below rather than erroring — see there.
     let skipDecode = hasPragma(pragmas, "kdlSkipDecode") or
                      hasPragma(pragmas, "kdlSkip")
     # Whether encode also drops the field (so the wire never carries it). For a
@@ -566,6 +568,18 @@ macro deriveDecode*(T: typedesc): untyped =
                          requiresUncheckedAssign: needsUnchecked,
                          default: fDefault, isBranchField: isBranchField,
                          skipDecode: skipDecode))
+        elif skipDecode and skipEncode:
+          # A fully-skipped ({.kdlSkip.}) seq[primitive] field is outside the
+          # KDL data model in both directions, so it needs no routable slot —
+          # drop it silently rather than demanding a routing pragma whose
+          # generated body would be a no-op. Common idiom: the seq is
+          # hand-populated post-decode from a child node's positional args
+          # (which derive can't route natively), so the type carries
+          # {.kdlIgnoreUnknown.} to tolerate that wire child. Encode already
+          # returns before this leg for skip fields; this restores the
+          # decode-side symmetry. (A skipDecode-ONLY or routed skip field is
+          # unaffected — this leg is only reached with no routing pragma.)
+          discard
         else:
           error("deriveDecode: cannot infer a KDL slot for seq field '" &
                 fieldName & "' of primitive elements — annotate it with " &
