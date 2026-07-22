@@ -6,12 +6,14 @@
 ## types with `bindSym` so it stays hygienic regardless of the importer.
 ##
 ## `competing_result` is a faithful stand-in for nim-results' colliding public
-## surface (Result type + the `ok`/`err` overload shapes). This suite failing to
-## COMPILE is the regression — the runtime asserts are a bonus.
+## surface (Result type + the `ok`/`err` overload shapes), and ALSO defines its
+## own `BufferEmitter`/`ParseError`/`StringCursor` — nkdl's own internal codegen
+## type names (F3/F12). This suite failing to COMPILE is the regression — the
+## runtime asserts are a bonus.
 
 import std/unittest
 import ../src/nkdl
-import fixtures/competing_result   # brings a SECOND `Result`/`ok`/`err` into scope
+import fixtures/competing_result   # brings competing Result/ok/err + BufferEmitter/ParseError/StringCursor into scope
 
 type
   Sidecar {.kdlNode: "hook".} = object
@@ -27,6 +29,8 @@ type
 
 deriveDecode(Sidecar)
 deriveDecode(Variant)
+deriveEncode(Sidecar)
+deriveEncode(Variant)
 
 suite "derive_decode — codegen hygiene against a competing Result":
 
@@ -47,3 +51,9 @@ suite "derive_decode — codegen hygiene against a competing Result":
     check r.get.label == "x"
     check r.get.kind == kB
     check r.get.weight == 9
+
+  test "the derived kdlEncode compiles and runs under a competing BufferEmitter":
+    # If deriveEncode emitted a bare `BufferEmitter`, this file would not compile.
+    var e = newBufferEmitter()
+    kdlEncode(Sidecar(interactive: true), e)
+    check e.finish().len > 0

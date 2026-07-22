@@ -481,7 +481,15 @@ macro deriveEncode*(T: typedesc, exported: static bool = false): untyped =
     name = procName,
     params = @[newEmptyNode(),
                newIdentDefs(vSym, typeSym),
-               newIdentDefs(eSym, nnkVarTy.newTree(ident("BufferEmitter")))],
+               # bindSym, not a bare ident: this is a TYPE position, and a
+               # bare `ident("BufferEmitter")` resolves in the CONSUMER's
+               # scope. A module that defines its own `BufferEmitter` (or
+               # imports one) would make this ambiguous. bindSym resolves to
+               # nkdl's own `emitter.BufferEmitter` at THIS macro-definition
+               # site, staying hygienic regardless of the consumer's imports
+               # (mirrors the Result/ParseError/StringCursor fix in
+               # derive_decode.nim).
+               newIdentDefs(eSym, nnkVarTy.newTree(bindSym("BufferEmitter")))],
     body = body,
     # H1 (rfc-consumer-api §4.5): emit `{.raises:[].}` on the generated
     # kdlEncode. Its body is nothing but calls into the now-`{.raises:[].}`
