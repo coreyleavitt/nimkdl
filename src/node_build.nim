@@ -11,6 +11,7 @@
 ## old `ast.KdlValue`) rejoin in later slices.
 
 import std/options
+import std/tables
 import ./value
 import ./node
 import ./cursor
@@ -19,6 +20,45 @@ import ./token_text
 import ./reserved
 import ./spans
 export node, value, spans  # spans: Result/ParseError accessors used on parseNodes' result
+
+proc dedupPropsLastWins(entries: var seq[KdlEntry]) =
+  ## F2: property keys can repeat on the wire; KDL 2.0 last-wins semantics
+  ## keep only the LAST occurrence of each key. The per-token incremental
+  ## form of this ("on each `ceProp`, rescan every earlier entry and delete
+  ## the same-key one") costs O(entries seen so far) PER property, so a node
+  ## with N props (duplicate or not — every token pays the full rescan) costs
+  ## O(N^2) — a crafted node with ~10^4 bogus props hangs the single-threaded
+  ## parser for minutes.
+  ##
+  ## This does the equivalent dedup in one O(n) pass over the finished node
+  ## instead: a Table lookup finds each key's LAST index, then a single
+  ## filtering pass keeps every argument and only each prop key's
+  ## last-occurrence entry, in original relative order. This reproduces the
+  ## incremental version's observable result exactly — the surviving entry's
+  ## POSITION is where its *last* occurrence was, not its first (verified: a
+  ## repeated key that lands the delete-then-append at the end is exactly
+  ## what "keep the last index, drop the rest" also produces) — while making
+  ## the property fast path O(1) amortized (a bare append) and dedup a single
+  ## O(n) pass at node-close instead of an O(n) rescan per token.
+  if entries.len == 0: return
+  var lastIdx = initTable[string, int]()
+  for i, e in entries:
+    if e.kind == keProperty:
+      lastIdx[e.propKey] = i
+  if lastIdx.len == entries.len: return  # no args, no duplicate keys → nothing to drop
+  var deduped = newSeqOfCap[KdlEntry](entries.len)
+  for i, e in entries:
+    case e.kind
+    of keArgument:
+      deduped.add(e)
+    of keProperty:
+      # getOrDefault, not `[]`: every key here was inserted into lastIdx above
+      # so the -1 branch never actually triggers, but `[]` can raise KeyError
+      # and would infect `parseNodes`'s raises signature for a case that
+      # cannot happen. getOrDefault is raises-free.
+      if lastIdx.getOrDefault(e.propKey, -1) == i:
+        deduped.add(e)
+  entries = deduped
 
 func nodeStartOffset(c: StringCursor, ev: CursorEvent): int {.inline.} =
   ## True byte offset of a node's first source character (rfc-consumer-api S1).
@@ -85,19 +125,18 @@ proc buildNodeDoc*(c: var StringCursor, sourcePath = "<input>"):
         let rcheck = validateReserved(annoStr, val, valTok.span)
         if rcheck.isErr: return err[KdlDoc, ParseError](rcheck.getErr)
       if stack.len > 0:
-        # Repeated prop keys: last-wins — drop any earlier entry with this key.
-        var i = 0
-        while i < stack[^1].entries.len:
-          let e = stack[^1].entries[i]
-          if e.kind == keProperty and e.propKey == key:
-            stack[^1].entries.delete(i)
-          else: inc i
+        # Repeated prop keys are last-wins (KDL 2.0 §Properties), but resolving
+        # that HERE, per token, would rescan the whole entries-so-far list on
+        # every prop (O(n^2) over a node with n props — F2). Just append; the
+        # single O(n) `dedupPropsLastWins` pass at ceNodeEnd resolves duplicates
+        # once, for the whole node.
         stack[^1].entries.add(newProperty(key, val))
     of ceChildrenBegin, ceChildrenEnd:
       discard  # node nesting handled by Begin/End node pairing
     of ceNodeEnd:
       if stack.len == 0: continue  # stray NodeEnd from cursor recovery
       let n = stack.pop()
+      dedupPropsLastWins(n.entries)
       n.span = initSpan(n.span.offset, ev.span.offset - n.span.offset)
       if stack.len == 0:
         doc.rootNodes.add(n)
@@ -185,18 +224,15 @@ proc buildNodeDocAll*(c: var StringCursor, sourcePath = "<input>"):
         if rcheck.isErr:
           result.errors.add(rcheck.getErr); continue
       if stack.len > 0:
-        var i = 0
-        while i < stack[^1].entries.len:
-          let e = stack[^1].entries[i]
-          if e.kind == keProperty and e.propKey == key:
-            stack[^1].entries.delete(i)
-          else: inc i
+        # See buildNodeDoc's ceProp handler (F2): append-only here, dedup once
+        # per node (O(n)) at ceNodeEnd rather than rescanning per token (O(n^2)).
         stack[^1].entries.add(newProperty(key, val))
     of ceChildrenBegin, ceChildrenEnd:
       discard
     of ceNodeEnd:
       if stack.len == 0: continue   # recovery dropped the open frame
       let n = stack.pop()
+      dedupPropsLastWins(n.entries)
       n.span = initSpan(n.span.offset, ev.span.offset - n.span.offset)
       if stack.len == 0:
         result.value.rootNodes.add(n)
