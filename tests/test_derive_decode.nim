@@ -393,6 +393,52 @@ suite "derive_decode — D8: variant (case object) discriminator dispatch":
     check d.kind == skCircle
     check d.radius == 2.5
 
+suite "derive_decode — D8b: variant-branch native (S5) defaults":
+
+  type TrigKind = enum
+    tkEvery = "every"
+    tkExec = "exec"
+
+  type TrigD {.kdlNode: "trigger".} = object
+    case kind {.kdlArg.}: TrigKind
+    of tkEvery:
+      discard
+    of tkExec:
+      command {.kdlProp.}: string                          # required
+      timeoutMs {.kdlProp, kdlRename: "timeout_ms".}: int = 5000
+      outMax {.kdlProp, kdlRename: "output_max_bytes".}: int = 4096
+
+  deriveDecode(TrigD)
+
+  test "branch prop with default absent from wire → default applied":
+    # Regression: a {.kdlProp.} carrying an S5 default (`= 5000`) inside a
+    # case-object branch used to decode to the type zero when absent, because
+    # tagged-branch props were given slot -1 (never seen-tracked) and were
+    # excluded from the default-apply loop with no per-branch replacement.
+    let f = mkCursor("trigger \"exec\" command=\"ls\"")
+    var t: TrigD
+    let res = kdlDecode(t, f.cursor)
+    check res.isOk
+    check t.kind == tkExec
+    check t.command == "ls"
+    check t.timeoutMs == 5000
+    check t.outMax == 4096
+
+  test "branch prop present on wire → wire value wins over default":
+    let f = mkCursor("trigger \"exec\" command=\"ls\" timeout_ms=100")
+    var t: TrigD
+    let res = kdlDecode(t, f.cursor)
+    check res.isOk
+    check t.timeoutMs == 100     # explicit wire value, not the 5000 default
+    check t.outMax == 4096       # this one still defaults
+
+  test "inactive branch is untouched by another branch's defaults":
+    let f = mkCursor("trigger \"every\"")
+    var t: TrigD
+    let res = kdlDecode(t, f.cursor)
+    check res.isOk
+    check t.kind == tkEvery      # decodes cleanly; no exec-branch write fires
+
 suite "derive_decode — D10: required-field bitmap":
 
   type Required10 {.kdlNode: "req".} = object
