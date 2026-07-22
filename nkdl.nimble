@@ -48,6 +48,7 @@ task test, "Run unit tests":
   exec cmd & " tests/test_conformance.nim"
   exec cmd & " tests/test_derive_encode.nim"
   exec cmd & " tests/test_derive_decode.nim"
+  exec cmd & " tests/test_derive_hygiene.nim"
   exec cmd & " tests/test_infer.nim"
   exec cmd & " tests/test_fieldpath.nim"
   exec cmd & " tests/test_roundtrip.nim"

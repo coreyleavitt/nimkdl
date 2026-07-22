@@ -1014,15 +1014,25 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
            initError(peTypeUnknownField, `evSym2`.span,
                      "unknown property"))
 
-   proc buildPropIf(fields: seq[PropField], slots: seq[int]): NimNode =
+   proc buildPropIf(fields: seq[PropField], slots: seq[int],
+                    onUnknown: NimNode = nil): NimNode =
      ## ≤8 fields → bytesEqLit if-elif chain (compiler-folded inline).
      ## >8 fields with no macro-time hash collisions → case-on-FNV-32
      ## dispatch with bytesEqLit confirmation per branch.
      ##
      ## bytesEqLit takes the literal directly (no lifted-let plumbing);
      ## the macro expands to per-byte compares the compiler folds.
+     ##
+     ## `onUnknown` (tagged variants): the node spliced where a key matches
+     ## NONE of `fields`. Default (nil) → `unknownProp()` (strict error /
+     ## ignore). A variant passes its per-branch prop `case` here so a key that
+     ## isn't a TOP-LEVEL prop falls through to the active branch's props before
+     ## being declared unknown. Copied per splice site (it may land in several
+     ## else positions on the hash path) to avoid a shared-node reuse.
+     proc unk(): NimNode =
+       if onUnknown != nil: copyNimTree(onUnknown) else: unknownProp()
      if fields.len == 0:
-       return unknownProp()
+       return unk()
      proc branchBodyFor(i: int): NimNode =
        # S7: a skipDecode prop is recognized (so it's not an unknown-field error)
        # but its value is consumed-and-ignored — the ceProp event is already past
@@ -1098,9 +1108,9 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
            newTree(nnkElifBranch,
              quote do: bytesEqLit(`cSym`, `evSym2`.propKeyTok, `keyLit`),
              decodeBlock),
-           newTree(nnkElse, unknownProp()))
+           newTree(nnkElse, unk()))
          caseStmt.add(newTree(nnkOfBranch, hLit, confirmed))
-       caseStmt.add(newTree(nnkElse, unknownProp()))
+       caseStmt.add(newTree(nnkElse, unk()))
        return caseStmt
      # Default: if-elif chain. Each field emits its canonical-key arm, then one
      # extra `bytesEqLit` arm per `kdlAlias` (S6) — all routing to the SAME
@@ -1114,7 +1124,7 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
          let aliasLit = newStrLitNode(alias)
          let aCond = quote do: bytesEqLit(`cSym`, `evSym2`.propKeyTok, `aliasLit`)
          ifNode.add(newNimNode(nnkElifBranch).add(aCond).add(branchBodyFor(i)))
-     ifNode.add(newNimNode(nnkElse).add(unknownProp()))
+     ifNode.add(newNimNode(nnkElse).add(unk()))
      ifNode
 
    var propDispatch = newStmtList()
@@ -1126,7 +1136,16 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        # apply below reads those bits. Non-defaulted props stay -1 (no-op mark).
        let perBranchIf = buildPropIf(props, branchPropSlots[i])
        caseStmt.add(newTree(nnkOfBranch, branchVal, perBranchIf))
-     propDispatch.add(caseStmt)
+     # TOP-LEVEL (non-branch) props on a variant — declared OUTSIDE any `of`
+     # branch (e.g. a `name` field before the `case`) — dispatch FIRST; a key
+     # that matches none of them falls through (`onUnknown`) to the active
+     # branch's prop `case`. Without this the top-level props were never
+     # dispatched at all (the whole prop path was just the branch case), so
+     # every non-branch prop errored as an unknown property and its required
+     # slot never set. `theProps` holds exactly the top-level props here
+     # (branch props live in `theBranchProps`); when empty, buildPropIf returns
+     # the branch case directly.
+     propDispatch.add(buildPropIf(theProps, propSlots, onUnknown = caseStmt))
    else:
      propDispatch.add(buildPropIf(theProps, propSlots))
 
@@ -1449,11 +1468,17 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
     body = body
   )
   # Re-build params with the correct shape (avoids fighting newProc's
-  # awkward result-type-as-first-param convention).
+  # awkward result-type-as-first-param convention). `Result`/`ParseError`/
+  # `StringCursor` are bound with `bindSym` (resolved to nkdl's own types at
+  # THIS macro-definition site) rather than emitted as bare idents: a bare
+  # `ident("Result")` resolves in the CONSUMER's scope, so a module that also
+  # imports `results`/chronos (which export their own `Result`) made the
+  # generated proc's return type ambiguous. bindSym makes the codegen hygienic
+  # regardless of the consumer's imports (restores lib/kdl parity).
   result.params = newTree(nnkFormalParams,
-    nnkBracketExpr.newTree(ident("Result"), ident("void"), ident("ParseError")),
+    nnkBracketExpr.newTree(bindSym("Result"), ident("void"), bindSym("ParseError")),
     newIdentDefs(vSym, nnkVarTy.newTree(typeSym)),
-    newIdentDefs(cSym, nnkVarTy.newTree(ident("StringCursor")))
+    newIdentDefs(cSym, nnkVarTy.newTree(bindSym("StringCursor")))
   )
   # noSideEffect lets the macro-emitted proc run in NimVM at compile
   # time. `embed[T](staticSrc)` uses this to materialize a `const T`

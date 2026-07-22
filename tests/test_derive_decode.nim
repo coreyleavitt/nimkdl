@@ -439,6 +439,49 @@ suite "derive_decode — D8b: variant-branch native (S5) defaults":
     check res.isOk
     check t.kind == tkEvery      # decodes cleanly; no exec-branch write fires
 
+suite "derive_decode — D8c: variant with TOP-LEVEL (non-branch) props":
+  ## A tagged variant may carry props declared OUTSIDE any `of` branch
+  ## (before the `case`). Regression: the tagged prop dispatch used to emit
+  ## ONLY the per-branch `case`, so a top-level prop errored as an unknown
+  ## property and its required slot was never set. It must dispatch top-level
+  ## props first, then fall through to the active branch's props.
+
+  type OracleKind = enum okCmd = "command", okDisc = "discrimination"
+  type OracleD {.kdlNode: "oracle".} = object
+    name {.kdlProp.}: string                 # top-level, required
+    case kind {.kdlArg.}: OracleKind
+    of okCmd:
+      command {.kdlProp.}: string
+    of okDisc:
+      oracleCmd {.kdlProp, kdlRename: "oracle_cmd".}: string
+      maxFaults {.kdlProp, kdlRename: "max_faults".}: int = 5
+
+  deriveDecode(OracleD)
+
+  test "top-level prop + branch prop both populate":
+    let f = mkCursor("oracle \"command\" name=\"n1\" command=\"grep foo\"")
+    var o: OracleD
+    let res = kdlDecode(o, f.cursor)
+    check res.isOk
+    check o.name == "n1"
+    check o.kind == okCmd
+    check o.command == "grep foo"
+
+  test "other branch: top-level prop + renamed branch prop + branch default":
+    let f = mkCursor("oracle \"discrimination\" name=\"n2\" oracle_cmd=\"./dev test\"")
+    var o: OracleD
+    let res = kdlDecode(o, f.cursor)
+    check res.isOk
+    check o.name == "n2"
+    check o.oracleCmd == "./dev test"
+    check o.maxFaults == 5          # branch default applies (D8b path)
+
+  test "a missing top-level required prop errors (its slot is now tracked)":
+    let f = mkCursor("oracle \"command\" command=\"x\"")   # no name=
+    var o: OracleD
+    let res = kdlDecode(o, f.cursor)
+    check res.isErr
+
 suite "derive_decode — D10: required-field bitmap":
 
   type Required10 {.kdlNode: "req".} = object
