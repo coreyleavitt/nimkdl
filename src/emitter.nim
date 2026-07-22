@@ -275,6 +275,19 @@ func appendString(e: var BufferEmitter, s: openArray[char]) =
   ## pushPropString paths. Identical to appendQuotedString.
   e.appendQuotedString(s)
 
+func encodeKdlString*(s: string): string =
+  ## Encode `s` as a valid double-quoted KDL v2 string literal (surrounding
+  ## quotes INCLUDED), escaping ONLY what KDL requires — `\\`, `\"`, the named
+  ## whitespace escapes (`\n \r \t \b \f`), and `\u{XX}` for other control
+  ## bytes; every other byte passes through verbatim. Round-trip stable:
+  ## re-parsing the result yields back `s`. Use this — not `std/strutils.escape`
+  ## (which emits Nim escapes like `\'` that the KDL lexer rejects) — when
+  ## splicing an arbitrary value into hand-written KDL text. `func`, so it is
+  ## usable in `const`/`static:` context.
+  var e = newBufferEmitter()
+  e.appendQuotedString(s)
+  e.finish()
+
 func appendFloat(e: var BufferEmitter, v: float64) {.inline.} =
   ## Routes through `numlit.formatFloat` — single source of truth for
   ## float → wire bytes, symmetric with `decodeFloatFromToken`. The

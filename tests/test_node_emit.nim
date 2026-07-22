@@ -84,3 +84,29 @@ suite "node_emit — round-trip over kdl-org corpus":
       checkpoint("round-trip failures (" & $bad.len & "): " & bad.join("  |  "))
     check checked > 150
     check bad.len == 0
+
+suite "node_emit — encodeKdlString (public string-quoting helper)":
+  ## encodeKdlString wraps the emitter's appendQuotedString as a standalone
+  ## public helper (RFC-0032 C6): amoxtli splices arbitrary values into
+  ## hand-written KDL config text and needs KDL-correct escaping (NOT
+  ## std/strutils.escape, which emits Nim escapes the KDL lexer rejects).
+
+  test "plain string gets surrounding quotes, no escapes":
+    check encodeKdlString("hello") == "\"hello\""
+
+  test "KDL-required escapes only":
+    check encodeKdlString("a\"b\\c\nd\te") == "\"a\\\"b\\\\c\\nd\\te\""
+
+  test "control byte becomes \\u{XX}":
+    check encodeKdlString("\x01") == "\"\\u{1}\""
+
+  test "round-trips: parsing the result back yields the original arg":
+    for s in ["", "plain", "sp ace", "q\"q", "back\\slash", "tab\tnl\n",
+              "unicode λ ✓", "ctrl\x07here"]:
+      let doc = parseNodes("node " & encodeKdlString(s))
+      check doc.isOk
+      check doc.get.rootNodes[0].entries[0].argValue.strVal == s
+
+  test "usable in const / static context (func, VM-safe)":
+    const q = encodeKdlString("compile\ttime")
+    check q == "\"compile\\ttime\""
