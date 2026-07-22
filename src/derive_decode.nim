@@ -794,6 +794,18 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
    # optional fields get slot -1 and would misalign a declaration-indexed array).
    # Post-decode: for each, if its slot bit stayed unset, splice the default.
    var defaultedFields: seq[tuple[slot: int, pathExpr: NimNode, defaultExpr: NimNode]]
+   # F6: defaulted BRANCH fields that flow into theArgs/theProps/theChildren
+   # directly (this only happens for an UNTAGGED variant attempt — each
+   # buildNodeBody call there is built for exactly ONE branch, via
+   # `theArgs/theProps/theChildren = <top-level> & <this branch's fields>`,
+   # unlike the tagged path where branch props stay out of theProps entirely
+   # and are dispatched separately through theBranchProps/branchDefaultApply
+   # below). Kept separate from `defaultedFields` because a tagged variant's
+   # branch fields must NOT default-apply outside a `case v.disc` guard (an
+   # inactive branch would get corrupted); an untagged attempt has no such
+   # risk — only the one branch under attempt is ever present — so its
+   # defaults can apply unconditionally, same as a plain top-level field.
+   var branchDefaultedFields: seq[tuple[slot: int, pathExpr: NimNode, defaultExpr: NimNode]]
    proc claimSlot(required: bool): int =
      if nextSlot >= 64:
        # The bitmap is a uint64; slots past 63 would silently lose their bit
@@ -831,7 +843,10 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        if hasDefault(af.default):
          let s = claimSlot(required = false)
          argSlots.add(s)
-         if not af.isBranchField:
+         if af.isBranchField:
+           branchDefaultedFields.add((slot: s, pathExpr: af.pathExpr,
+                                      defaultExpr: af.default))
+         else:
            defaultedFields.add((slot: s, pathExpr: af.pathExpr,
                                 defaultExpr: af.default))
        else:
@@ -841,7 +856,10 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
      elif hasDefault(af.default):
        let s = claimSlot(required = false)
        argSlots.add(s)
-       if not af.isBranchField:
+       if af.isBranchField:
+         branchDefaultedFields.add((slot: s, pathExpr: af.pathExpr,
+                                    defaultExpr: af.default))
+       else:
          defaultedFields.add((slot: s, pathExpr: af.pathExpr,
                               defaultExpr: af.default))
      else:
@@ -854,7 +872,10 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        if hasDefault(pf.default):
          let s = claimSlot(required = false)
          propSlots.add(s)
-         if not pf.isBranchField:
+         if pf.isBranchField:
+           branchDefaultedFields.add((slot: s, pathExpr: pf.pathExpr,
+                                      defaultExpr: pf.default))
+         else:
            defaultedFields.add((slot: s, pathExpr: pf.pathExpr,
                                 defaultExpr: pf.default))
        else:
@@ -864,7 +885,10 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
      elif hasDefault(pf.default):
        let s = claimSlot(required = false)
        propSlots.add(s)
-       if not pf.isBranchField:
+       if pf.isBranchField:
+         branchDefaultedFields.add((slot: s, pathExpr: pf.pathExpr,
+                                    defaultExpr: pf.default))
+       else:
          defaultedFields.add((slot: s, pathExpr: pf.pathExpr,
                               defaultExpr: pf.default))
      else:
@@ -877,7 +901,10 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        if hasDefault(cf.default):
          let s = claimSlot(required = false)
          childSlots.add(s)
-         if not cf.isBranchField:
+         if cf.isBranchField:
+           branchDefaultedFields.add((slot: s, pathExpr: cf.pathExpr,
+                                      defaultExpr: cf.default))
+         else:
            defaultedFields.add((slot: s, pathExpr: cf.pathExpr,
                                 defaultExpr: cf.default))
        else:
@@ -887,7 +914,10 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
      elif hasDefault(cf.default):
        let s = claimSlot(required = false)
        childSlots.add(s)
-       if not cf.isBranchField:
+       if cf.isBranchField:
+         branchDefaultedFields.add((slot: s, pathExpr: cf.pathExpr,
+                                    defaultExpr: cf.default))
+       else:
          defaultedFields.add((slot: s, pathExpr: cf.pathExpr,
                               defaultExpr: cf.default))
      else:
@@ -1261,6 +1291,21 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        if (`seenSym` and `bit`) == 0'u64:
          `pathExpr` = `defExpr`)
 
+   # F6 (S9 untagged variant): apply native defaults to THIS attempt's own
+   # branch fields absent from the wire. Unlike the tagged case below, no
+   # `case v.disc` guard is needed — an untagged attempt's buildNodeBody call
+   # is built for exactly one branch (see `branchDefaultedFields` above), so
+   # every entry here belongs to the branch currently being decoded. Mirrors
+   # `defaultApply` exactly, just over the branch-local subset.
+   var branchOwnDefaultApply = newStmtList()
+   for f in branchDefaultedFields:
+     let bit = newLit(1'u64 shl f.slot)
+     let pathExpr = f.pathExpr
+     let defExpr = normalizeEmptySeqDefaults(f.defaultExpr)
+     branchOwnDefaultApply.add(quote do:
+       if (`seenSym` and `bit`) == 0'u64:
+         `pathExpr` = `defExpr`)
+
    # S5 (tagged variant): apply native defaults to the ACTIVE branch's props
    # that were absent from the wire. A single `case v.disc` guards the writes so
    # only the live branch's fields are touched (assigning an inactive branch's
@@ -1397,9 +1442,11 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        # passes, so ordering matches the spec (defaults never mask a missing
        # required field). `branchDefaultApply` does the same for the active
        # tagged-variant branch's props (empty for non-variant / no-branch-default
-       # types).
+       # types); `branchOwnDefaultApply` does the same for an untagged
+       # attempt's own branch fields (F6; empty outside an untagged attempt).
        `defaultApply`
        `branchDefaultApply`
+       `branchOwnDefaultApply`
        return ok(void, ParseError)
 
   # Select the decode body. Plain + tagged variants build it once; an UNTAGGED

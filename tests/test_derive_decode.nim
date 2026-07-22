@@ -1661,6 +1661,64 @@ suite "derive_decode — S9: untagged variants ({.kdlUntagged.})":
         deriveDecode(Big)
     ))
 
+suite "derive_decode — D8d: untagged-variant branch native (S5) defaults":
+  ## Regression (F6): `951bc25` added branch-default application for TAGGED
+  ## variants (`branchDefaultApply`) but gated it `if useTagged:` — an
+  ## {.kdlUntagged.} branch prop carrying a native `= default` still decoded
+  ## to the type's zero value when absent from the wire, because each
+  ## untagged attempt's own `buildNodeBody` call excluded branch fields from
+  ## `defaultedFields` (the top-level-only default-apply loop) with no
+  ## per-branch replacement — unlike the tagged path, no replacement existed
+  ## for untagged at all.
+
+  type UKind = enum ukText = "text", ukNum = "num"
+  type Untagged {.kdlNode: "u", kdlUntagged.} = object
+    case kind: UKind
+    of ukText:
+      text {.kdlProp.}: string
+      weight {.kdlProp.}: int = 42
+    of ukNum:
+      num {.kdlProp.}: int
+      scale {.kdlProp.}: int = 100
+
+  deriveDecode(Untagged)
+
+  test "untagged branch prop with default absent from wire → default applied":
+    let f = mkCursor("u text=\"hi\"")
+    var u: Untagged
+    let r = kdlDecode(u, f.cursor)
+    check r.isOk
+    check u.kind == ukText
+    check u.text == "hi"
+    check u.weight == 42
+
+  test "untagged branch prop present on wire → wire value wins over default":
+    let f = mkCursor("u text=\"hi\" weight=9")
+    var u: Untagged
+    let r = kdlDecode(u, f.cursor)
+    check r.isOk
+    check u.kind == ukText
+    check u.text == "hi"
+    check u.weight == 9
+
+  test "second untagged branch has its own independently-defaulted prop":
+    let f = mkCursor("u num=7")
+    var u: Untagged
+    let r = kdlDecode(u, f.cursor)
+    check r.isOk
+    check u.kind == ukNum
+    check u.num == 7
+    check u.scale == 100
+
+  test "second untagged branch: wire value wins over its own default":
+    let f = mkCursor("u num=7 scale=3")
+    var u: Untagged
+    let r = kdlDecode(u, f.cursor)
+    check r.isOk
+    check u.kind == ukNum
+    check u.num == 7
+    check u.scale == 3
+
 suite "derive_decode — exported (*) fields (regression: fieldInfo strips export postfix)":
   ## An exported field carries its name under an nnkPostfix (`foo*`); fieldInfo
   ## used to render `$node` as "foo*" and emit `undeclared field: 'foo*'` in the
