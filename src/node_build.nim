@@ -42,10 +42,12 @@ proc dedupPropsLastWins(entries: var seq[KdlEntry]) =
   ## O(n) pass at node-close instead of an O(n) rescan per token.
   if entries.len == 0: return
   var lastIdx = initTable[string, int]()
+  var propCount = 0
   for i, e in entries:
     if e.kind == keProperty:
+      inc propCount
       lastIdx[e.propKey] = i
-  if lastIdx.len == entries.len: return  # no args, no duplicate keys → nothing to drop
+  if lastIdx.len == propCount: return  # every prop key distinct → nothing to drop
   var deduped = newSeqOfCap[KdlEntry](entries.len)
   for i, e in entries:
     case e.kind
