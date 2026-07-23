@@ -1338,6 +1338,22 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        branchCase.add(newTree(nnkElse, newStmtList(newNimNode(nnkDiscardStmt).add(newEmptyNode()))))
        branchDefaultApply.add(branchCase)
 
+   # A type with zero kdlArg fields (e.g. props-only) degenerates `argCase`
+   # to a bare `else: return err(...)` with no `of` branches — every path
+   # through it returns, so the `inc argIdxSym` that would otherwise follow
+   # is unreachable and the Nim compiler flags it (Warning: unreachable code
+   # after 'return') in the GENERATED code, which downstream consumers see
+   # but can't fix themselves. `argIdxSym` is write-only outside `argCase`
+   # (only ever read as the case discriminant), so omitting the increment
+   # here is observably identical — just emit it only when `argCase` has at
+   # least one real `of` branch to fall through from. Built as a single
+   # combined statement list (rather than spliced as two separate backtick
+   # positions) so the omitted-increment case leaves no trailing empty node
+   # behind for the compiler to still flag as unreachable.
+   var argBranchBody = newStmtList(argCase)
+   if theArgs.len > 0:
+     argBranchBody.add(quote do: inc `argIdxSym`)
+
    result = quote do:
      block:
        var `seenSym`: uint64 = 0
@@ -1376,8 +1392,7 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
            continue
          case `evSym2`.kind
          of ceArg:
-           `argCase`
-           inc `argIdxSym`
+           `argBranchBody`
          of ceProp:
            `propDispatch`
          of ceSlashdashBegin:
