@@ -958,6 +958,26 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
        quote do:
          `seenSym` = `seenSym` or `bit`
 
+   # S5/F6: shared "for each defaulted field, if its slot bit never got set
+   # during decode, splice the native default" codegen. One StmtList entry per
+   # field, in order. Every call site that applies native defaults — the
+   # top-level pass (`defaultedFields`), the untagged-variant attempt's own
+   # branch fields (F6's `branchDefaultedFields`), and each tagged-variant
+   # branch's props (`branchDefaultApply`, which pre-filters to only that
+   # branch's defaulted props before calling this) — goes through this one
+   # helper so the three can't drift out of sync with each other.
+   proc buildDefaultApplyStmts(
+       fields: seq[tuple[slot: int, pathExpr: NimNode, defaultExpr: NimNode]]):
+       NimNode =
+     result = newStmtList()
+     for f in fields:
+       let bit = newLit(1'u64 shl f.slot)
+       let pathExpr = f.pathExpr
+       let defExpr = normalizeEmptySeqDefaults(f.defaultExpr)
+       result.add(quote do:
+         if (`seenSym` and `bit`) == 0'u64:
+           `pathExpr` = `defExpr`)
+
    # Build the per-arg dispatch.
    var argCase = newTree(nnkCaseStmt, argIdxSym)
    for i, af in theArgs:
@@ -1282,14 +1302,7 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
    # SLOT (each field's own bit), AFTER the required-validation returns (so a
    # genuinely-missing required field still errors first). Branch fields are
    # excluded (assigning an inactive branch's field corrupts the object).
-   var defaultApply = newStmtList()
-   for f in defaultedFields:
-     let bit = newLit(1'u64 shl f.slot)
-     let pathExpr = f.pathExpr
-     let defExpr = normalizeEmptySeqDefaults(f.defaultExpr)
-     defaultApply.add(quote do:
-       if (`seenSym` and `bit`) == 0'u64:
-         `pathExpr` = `defExpr`)
+   let defaultApply = buildDefaultApplyStmts(defaultedFields)
 
    # F6 (S9 untagged variant): apply native defaults to THIS attempt's own
    # branch fields absent from the wire. Unlike the tagged case below, no
@@ -1297,37 +1310,27 @@ macro deriveDecode*(T: typedesc, exported: static bool = false): untyped =
    # is built for exactly one branch (see `branchDefaultedFields` above), so
    # every entry here belongs to the branch currently being decoded. Mirrors
    # `defaultApply` exactly, just over the branch-local subset.
-   var branchOwnDefaultApply = newStmtList()
-   for f in branchDefaultedFields:
-     let bit = newLit(1'u64 shl f.slot)
-     let pathExpr = f.pathExpr
-     let defExpr = normalizeEmptySeqDefaults(f.defaultExpr)
-     branchOwnDefaultApply.add(quote do:
-       if (`seenSym` and `bit`) == 0'u64:
-         `pathExpr` = `defExpr`)
+   let branchOwnDefaultApply = buildDefaultApplyStmts(branchDefaultedFields)
 
    # S5 (tagged variant): apply native defaults to the ACTIVE branch's props
    # that were absent from the wire. A single `case v.disc` guards the writes so
    # only the live branch's fields are touched (assigning an inactive branch's
-   # field is undefined). Each of-branch mirrors `defaultApply` but is gated by
-   # the discriminator, using the branch's own seen-tracked slots. Branches
-   # without any defaulted prop are omitted; the trailing `else` makes the case
-   # exhaustive over the discriminator enum.
+   # field is undefined). Each of-branch mirrors `defaultApply` (same
+   # `buildDefaultApplyStmts` helper, pre-filtered to that branch's own
+   # defaulted props) but is gated by the discriminator, using the branch's
+   # own seen-tracked slots. Branches without any defaulted prop are omitted;
+   # the trailing `else` makes the case exhaustive over the discriminator enum.
    var branchDefaultApply = newStmtList()
    if useTagged:
      var branchCase = newTree(nnkCaseStmt, newDotExpr(vSym, discIdent))
      var anyBranchDefault = false
      for i, (branchVal, props) in theBranchProps:
-       var body = newStmtList()
+       var defaulted: seq[tuple[slot: int, pathExpr: NimNode, defaultExpr: NimNode]]
        for pi, pf in props:
          let slot = branchPropSlots[i][pi]
          if slot >= 0:
-           let bit = newLit(1'u64 shl slot)
-           let pathExpr = pf.pathExpr
-           let defExpr = normalizeEmptySeqDefaults(pf.default)
-           body.add(quote do:
-             if (`seenSym` and `bit`) == 0'u64:
-               `pathExpr` = `defExpr`)
+           defaulted.add((slot: slot, pathExpr: pf.pathExpr, defaultExpr: pf.default))
+       let body = buildDefaultApplyStmts(defaulted)
        if body.len > 0:
          anyBranchDefault = true
          branchCase.add(newTree(nnkOfBranch, branchVal, body))
